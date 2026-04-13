@@ -259,6 +259,12 @@ class IntercomBroker {
       case "presence": {
         const session = this.sessions.get(currentId);
         if (session) {
+          if (clientMessage.name !== undefined) {
+            if (typeof clientMessage.name !== "string") {
+              throw new Error("Invalid presence name");
+            }
+            session.info.name = clientMessage.name;
+          }
           if (clientMessage.status !== undefined) {
             if (typeof clientMessage.status !== "string") {
               throw new Error("Invalid presence status");

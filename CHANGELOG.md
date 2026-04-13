@@ -9,6 +9,11 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ### Changed
 - Added `pi-package` package metadata and peer dependency declarations for Pi runtime packages used by the extension.
+## [0.1.7] - 2026-04-13
+
+### Changed
+- Unnamed sessions now register a runtime-only `subagent-chat-<id>` intercom alias instead of persisting a generic session title into Pi session history, so `pi --resume` can keep showing transcript snippets while unnamed sessions remain reachable over intercom.
+- Intercom presence updates now refresh the advertised session name during later turn/intercom activity, so renaming a session does not leave subagents and peers targeting a stale startup alias.
 
 ## [0.1.6] - 2026-04-13
 

@@ -42,6 +42,8 @@ A session becomes intercom-connected when all of these are true:
 
 The session list only shows intercom-connected sessions, not every open Pi process on the machine.
 
+If a session is unnamed, pi-intercom now exposes a runtime-only fallback alias like `subagent-chat-1a2b3c4d` so other sessions can still target it. That alias is not persisted as the Pi session title, so `pi --resume` can keep showing the transcript snippet instead of a generic `session-...` name.
+
 ## Quick Start
 
 ### From the Keyboard

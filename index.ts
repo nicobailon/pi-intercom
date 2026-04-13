@@ -12,6 +12,7 @@ import type { SessionInfo, Message, Attachment } from "./types.js";
 const INTERCOM_DETACH_REQUEST_EVENT = "pi-intercom:detach-request";
 const INTERCOM_DETACH_RESPONSE_EVENT = "pi-intercom:detach-response";
 const INTERCOM_DETACH_TIMEOUT_MS = 200;
+const DEFAULT_UNNAMED_SESSION_ALIAS_PREFIX = "subagent-chat";
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -42,6 +43,19 @@ function duplicateSessionNames(sessions: SessionInfo[]): Set<string> {
 }
 function shortSessionId(sessionId: string): string {
   return sessionId.slice(0, 8);
+}
+function resolveIntercomPresenceName(sessionName: string | undefined, sessionId: string): string {
+  const trimmedName = sessionName?.trim();
+  if (trimmedName) {
+    return trimmedName;
+  }
+  const normalizedSessionId = sessionId.startsWith("session-") ? sessionId.slice("session-".length) : sessionId;
+  return `${DEFAULT_UNNAMED_SESSION_ALIAS_PREFIX}-${normalizedSessionId.slice(0, 8)}`;
+}
+function buildPresenceIdentity(pi: ExtensionAPI, sessionId: string): { name: string } {
+  return {
+    name: resolveIntercomPresenceName(pi.getSessionName(), sessionId),
+  };
 }
 function formatSessionLabel(session: SessionInfo, duplicates: Set<string>): string {
   if (!session.name) {
@@ -118,6 +132,12 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   }
   function rejectReplyWaiter(error: Error): void {
     replyWaiter?.reject(error);
+  }
+  function syncPresenceIdentity(sessionId: string): void {
+    if (!client) {
+      return;
+    }
+    client.updatePresence(buildPresenceIdentity(pi, sessionId));
   }
   function sendIncomingMessage(entry: {
     from: SessionInfo;
@@ -249,13 +269,9 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       client.on("error", (error) => {
         console.error("Intercom error:", error);
       });
-      let sessionName = pi.getSessionName()?.trim();
-      if (!sessionName) {
-        sessionName = `session-${ctx.sessionManager.getSessionId().slice(0, 8)}`;
-        pi.setSessionName(sessionName);
-      }
+      const identity = buildPresenceIdentity(pi, ctx.sessionManager.getSessionId());
       await client.connect({
-        name: sessionName,
+        name: identity.name,
         cwd: ctx.cwd ?? process.cwd(),
         model: ctx.model?.id ?? "unknown",
         pid: process.pid,
@@ -288,9 +304,15 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       flushDeferredMessages();
     }, 0);
   });
-  pi.on("model_select", (event) => {
+  pi.on("turn_start", (_event, ctx) => {
+    syncPresenceIdentity(ctx.sessionManager.getSessionId());
+  });
+  pi.on("model_select", (event, ctx) => {
     if (client) {
-      client.updatePresence({ model: event.model.id });
+      client.updatePresence({
+        ...buildPresenceIdentity(pi, ctx.sessionManager.getSessionId()),
+        model: event.model.id,
+      });
     }
   });
 
@@ -339,6 +361,8 @@ Usage:
       if (!client) {
         return { content: [{ type: "text", text: "Intercom not connected" }], isError: true };
       }
+
+      syncPresenceIdentity(ctx.sessionManager.getSessionId());
 
       const { action, to, message, attachments, replyTo } = params;
 
@@ -575,6 +599,8 @@ Usage:
 
   async function openIntercomOverlay(ctx: Parameters<Parameters<typeof pi.registerCommand>[1]["handler"]>[1]): Promise<void> {
     if (!ctx.hasUI || !client) return;
+
+    syncPresenceIdentity(ctx.sessionManager.getSessionId());
 
     let currentSession: SessionInfo;
     let sessions: SessionInfo[];

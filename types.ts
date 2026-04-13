@@ -36,7 +36,7 @@ export type ClientMessage =
   | { type: "unregister" }
   | { type: "list"; requestId: string }
   | { type: "send"; to: string; message: Message }
-  | { type: "presence"; status?: string; model?: string };
+  | { type: "presence"; name?: string; status?: string; model?: string };
 
 // Broker → Client messages
 export type BrokerMessage =

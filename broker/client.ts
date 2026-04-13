@@ -512,7 +512,7 @@ export class IntercomClient extends EventEmitter {
     });
   }
 
-  updatePresence(updates: { status?: string; model?: string }): void {
+  updatePresence(updates: { name?: string; status?: string; model?: string }): void {
     if (this.disconnecting) {
       return;
     }
