@@ -233,6 +233,20 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     const entry = { from, message, replyCommand, bodyText };
     void (async () => {
       if (!ctx.isIdle()) {
+        // Non-interactive (pipe) mode: cannot interrupt or start new turns.
+        // Best-effort auto-reply to incoming top-level messages (those without
+        // `replyTo`) so the sender isn't left hanging; reply messages are skipped.
+        if (!ctx.hasUI) {
+          if (client && !message.replyTo) {
+            try {
+              await client.send(from.id, {
+                text: "This agent is running in non-interactive (pipe) mode and cannot respond to messages while working. It will complete its current task and exit.",
+                replyTo: message.id,
+              });
+            } catch { /* best-effort */ }
+          }
+          return;
+        }
         const detached = await requestGracefulDetach();
         if (detached) {
           sendIncomingMessage(entry, "trigger");
