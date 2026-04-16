@@ -5,10 +5,11 @@ import { join } from "path";
 import { homedir } from "os";
 import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.js";
+import { getBrokerSocketPath } from "./paths.js";
 import type { SessionInfo, Message, Attachment, BrokerMessage } from "../types.js";
 
 const INTERCOM_DIR = join(homedir(), ".pi/agent/intercom");
-const SOCKET_PATH = join(INTERCOM_DIR, "broker.sock");
+const SOCKET_PATH = getBrokerSocketPath();
 const PID_PATH = join(INTERCOM_DIR, "broker.pid");
 
 interface ConnectedSession {
@@ -97,10 +98,12 @@ class IntercomBroker {
 
   constructor() {
     mkdirSync(INTERCOM_DIR, { recursive: true });
-    try {
-      unlinkSync(SOCKET_PATH);
-    } catch {
-      // A clean startup has no stale socket to remove.
+    if (process.platform !== "win32") {
+      try {
+        unlinkSync(SOCKET_PATH);
+      } catch {
+        // A clean startup has no stale socket to remove.
+      }
     }
     this.server = net.createServer(this.handleConnection.bind(this));
   }
@@ -313,10 +316,12 @@ class IntercomBroker {
       session.socket.end();
     }
     this.sessions.clear();
-    try {
-      unlinkSync(SOCKET_PATH);
-    } catch {
-      // The socket may already be gone if shutdown started after a disconnect.
+    if (process.platform !== "win32") {
+      try {
+        unlinkSync(SOCKET_PATH);
+      } catch {
+        // The socket may already be gone if shutdown started after a disconnect.
+      }
     }
     try {
       unlinkSync(PID_PATH);

@@ -5,14 +5,30 @@ import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { homedir } from "os";
 import net from "net";
+import { getBrokerSocketPath } from "./paths.js";
 
 const INTERCOM_DIR = join(homedir(), ".pi/agent/intercom");
-const BROKER_SOCKET = join(INTERCOM_DIR, "broker.sock");
+const EXTENSION_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
+const BROKER_SOCKET = getBrokerSocketPath();
 const BROKER_PID = join(INTERCOM_DIR, "broker.pid");
 const BROKER_SPAWN_LOCK = join(INTERCOM_DIR, "broker.spawn.lock");
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+export function getTsxCliPath(extensionDir: string = EXTENSION_DIR): string {
+  return join(extensionDir, "node_modules", "tsx", "dist", "cli.mjs");
+}
+
+export function getBrokerLaunchSpec(
+  brokerPath: string,
+  extensionDir: string = EXTENSION_DIR,
+): { command: string; args: string[] } {
+  return {
+    command: process.execPath,
+    args: [getTsxCliPath(extensionDir), brokerPath],
+  };
 }
 
 function toError(error: unknown): Error {
@@ -38,7 +54,8 @@ export async function spawnBrokerIfNeeded(): Promise<void> {
     }
 
     const brokerPath = join(dirname(fileURLToPath(import.meta.url)), "broker.ts");
-    const child = spawn("npx", ["--no-install", "tsx", brokerPath], {
+    const launch = getBrokerLaunchSpec(brokerPath);
+    const child = spawn(launch.command, launch.args, {
       detached: true,
       stdio: "ignore",
       cwd: join(dirname(fileURLToPath(import.meta.url)), ".."),

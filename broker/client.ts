@@ -5,9 +5,10 @@ import { join } from "path";
 import { homedir } from "os";
 import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.js";
+import { getBrokerSocketPath } from "./paths.js";
 import type { SessionInfo, Message, Attachment } from "../types.js";
 
-const BROKER_SOCKET = join(homedir(), ".pi/agent/intercom/broker.sock");
+const BROKER_SOCKET = getBrokerSocketPath();
 
 interface SendOptions {
   text: string;
