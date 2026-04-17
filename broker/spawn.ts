@@ -21,13 +21,80 @@ export function getTsxCliPath(extensionDir: string = EXTENSION_DIR): string {
   return join(extensionDir, "node_modules", "tsx", "dist", "cli.mjs");
 }
 
+function quoteWindowsArg(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+export function getWindowsHiddenLauncherPath(intercomDir: string = INTERCOM_DIR): string {
+  return join(intercomDir, "broker-launch.vbs");
+}
+
+export function getWindowsBrokerCommandLine(
+  brokerPath: string,
+  extensionDir: string = EXTENSION_DIR,
+  nodePath: string = process.execPath,
+): string {
+  return [quoteWindowsArg(nodePath), quoteWindowsArg(getTsxCliPath(extensionDir)), quoteWindowsArg(brokerPath)].join(" ");
+}
+
+function writeWindowsHiddenLauncher(
+  commandLine: string,
+  launcherPath: string = getWindowsHiddenLauncherPath(),
+): string {
+  mkdirSync(dirname(launcherPath), { recursive: true });
+  writeFileSync(
+    launcherPath,
+    [
+      'Set WshShell = CreateObject("WScript.Shell")',
+      `WshShell.Run "${commandLine.replace(/"/g, '""')}", 0, False`,
+      'Set WshShell = Nothing',
+      '',
+    ].join("\r\n"),
+    "utf-8",
+  );
+  return launcherPath;
+}
+
 export function getBrokerLaunchSpec(
   brokerPath: string,
   extensionDir: string = EXTENSION_DIR,
+  platform: NodeJS.Platform = process.platform,
+  intercomDir: string = INTERCOM_DIR,
+  nodePath: string = process.execPath,
 ): { command: string; args: string[] } {
+  if (platform === "win32") {
+    const launcherPath = writeWindowsHiddenLauncher(
+      getWindowsBrokerCommandLine(brokerPath, extensionDir, nodePath),
+      getWindowsHiddenLauncherPath(intercomDir),
+    );
+    return {
+      command: "wscript.exe",
+      args: [launcherPath],
+    };
+  }
+
   return {
-    command: process.execPath,
+    command: nodePath,
     args: [getTsxCliPath(extensionDir), brokerPath],
+  };
+}
+
+export function getBrokerSpawnOptions(
+  extensionDir: string = EXTENSION_DIR,
+  _platform: NodeJS.Platform = process.platform,
+): {
+  detached: true;
+  stdio: "ignore";
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  windowsHide: true;
+} {
+  return {
+    detached: true,
+    stdio: "ignore",
+    cwd: extensionDir,
+    env: { ...process.env, NODE_NO_WARNINGS: "1" },
+    windowsHide: true,
   };
 }
 
@@ -55,12 +122,7 @@ export async function spawnBrokerIfNeeded(): Promise<void> {
 
     const brokerPath = join(dirname(fileURLToPath(import.meta.url)), "broker.ts");
     const launch = getBrokerLaunchSpec(brokerPath);
-    const child = spawn(launch.command, launch.args, {
-      detached: true,
-      stdio: "ignore",
-      cwd: join(dirname(fileURLToPath(import.meta.url)), ".."),
-      env: { ...process.env, NODE_NO_WARNINGS: "1" },
-    });
+    const child = spawn(launch.command, launch.args, getBrokerSpawnOptions());
     child.unref();
 
     await new Promise<void>((resolve, reject) => {
