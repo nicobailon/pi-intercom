@@ -69,24 +69,23 @@ intercom({ action: "list" })
 // → Shows all connected sessions with names, cwd, models, and status
 ```
 
-### Pattern 3: Reply with Context
+### Pattern 3: Reply Naturally
 
-When responding to a message, use `replyTo` for proper threading:
+When responding to an inbound ask, prefer `reply` instead of reconstructing raw IDs:
 
 ```typescript
-// The incoming message includes a reply hint with the exact command:
-// reply: intercom({ action: "send", to: "abc123", replyTo: "msg-456", message: "..." })
-
-// This enables reliable ask/reply matching
+// In the turn triggered by the ask:
 intercom({
-  action: "send",
-  to: "abc123",
-  replyTo: "msg-456",
+  action: "reply",
   message: "Use exponential backoff starting at 100ms."
 })
+
+// If replying later and there might be more than one pending ask:
+intercom({ action: "pending" })
+intercom({ action: "reply", to: "planner", message: "Use exponential backoff starting at 100ms." })
 ```
 
-**Note**: `replyTo` automatically skips confirmation dialogs, even if `confirmSend: true` is set in config.
+`reply` still preserves exact threading under the hood by sending the response with the original `replyTo` value.
 
 ### Pattern 4: Broadcast to Multiple Workers
 
@@ -129,6 +128,8 @@ intercom({
 |--------|----------|----------|
 | `send` | Fire-and-forget | You don't need a response |
 | `ask` | Blocks until reply (10 min timeout) | You need an answer to continue |
+| `reply` | Responds to the active or pending inbound ask | You were asked something and need to answer naturally |
+| `pending` | Lists unresolved inbound asks | You need to see who is waiting before replying |
 | `list` | Returns all sessions | You need to discover targets |
 | `status` | Returns your connection state | Troubleshooting |
 
@@ -289,7 +290,7 @@ intercom({
   to: "worker",
   message: `Found the issue in auth.ts:142. Use getUserById() instead of getUser().
 
-Reply with: intercom({ action: "send", to: "planner", replyTo: "${messageId}", message: "..." })`
+Reply with: intercom({ action: "reply", message: "..." })`
 });
 ```
 
@@ -400,9 +401,7 @@ intercom({
 
 // Session B investigates and replies
 intercom({
-  action: "send",
-  to: "session-a",
-  replyTo: "<original-msg-id>",
+  action: "reply",
   message: "data.users is null. The fetch failed silently. Add error handling in loadUsers()."
 });
 ```

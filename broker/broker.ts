@@ -53,6 +53,10 @@ function isMessage(value: unknown): value is Message {
     return false;
   }
 
+  if (message.expectsReply !== undefined && typeof message.expectsReply !== "boolean") {
+    return false;
+  }
+
   if (typeof message.content !== "object" || message.content === null) {
     return false;
   }

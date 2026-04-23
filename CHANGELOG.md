@@ -4,6 +4,21 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-04-22
+
+### Added
+- Added receiver-side `reply` ergonomics for inbound asks. Agents can now use `intercom({ action: "reply", message })` in the triggered turn or later against a single pending ask, plus `intercom({ action: "pending" })` to inspect unresolved inbound asks.
+
+### Fixed
+- Migrated extension tool schemas from `@sinclair/typebox` to `typebox` 1.x so packaged installs follow Pi's current extension runtime contract.
+- Included `reply-tracker.ts` in the published package so installed extensions can load the new reply-tracking helper at runtime.
+- Updated the integration test harness to set `USERPROFILE` alongside `HOME`, keeping temp-home isolation reliable on Windows.
+
+### Changed
+- Moved TypeBox from `peerDependencies` to a real `dependencies` entry so `pi install` production installs keep the schema package available at runtime.
+- Incoming ask reply hints now prefer `intercom({ action: "reply", ... })` instead of exposing raw `to` and `replyTo` identifiers.
+- Updated the bundled `pi-intercom` skill and README examples to prefer `reply`/`pending` over manual reply threading.
+
 ## [0.1.11] - 2026-04-20
 
 ### Added

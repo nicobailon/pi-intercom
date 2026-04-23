@@ -61,7 +61,7 @@ export class InlineMessageComponent implements Component {
       }
     }
 
-    if (this.message.replyTo) {
+    if (this.message.replyTo && !this.message.expectsReply) {
       lines.push(this.theme.fg("accent", `│${" ".repeat(bodyWidth)}│`));
       const reply = this.theme.fg("dim", ` ↳ Reply to ${this.message.replyTo.slice(0, 8)}`);
       const text = truncateToWidth(reply, bodyWidth, "");

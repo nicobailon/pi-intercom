@@ -107,13 +107,13 @@ When a message arrives, it appears inline in your chat with the sender's info an
 ```
 **📨 From research** (~/projects/api)
 
-To reply, use the intercom tool: intercom({ action: "send", to: "550e8400-e29b-41d4-a716-446655440000", replyTo: "c1f7...", message: "..." })
+To reply, use the intercom tool: intercom({ action: "reply", message: "..." })
 
 Found the issue — UserService.validate() doesn't check for null input.
 See auth.ts:142-156.
 ```
 
-The reply hint (enabled by default) tells the receiving agent exactly how to respond using the `intercom` tool, including the sender's session ID as `to` and the original message ID as `replyTo`. This is critical for `ask` to resolve reliably — replies must include the `replyTo` value so the waiting caller can match the response. The message triggers a new turn, so the agent can respond or act on it immediately. If the message includes attachments, their content is also included in the agent-visible message body. Messages are rendered inline in the chat and also written to Pi session history as extension entries.
+The reply hint (enabled by default) now points to `intercom({ action: "reply", ... })`, which resolves to the exact sender and original message ID under the hood. Threading is still exact — replies still go out as a normal `send` with the right `replyTo` value so the waiting caller can match the response. The message triggers a new turn, so the agent can respond or act on it immediately. If the message includes attachments, their content is also included in the agent-visible message body. Messages are rendered inline in the chat and also written to Pi session history as extension entries.
 
 ## Workflow: Planner-Worker Coordination
 
@@ -195,18 +195,20 @@ When `replyHint` is enabled (the default), incoming messages include the exact `
 ```
 **📨 From planner** (~/projects/api)
 
-To reply, use the intercom tool: intercom({ action: "send", to: "550e8400-e29b-41d4-a716-446655440000", replyTo: "c1f7...", message: "..." )
+To reply, use the intercom tool: intercom({ action: "reply", message: "..." })
 
 Only GET/PUT/DELETE — never POST. Max 3 retries with exponential backoff starting at 100ms.
 ```
 
-This matters because the agent receiving the message doesn't need to construct the reply call from scratch — the hint is right there. Combined with `triggerTurn` (which wakes the recipient agent on delivery), it enables real back-and-forth conversation without any complex protocol machinery.
+This matters because the agent receiving the message doesn't need to reconstruct raw `to` and `replyTo` IDs — the hint is right there. Combined with `triggerTurn` (which wakes the recipient agent on delivery), it enables real back-and-forth conversation without any complex protocol machinery. If the reply happens later instead of in the triggered turn, `intercom({ action: "reply" })` falls back to the single unresolved inbound ask, and `intercom({ action: "pending" })` shows who is still waiting.
 
 ### `send` vs `ask`
 
 `send` is fire-and-forget — the tool returns immediately after delivery. By default, it sends immediately even in interactive sessions. If you want an approval dialog before non-reply sends, set `confirmSend: true` in config. Replies that include `replyTo` still skip confirmation so reply-hint flows can continue without an extra approval step.
 
 `ask` sends the message and blocks until the recipient responds (10-minute timeout). The reply comes back as the tool result, so the agent continues in the same turn with full context. No confirmation dialog — if you're asking and waiting, the intent is clear.
+
+`reply` is receiver-side sugar for replying to an inbound ask. In the turn triggered by an incoming intercom ask, `intercom({ action: "reply", message: "..." })` targets that exact sender and message automatically. If you reply later, it falls back to the single unresolved inbound ask. If multiple asks are pending, use `intercom({ action: "pending" })` to inspect them and then call `reply` with `to` to disambiguate.
 
 The planner typically uses `send`. If you prefer manual approval for outgoing non-reply messages, turn on `confirmSend: true`. The worker uses `ask` for everything (no confirmation needed, gets answers inline), so it can operate autonomously either way.
 
@@ -216,9 +218,9 @@ The planner typically uses `send`. If you prefer manual approval for outgoing no
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `action` | string | `"list"`, `"send"`, `"ask"`, or `"status"` |
-| `to` | string | Target session name or ID (for send/ask) |
-| `message` | string | Message text (for send/ask) |
+| `action` | string | `"list"`, `"send"`, `"ask"`, `"reply"`, `"pending"`, or `"status"` |
+| `to` | string | Target session name or ID (for send/ask, or to disambiguate reply) |
+| `message` | string | Message text (for send/ask/reply) |
 | `attachments` | array | Optional `file`, `snippet`, or `context` attachments |
 | `replyTo` | string | Optional message ID for threading or replying to an `ask` |
 
@@ -229,6 +231,10 @@ The planner typically uses `send`. If you prefer manual approval for outgoing no
 **`send`** — Sends a message to the specified session. By default it sends immediately, including in interactive sessions. Set `confirmSend: true` in config if you want a confirmation dialog for non-reply sends. Replies that include `replyTo` skip confirmation. Returns delivery confirmation.
 
 **`ask`** — Sends a message and waits for the recipient to reply (10-minute timeout). The reply is returned as the tool result. No confirmation dialog. Only one pending `ask` is allowed per session at a time. Use this when the agent needs the answer to continue working.
+
+**`reply`** — Replies to the current intercom-triggered message if there is one. Otherwise it falls back to the single unresolved inbound ask. If multiple asks are pending, pass `to` or inspect them with `pending` first. Under the hood this is still a normal `send` with the exact `replyTo` value.
+
+**`pending`** — Lists unresolved inbound asks with sender, message ID, elapsed time, and a short preview. Useful when replying after the original triggered turn.
 
 **`status`** — Shows connection status, session ID, and total count of active sessions (including the current session).
 

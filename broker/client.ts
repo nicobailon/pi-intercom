@@ -11,6 +11,7 @@ interface SendOptions {
   text: string;
   attachments?: Attachment[];
   replyTo?: string;
+  expectsReply?: boolean;
   messageId?: string;
 }
 
@@ -58,6 +59,10 @@ function isMessage(value: unknown): value is Message {
   }
 
   if (message.replyTo !== undefined && typeof message.replyTo !== "string") {
+    return false;
+  }
+
+  if (message.expectsReply !== undefined && typeof message.expectsReply !== "boolean") {
     return false;
   }
 
@@ -481,6 +486,7 @@ export class IntercomClient extends EventEmitter {
       id: messageId,
       timestamp: Date.now(),
       replyTo: options.replyTo,
+      expectsReply: options.expectsReply,
       content: {
         text: options.text,
         attachments: options.attachments,

@@ -13,6 +13,7 @@ export interface Message {
   id: string;
   timestamp: number;
   replyTo?: string;
+  expectsReply?: boolean;
   content: {
     text: string;
     attachments?: Attachment[];

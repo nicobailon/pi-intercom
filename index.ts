@@ -1,13 +1,14 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { randomUUID } from "crypto";
-import { Type } from "@sinclair/typebox";
-import { IntercomClient } from "./broker/client.js";
-import { spawnBrokerIfNeeded } from "./broker/spawn.js";
-import { SessionListOverlay } from "./ui/session-list.js";
-import { ComposeOverlay, type ComposeResult } from "./ui/compose.js";
-import { InlineMessageComponent } from "./ui/inline-message.js";
-import { loadConfig, type IntercomConfig } from "./config.js";
-import type { SessionInfo, Message, Attachment } from "./types.js";
+import { Type } from "typebox";
+import { IntercomClient } from "./broker/client.ts";
+import { spawnBrokerIfNeeded } from "./broker/spawn.ts";
+import { SessionListOverlay } from "./ui/session-list.ts";
+import { ComposeOverlay, type ComposeResult } from "./ui/compose.ts";
+import { InlineMessageComponent } from "./ui/inline-message.ts";
+import { loadConfig, type IntercomConfig } from "./config.ts";
+import type { SessionInfo, Message, Attachment } from "./types.ts";
+import { ReplyTracker } from "./reply-tracker.ts";
 
 const INTERCOM_DETACH_REQUEST_EVENT = "pi-intercom:detach-request";
 const INTERCOM_DETACH_RESPONSE_EVENT = "pi-intercom:detach-response";
@@ -83,6 +84,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   let reconnectPromise: Promise<IntercomClient> | null = null;
   let reconnectAttempt = 0;
   let shuttingDown = false;
+  const replyTracker = new ReplyTracker();
   const pendingInterruptedMessages: Array<{
     from: SessionInfo;
     message: Message;
@@ -180,6 +182,9 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     replyCommand?: string;
     bodyText: string;
   }, delivery: "trigger" | "followUp" | "followUpTrigger"): void {
+    if (delivery !== "followUp") {
+      replyTracker.queueTurnContext({ from: entry.from, message: entry.message, receivedAt: Date.now() });
+    }
     const senderDisplay = entry.from.name || entry.from.id.slice(0, 8);
     const replyInstruction = entry.replyCommand ? `\n\nTo reply, use the intercom tool: ${entry.replyCommand}` : "";
     pi.sendMessage(
@@ -229,7 +234,10 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       ? formatAttachments(message.content.attachments)
       : "";
     const bodyText = `${message.content.text}${attachmentText}`;
-    const replyCommand = config.replyHint ? `intercom({ action: "send", to: ${JSON.stringify(from.id)}, replyTo: ${JSON.stringify(message.id)}, message: "..." })` : undefined;
+    const replyCommand = config.replyHint && message.expectsReply
+      ? `intercom({ action: "reply", message: "..." })`
+      : undefined;
+    replyTracker.recordIncomingMessage(from, message);
     const entry = { from, message, replyCommand, bodyText };
     void (async () => {
       if (!ctx.isIdle()) {
@@ -389,6 +397,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     shuttingDown = true;
     clearReconnectTimer();
     rejectReplyWaiter(new Error("Session shutting down"));
+    replyTracker.reset();
     pendingInterruptedMessages.length = 0;
     pendingDeferredMessages.length = 0;
     if (client) {
@@ -400,6 +409,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     sessionStartedAt = null;
   });
   pi.on("turn_end", () => {
+    replyTracker.endTurn();
     setTimeout(() => {
       flushInterruptedMessages();
     }, 0);
@@ -412,6 +422,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   pi.on("turn_start", (_event, ctx) => {
     currentSessionId = ctx.sessionManager.getSessionId();
     syncPresenceIdentity(ctx.sessionManager.getSessionId());
+    replyTracker.beginTurn();
   });
   pi.on("model_select", (event, ctx) => {
     currentModel = event.model.id;
@@ -439,19 +450,21 @@ Usage:
   intercom({ action: "list" })                    → List active sessions
   intercom({ action: "send", to: "session-name", message: "..." })  → Send message
   intercom({ action: "ask", to: "session-name", message: "..." })   → Ask and wait for reply
+  intercom({ action: "reply", message: "..." })                      → Reply to the active/single pending ask
+  intercom({ action: "pending" })                                      → List unresolved inbound asks
   intercom({ action: "status" })                  → Show connection status`,
     promptSnippet:
       "Use to coordinate with other local pi sessions: list peers, send updates, ask for help, or check intercom connectivity.",
 
     parameters: Type.Object({
       action: Type.String({
-        description: "Action: 'list', 'send', 'ask', or 'status'",
+        description: "Action: 'list', 'send', 'ask', 'reply', 'pending', or 'status'",
       }),
       to: Type.Optional(Type.String({
-        description: "Target session name or ID (for 'send' or 'ask' action)",
+        description: "Target session name or ID (for 'send', 'ask', or disambiguating 'reply')",
       })),
       message: Type.Optional(Type.String({
-        description: "Message to send (for 'send' or 'ask' action)",
+        description: "Message to send (for 'send', 'ask', or 'reply' action)",
       })),
       attachments: Type.Optional(Type.Array(Type.Object({
         type: Type.Union([Type.Literal("file"), Type.Literal("snippet"), Type.Literal("context")]),
@@ -558,6 +571,9 @@ Usage:
               messageId: result.id,
               timestamp: Date.now(),
             });
+            if (replyTo) {
+              replyTracker.markReplied(replyTo);
+            }
             return {
               content: [{ type: "text", text: `Message sent to ${to}` }],
               isError: false,
@@ -609,6 +625,7 @@ Usage:
               text: message,
               attachments,
               replyTo,
+              expectsReply: true,
             });
 
             if (!sendResult.delivered) {
@@ -661,6 +678,75 @@ Usage:
               isError: true,
             };
           }
+        }
+
+        case "reply": {
+          if (!message) {
+            return {
+              content: [{ type: "text", text: "Missing 'message' parameter" }],
+              isError: true,
+            };
+          }
+
+          try {
+            const target = replyTracker.resolveReplyTarget({ to });
+            if (target.from.id === connectedClient.sessionId) {
+              return {
+                content: [{ type: "text", text: "Cannot message the current session" }],
+                isError: true,
+              };
+            }
+            const result = await connectedClient.send(target.from.id, {
+              text: message,
+              replyTo: target.message.id,
+            });
+            if (!result.delivered) {
+              const errorText = result.reason ?? "Session may not exist or has disconnected.";
+              return {
+                content: [{ type: "text", text: `Reply to "${target.from.name || target.from.id}" was not delivered: ${errorText}` }],
+                isError: true,
+                details: { messageId: result.id, delivered: false, reason: result.reason },
+              };
+            }
+            replyTracker.markReplied(target.message.id);
+            pi.appendEntry("intercom_sent", {
+              to: target.from.name || target.from.id,
+              message: { text: message, replyTo: target.message.id },
+              messageId: result.id,
+              timestamp: Date.now(),
+            });
+            return {
+              content: [{ type: "text", text: `Reply sent to ${target.from.name || target.from.id}` }],
+              isError: false,
+              details: { messageId: result.id, delivered: true, replyTo: target.message.id },
+            };
+          } catch (error) {
+            return {
+              content: [{ type: "text", text: `Failed to reply: ${getErrorMessage(error)}` }],
+              isError: true,
+            };
+          }
+        }
+
+        case "pending": {
+          const pendingAsks = replyTracker.listPending();
+          if (pendingAsks.length === 0) {
+            return {
+              content: [{ type: "text", text: "No unresolved inbound asks." }],
+              isError: false,
+            };
+          }
+
+          const now = Date.now();
+          const lines = pendingAsks.map(({ from, message, receivedAt }) => {
+            const preview = message.content.text.replace(/\s+/g, " ").slice(0, 80);
+            const elapsedSeconds = Math.max(0, Math.floor((now - receivedAt) / 1000));
+            return `- ${from.name || from.id} · ${message.id} · ${elapsedSeconds}s ago · ${preview}`;
+          });
+          return {
+            content: [{ type: "text", text: `**Pending asks:**\n${lines.join("\n")}` }],
+            isError: false,
+          };
         }
 
         case "status": {
