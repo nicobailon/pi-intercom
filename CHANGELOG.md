@@ -4,6 +4,11 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-04-26
+
+### Fixed
+- Delivered `pi-subagents` needs-attention control events to the orchestrator over intercom.
+
 ## [0.2.0] - 2026-04-22
 
 ### Added

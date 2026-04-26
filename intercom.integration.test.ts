@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
-import { once } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { ReplyTracker } from "./reply-tracker.ts";
 import type { Message, SessionInfo } from "./types.ts";
@@ -145,6 +145,44 @@ test("full ask/reply round-trip works with reply target resolved from current tu
   } finally {
     await cleanup();
   }
+});
+
+test("subagent control intercom events wake the current orchestrator session", async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const events = new EventEmitter();
+  const sentMessages: Array<{ message: { customType?: string; content?: string }; options?: { triggerTurn?: boolean } }> = [];
+  const pi = {
+    getSessionName: () => "orchestrator",
+    events: {
+      on: (channel: string, handler: (payload: unknown) => void) => {
+        events.on(channel, handler);
+        return () => events.off(channel, handler);
+      },
+      emit: (channel: string, payload: unknown) => events.emit(channel, payload),
+    },
+    on: () => undefined,
+    registerMessageRenderer: () => undefined,
+    registerTool: () => undefined,
+    registerCommand: () => undefined,
+    registerShortcut: () => undefined,
+    sendMessage: (message: { customType?: string; content?: string }, options?: { triggerTurn?: boolean }) => {
+      sentMessages.push({ message, options });
+    },
+    appendEntry: () => undefined,
+  };
+
+  piIntercomExtension(pi as never);
+  pi.events.emit("subagent:control-intercom", {
+    to: "orchestrator",
+    message: "subagent needs attention\n\nworker needs attention in run 78f659a3.",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(sentMessages.length, 1);
+  assert.equal(sentMessages[0]?.message.customType, "intercom_message");
+  assert.match(sentMessages[0]?.message.content ?? "", /From subagent-control/);
+  assert.match(sentMessages[0]?.message.content ?? "", /worker needs attention in run 78f659a3/);
+  assert.equal(sentMessages[0]?.options?.triggerTurn, true);
 });
 
 test("async ask can be replied to later from the single pending ask fallback", { concurrency: false }, async () => {
