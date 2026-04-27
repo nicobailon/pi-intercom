@@ -13,6 +13,8 @@ import { ReplyTracker } from "./reply-tracker.ts";
 const INTERCOM_DETACH_REQUEST_EVENT = "pi-intercom:detach-request";
 const INTERCOM_DETACH_RESPONSE_EVENT = "pi-intercom:detach-response";
 const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
+const SUBAGENT_RESULT_INTERCOM_EVENT = "subagent:result-intercom";
+const SUBAGENT_RESULT_INTERCOM_DELIVERY_EVENT = "subagent:result-intercom-delivery";
 const INTERCOM_DETACH_TIMEOUT_MS = 200;
 const DEFAULT_UNNAMED_SESSION_ALIAS_PREFIX = "subagent-chat";
 
@@ -46,14 +48,16 @@ function duplicateSessionNames(sessions: SessionInfo[]): Set<string> {
 function shortSessionId(sessionId: string): string {
   return sessionId.slice(0, 8);
 }
-function parseSubagentControlIntercomPayload(payload: unknown): { to: string; message: string } | null {
+function parseSubagentIntercomPayload(payload: unknown): { to: string; message: string; requestId?: string } | null {
   if (typeof payload !== "object" || payload === null) {
     return null;
   }
   const record = payload as Record<string, unknown>;
-  return typeof record.to === "string" && typeof record.message === "string"
-    ? { to: record.to, message: record.message }
-    : null;
+  if (typeof record.to !== "string" || typeof record.message !== "string") {
+    return null;
+  }
+  const requestId = typeof record.requestId === "string" ? record.requestId : undefined;
+  return { to: record.to, message: record.message, ...(requestId ? { requestId } : {}) };
 }
 function resolveIntercomPresenceName(sessionName: string | undefined, sessionId: string): string {
   const trimmedName = sessionName?.trim();
@@ -396,18 +400,18 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     return byName[0]?.id ?? null;
   }
-  function deliverLocalSubagentControlMessage(messageText: string): void {
+  function deliverLocalSubagentRelayMessage(sender: "subagent-control" | "subagent-result", status: string, messageText: string): void {
     const now = Date.now();
     sendIncomingMessage({
       from: {
-        id: "subagent-control",
-        name: "subagent-control",
+        id: sender,
+        name: sender,
         cwd: runtimeContext?.cwd ?? process.cwd(),
-        model: "subagent-control",
+        model: sender,
         pid: process.pid,
         startedAt: now,
         lastActivity: now,
-        status: "needs_attention",
+        status,
       },
       message: {
         id: randomUUID(),
@@ -417,21 +421,35 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       bodyText: messageText,
     }, "trigger");
   }
-  function recordSubagentControlDeliveryError(to: string, message: string, error: unknown): void {
-    pi.appendEntry("intercom_control_error", {
+  function recordSubagentDeliveryError(entryType: string, to: string, message: string, error: unknown): void {
+    pi.appendEntry(entryType, {
       to,
       message,
       error: getErrorMessage(error),
       timestamp: Date.now(),
     });
   }
-  pi.events.on(SUBAGENT_CONTROL_INTERCOM_EVENT, (payload) => {
-    const parsed = parseSubagentControlIntercomPayload(payload);
+  function emitResultDelivery(requestId: string | undefined, delivered: boolean, error?: unknown): void {
+    if (!requestId) return;
+    pi.events.emit(SUBAGENT_RESULT_INTERCOM_DELIVERY_EVENT, {
+      requestId,
+      delivered,
+      ...(error ? { error: getErrorMessage(error) } : {}),
+    });
+  }
+  function relaySubagentIntercomPayload(payload: unknown, options: {
+    sender: "subagent-control" | "subagent-result";
+    status: string;
+    errorEntryType: string;
+    acknowledge?: boolean;
+  }): void {
+    const parsed = parseSubagentIntercomPayload(payload);
     if (!parsed) return;
 
     void (async () => {
       if (currentSessionTargetMatches(parsed.to)) {
-        deliverLocalSubagentControlMessage(parsed.message);
+        deliverLocalSubagentRelayMessage(options.sender, options.status, parsed.message);
+        if (options.acknowledge) emitResultDelivery(parsed.requestId, true);
         return;
       }
 
@@ -441,24 +459,46 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         activeClient = await ensureConnected("background");
         target = await resolveSessionTarget(activeClient, parsed.to) ?? parsed.to;
       } catch (error) {
-        recordSubagentControlDeliveryError(parsed.to, parsed.message, error);
+        recordSubagentDeliveryError(options.errorEntryType, parsed.to, parsed.message, error);
+        if (options.acknowledge) emitResultDelivery(parsed.requestId, false, error);
         return;
       }
 
       if (currentSessionTargetMatches(parsed.to, target, activeClient)) {
-        deliverLocalSubagentControlMessage(parsed.message);
+        deliverLocalSubagentRelayMessage(options.sender, options.status, parsed.message);
+        if (options.acknowledge) emitResultDelivery(parsed.requestId, true);
         return;
       }
 
       try {
         const result = await activeClient.send(target, { text: parsed.message });
         if (!result.delivered) {
-          recordSubagentControlDeliveryError(parsed.to, parsed.message, new Error(result.reason ?? "Session may not exist or has disconnected."));
+          const error = new Error(result.reason ?? "Session may not exist or has disconnected.");
+          recordSubagentDeliveryError(options.errorEntryType, parsed.to, parsed.message, error);
+          if (options.acknowledge) emitResultDelivery(parsed.requestId, false, error);
+          return;
         }
+        if (options.acknowledge) emitResultDelivery(parsed.requestId, true);
       } catch (error) {
-        recordSubagentControlDeliveryError(parsed.to, parsed.message, error);
+        recordSubagentDeliveryError(options.errorEntryType, parsed.to, parsed.message, error);
+        if (options.acknowledge) emitResultDelivery(parsed.requestId, false, error);
       }
     })();
+  }
+  pi.events.on(SUBAGENT_CONTROL_INTERCOM_EVENT, (payload) => {
+    relaySubagentIntercomPayload(payload, {
+      sender: "subagent-control",
+      status: "needs_attention",
+      errorEntryType: "intercom_control_error",
+    });
+  });
+  pi.events.on(SUBAGENT_RESULT_INTERCOM_EVENT, (payload) => {
+    relaySubagentIntercomPayload(payload, {
+      sender: "subagent-result",
+      status: "result",
+      errorEntryType: "intercom_result_error",
+      acknowledge: true,
+    });
   });
   pi.on("session_start", async (_event, ctx) => {
     if (!config.enabled) {

@@ -4,6 +4,11 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-04-27
+
+### Added
+- Added `pi-subagents` grouped result relay support over `pi-intercom`, including delivery acknowledgments so parent runs can return compact receipts only after the orchestrator receives the result message.
+
 ## [0.2.1] - 2026-04-26
 
 ### Fixed
