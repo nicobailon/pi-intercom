@@ -31,7 +31,7 @@
     "@mariozechner/pi-coding-agent": "*",
     "@mariozechner/pi-tui": "*"
   },
-  "dependencies": {
+  "devDependencies": {
     "tsx": "^4.20.0",
     "typebox": "^1.1.24"
   }
