@@ -17,6 +17,19 @@ const SUBAGENT_RESULT_INTERCOM_EVENT = "subagent:result-intercom";
 const SUBAGENT_RESULT_INTERCOM_DELIVERY_EVENT = "subagent:result-intercom-delivery";
 const INTERCOM_DETACH_TIMEOUT_MS = 200;
 const DEFAULT_UNNAMED_SESSION_ALIAS_PREFIX = "subagent-chat";
+const SUBAGENT_ORCHESTRATOR_TARGET_ENV = "PI_SUBAGENT_ORCHESTRATOR_TARGET";
+const SUBAGENT_RUN_ID_ENV = "PI_SUBAGENT_RUN_ID";
+const SUBAGENT_CHILD_AGENT_ENV = "PI_SUBAGENT_CHILD_AGENT";
+const SUBAGENT_CHILD_INDEX_ENV = "PI_SUBAGENT_CHILD_INDEX";
+const SUBAGENT_INTERCOM_SESSION_NAME_ENV = "PI_SUBAGENT_INTERCOM_SESSION_NAME";
+
+interface ChildOrchestratorMetadata {
+  orchestratorTarget: string;
+  runId: string;
+  agent: string;
+  index: string;
+  sessionName?: string;
+}
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -36,6 +49,34 @@ function formatAttachments(attachments: Attachment[]): string {
     }
   }
   return text;
+}
+function readChildOrchestratorMetadata(): ChildOrchestratorMetadata | null {
+  const orchestratorTarget = process.env[SUBAGENT_ORCHESTRATOR_TARGET_ENV]?.trim();
+  const runId = process.env[SUBAGENT_RUN_ID_ENV]?.trim();
+  const agent = process.env[SUBAGENT_CHILD_AGENT_ENV]?.trim();
+  const index = process.env[SUBAGENT_CHILD_INDEX_ENV]?.trim();
+  if (!orchestratorTarget || !runId || !agent || !index) {
+    return null;
+  }
+  const sessionName = process.env[SUBAGENT_INTERCOM_SESSION_NAME_ENV]?.trim();
+  return {
+    orchestratorTarget,
+    runId,
+    agent,
+    index,
+    ...(sessionName ? { sessionName } : {}),
+  };
+}
+function formatChildOrchestratorMessage(kind: "ask" | "update", metadata: ChildOrchestratorMetadata, message: string): string {
+  return [
+    kind === "ask" ? "Subagent needs a supervisor decision." : "Subagent progress update.",
+    `Run: ${metadata.runId}`,
+    `Agent: ${metadata.agent}`,
+    `Child index: ${metadata.index}`,
+    metadata.sessionName ? `Child intercom target: ${metadata.sessionName}` : undefined,
+    "",
+    message,
+  ].filter((line): line is string => line !== undefined).join("\n");
 }
 function duplicateSessionNames(sessions: SessionInfo[]): Set<string> {
   return new Set(
@@ -567,6 +608,193 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     return new InlineMessageComponent(details.from, details.message, theme, details.replyCommand, details.bodyText);
   });
 
+  const childOrchestratorMetadata = readChildOrchestratorMetadata();
+  if (childOrchestratorMetadata) {
+    pi.registerTool({
+      name: "contact_supervisor",
+      label: "Contact Supervisor",
+      description: "Subagent-only tool for contacting the supervisor agent that delegated this task. Use need_decision when blocked, uncertain, needing approval, or facing a product/API/scope decision before continuing; this waits for the supervisor's reply. Use progress_update only for meaningful progress or unexpected discoveries that change the plan; this does not wait for a reply. Do not use for routine completion handoffs.",
+      promptSnippet: "Subagent-only: contact the supervisor for decisions or meaningful plan-changing updates. Do not use for routine completion handoffs.",
+      promptGuidelines: [
+        "Use contact_supervisor with reason='need_decision' when a subagent is blocked, uncertain, needs approval, or faces a product/API/scope decision before continuing.",
+        "Use contact_supervisor with reason='progress_update' only for meaningful progress or unexpected discoveries that change the plan.",
+        "Do not use contact_supervisor for routine completion handoffs; return the final subagent result normally.",
+      ],
+      parameters: Type.Object({
+        reason: Type.String({
+          enum: ["need_decision", "progress_update"],
+          description: "Contact reason: 'need_decision' waits for a reply; 'progress_update' sends a non-blocking update",
+        }),
+        message: Type.String({
+          description: "Decision request or meaningful progress update for the supervisor",
+        }),
+      }),
+      async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+        if (params.reason !== "need_decision" && params.reason !== "progress_update") {
+          return {
+            content: [{ type: "text", text: "Invalid reason. Use 'need_decision' or 'progress_update'." }],
+            isError: true,
+          };
+        }
+
+        let connectedClient: IntercomClient;
+        try {
+          connectedClient = await ensureConnected("tool");
+        } catch (error) {
+          return {
+            content: [{ type: "text", text: `Intercom not connected: ${getErrorMessage(error)}` }],
+            isError: true,
+          };
+        }
+
+        syncPresenceIdentity(ctx.sessionManager.getSessionId());
+
+        if (signal?.aborted) {
+          return {
+            content: [{ type: "text", text: "Cancelled" }],
+            isError: true,
+          };
+        }
+
+        const metadata = childOrchestratorMetadata;
+        let sendTo: string;
+        try {
+          sendTo = await resolveSessionTarget(connectedClient, metadata.orchestratorTarget) ?? metadata.orchestratorTarget;
+        } catch (error) {
+          return {
+            content: [{ type: "text", text: `Failed to resolve supervisor target: ${getErrorMessage(error)}` }],
+            isError: true,
+          };
+        }
+        if (signal?.aborted) {
+          return {
+            content: [{ type: "text", text: "Cancelled" }],
+            isError: true,
+          };
+        }
+        if (sendTo === connectedClient.sessionId) {
+          return {
+            content: [{ type: "text", text: "Cannot message the current session" }],
+            isError: true,
+          };
+        }
+
+        if (params.reason === "progress_update") {
+          try {
+            const result = await connectedClient.send(sendTo, {
+              text: formatChildOrchestratorMessage("update", metadata, params.message),
+            });
+            if (!result.delivered) {
+              const errorText = result.reason ?? "Session may not exist or has disconnected.";
+              return {
+                content: [{ type: "text", text: `Message to "${metadata.orchestratorTarget}" was not delivered: ${errorText}` }],
+                isError: true,
+                details: { messageId: result.id, delivered: false, reason: result.reason },
+              };
+            }
+            pi.appendEntry("intercom_sent", {
+              to: metadata.orchestratorTarget,
+              message: { text: params.message, reason: params.reason },
+              messageId: result.id,
+              timestamp: Date.now(),
+              subagent: { runId: metadata.runId, agent: metadata.agent, index: metadata.index },
+            });
+            return {
+              content: [{ type: "text", text: `Progress update sent to supervisor ${metadata.orchestratorTarget}` }],
+              isError: false,
+              details: { messageId: result.id, delivered: true },
+            };
+          } catch (error) {
+            return {
+              content: [{ type: "text", text: `Failed to send progress update: ${getErrorMessage(error)}` }],
+              isError: true,
+            };
+          }
+        }
+
+        if (replyWaiter) {
+          return {
+            content: [{ type: "text", text: "Already waiting for a reply" }],
+            isError: true,
+          };
+        }
+
+        let replyPromise: Promise<Message> | null = null;
+        try {
+          const questionId = randomUUID();
+          replyPromise = waitForReply(sendTo, questionId, signal);
+          replyPromise.catch(() => undefined);
+          if (signal?.aborted) {
+            rejectReplyWaiter(new Error("Cancelled"));
+            try {
+              await replyPromise;
+            } catch {}
+            return {
+              content: [{ type: "text", text: "Cancelled" }],
+              isError: true,
+            };
+          }
+          const sendResult = await connectedClient.send(sendTo, {
+            messageId: questionId,
+            text: formatChildOrchestratorMessage("ask", metadata, params.message),
+            expectsReply: true,
+          });
+          if (!sendResult.delivered) {
+            const errorText = sendResult.reason ?? "Session may not exist or has disconnected.";
+            rejectReplyWaiter(new Error(`Message to "${metadata.orchestratorTarget}" was not delivered: ${errorText}`));
+            if (replyPromise) {
+              try {
+                await replyPromise;
+              } catch {
+                // The waiter was already rejected above. Keep the delivery failure as the only error here.
+              }
+            }
+            return {
+              content: [{ type: "text", text: `Message to "${metadata.orchestratorTarget}" was not delivered: ${errorText}` }],
+              isError: true,
+            };
+          }
+          pi.appendEntry("intercom_sent", {
+            to: metadata.orchestratorTarget,
+            message: { text: params.message, reason: params.reason },
+            messageId: sendResult.id,
+            timestamp: Date.now(),
+            subagent: { runId: metadata.runId, agent: metadata.agent, index: metadata.index },
+          });
+          const replyMessage = await replyPromise;
+          const replyText = replyMessage.content.text;
+          const replyAttachments = replyMessage.content.attachments?.length
+            ? formatAttachments(replyMessage.content.attachments)
+            : "";
+          pi.appendEntry("intercom_received", {
+            from: metadata.orchestratorTarget,
+            message: { text: replyText, attachments: replyMessage.content.attachments },
+            messageId: replyMessage.id,
+            timestamp: replyMessage.timestamp,
+            subagent: { runId: metadata.runId, agent: metadata.agent, index: metadata.index },
+          });
+          return {
+            content: [{ type: "text", text: `**Reply from supervisor:**\n${replyText}${replyAttachments}` }],
+            isError: false,
+          };
+        } catch (error) {
+          rejectReplyWaiter(toError(error));
+          if (replyPromise) {
+            try {
+              await replyPromise;
+            } catch {
+              // The waiter is cleanup-only on this path. The real failure is the one from the outer catch.
+            }
+          }
+          return {
+            content: [{ type: "text", text: `Failed: ${getErrorMessage(error)}` }],
+            isError: true,
+          };
+        }
+      },
+    });
+  }
+
   pi.registerTool({
     name: "intercom",
     label: "Intercom",
@@ -739,6 +967,12 @@ Usage:
 
           try {
             const sendTo = await resolveSessionTarget(connectedClient, to) ?? to;
+            if (_signal?.aborted) {
+              return {
+                content: [{ type: "text", text: "Cancelled" }],
+                isError: true,
+              };
+            }
             if (sendTo === connectedClient.sessionId) {
               return {
                 content: [{ type: "text", text: "Cannot message the current session" }],

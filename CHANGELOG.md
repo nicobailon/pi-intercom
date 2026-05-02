@@ -4,6 +4,19 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-02
+
+### Added
+- Added a `contact_supervisor` tool for `pi-subagents` child sessions so delegated agents can request supervisor decisions or send meaningful progress updates with run metadata.
+- Documented subagent-to-supervisor escalation in the README and bundled `pi-intercom` skill.
+
+### Fixed
+- Made inline intercom message cards use the available terminal width instead of a narrow fixed width.
+- Cleared supervisor ask waiters correctly after cancellation or delivery failure so subagents can ask again.
+
+### Changed
+- Stopped tracking `package-lock.json` and ignored local `progress.md` memory files.
+
 ## [0.3.0] - 2026-04-27
 
 ### Added

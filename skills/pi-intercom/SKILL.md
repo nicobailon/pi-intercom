@@ -13,6 +13,10 @@ Use this skill when you need to coordinate work across multiple pi sessions
 running on the same machine. Pi-intercom enables direct 1:1 messaging between
 sessions for delegation, context sharing, and collaborative workflows.
 
+When you are supervising `pi-subagents`, delegated child agents can escalate to
+you via `contact_supervisor` if `pi-subagents` supplied child bridge metadata.
+This skill covers how to handle those orchestrator-side escalations.
+
 ## When to Use
 
 - **Task delegation**: Split work between a planner session and worker sessions
@@ -121,6 +125,60 @@ intercom({
   }]
 })
 ```
+
+### Pattern 6: Handle Subagent Escalations (Orchestrator Side)
+
+When `pi-subagents` spawns a delegated child and supplies child bridge metadata,
+that child can reach you through `contact_supervisor`. You receive a formatted
+message that includes run metadata:
+
+```
+**From subagent-worker-78f659a3-1**
+
+Subagent needs a supervisor decision.
+Run: 78f659a3
+Agent: worker
+Child index: 0
+
+Which API should I use?
+```
+
+**Reply using `reply`:**
+
+```typescript
+// The reply hint in the incoming message will show the exact call:
+intercom({ action: "reply", message: "Use the stable v2 API." })
+```
+
+This works because `reply` resolves the correct sender and message ID automatically.
+
+**Two types of escalations to expect:**
+
+| Type | What it means | How to respond |
+|------|---------------|----------------|
+| `need_decision` | Subagent is blocked and waiting for your answer. Has a 10-minute timeout. | Reply promptly with a clear decision. If you need more context, ask follow-up questions via `reply`. |
+| `progress_update` | Subagent is sharing meaningful progress or a plan-changing discovery. Not blocking. | Read and acknowledge. No reply required unless you want to redirect. |
+
+**When a subagent asks:**
+
+```typescript
+// In the turn triggered by the incoming ask:
+intercom({ action: "reply", message: "Use exponential backoff, max 3 retries." })
+```
+
+**If you receive multiple pending asks from different subagents:**
+
+```typescript
+intercom({ action: "pending" })
+// → Shows all unresolved inbound asks with sender, elapsed time, and preview
+
+intercom({ action: "reply", to: "subagent-worker-78f659a3-1", message: "Use the v2 API." })
+```
+
+**Important:** Only sessions where `pi-subagents` supplied child bridge metadata
+get the `contact_supervisor` tool. Normal sessions use the regular `intercom`
+tool. If you see the formatted supervisor decision/progress update message, treat
+it as a `contact_supervisor` escalation.
 
 ## Key Differences
 

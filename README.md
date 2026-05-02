@@ -20,7 +20,7 @@ Sometimes you're running multiple pi sessions — one researching, one executing
 
 Unlike pi-messenger (a shared chat room for multi-agent swarms), pi-intercom is for targeted 1:1 communication where you pick the recipient.
 
-Pi-intercom also integrates well with [pi-subagents](https://github.com/nicobailon/pi-subagents): use `pi-subagents` to spin up delegated workers, then use `intercom` for direct, session-to-session handoffs and clarifications.
+Pi-intercom also integrates well with [pi-subagents](https://github.com/nicobailon/pi-subagents): delegated child agents get a child-only `contact_supervisor` tool when `pi-subagents` supplies bridge metadata. Use `reason: "need_decision"` for blocking clarification and `reason: "progress_update"` for meaningful plan-changing updates. Normal sessions only see the regular `intercom` tool.
 
 ## In One Minute
 
@@ -105,7 +105,7 @@ intercom({
 When a message arrives, it appears inline in your chat with the sender's info and a reply hint:
 
 ```
-**📨 From research** (~/projects/api)
+**From research** (~/projects/api)
 
 To reply, use the intercom tool: intercom({ action: "reply", message: "..." })
 
@@ -193,7 +193,7 @@ intercom({
 When `replyHint` is enabled (the default), incoming messages include the exact `intercom()` call to respond:
 
 ```
-**📨 From planner** (~/projects/api)
+**From planner** (~/projects/api)
 
 To reply, use the intercom tool: intercom({ action: "reply", message: "..." })
 
@@ -212,6 +212,67 @@ This matters because the agent receiving the message doesn't need to reconstruct
 
 The planner typically uses `send`. If you prefer manual approval for outgoing non-reply messages, turn on `confirmSend: true`. The worker uses `ask` for everything (no confirmation needed, gets answers inline), so it can operate autonomously either way.
 
+## Workflow: Subagent-to-Supervisor Escalation
+
+This workflow requires [`pi-subagents`](https://github.com/nicobailon/pi-subagents) to be installed and to supply child bridge metadata. When `pi-subagents` spawns a delegated child with that metadata, the child session gets a subagent-only `contact_supervisor` tool in addition to the regular `intercom` tool. Normal sessions never see `contact_supervisor`.
+
+### When the Tool Appears
+
+`contact_supervisor` only registers when `pi-subagents` sets all of these environment variables:
+
+- `PI_SUBAGENT_ORCHESTRATOR_TARGET` — the supervisor session name or ID
+- `PI_SUBAGENT_RUN_ID` — the run identifier
+- `PI_SUBAGENT_CHILD_AGENT` — the agent type
+- `PI_SUBAGENT_CHILD_INDEX` — the child index within the run
+
+If any are missing, the session falls back to the regular `intercom` tool.
+
+### Two Reasons
+
+| Reason | Behavior | Use When |
+|--------|----------|----------|
+| `need_decision` | Sends an ask and blocks until the supervisor replies (10-minute timeout) | The subagent is blocked, uncertain, needs approval, or faces a product/API/scope decision |
+| `progress_update` | Fire-and-forget update to the supervisor | Meaningful progress or unexpected discoveries that change the plan |
+
+Do not use `contact_supervisor` for routine completion handoffs. Return the final subagent result normally through `pi-subagents`.
+
+### Example: Blocked Subagent Asks for Guidance
+
+```typescript
+contact_supervisor({
+  reason: "need_decision",
+  message: "The auth service returns 403 instead of 401 for expired tokens. Should I treat 403 as a re-auth trigger or a hard failure?"
+})
+// → Reply from supervisor: Treat 403 as re-auth trigger. Update the token refresh logic.
+```
+
+### Example: Progress Update
+
+```typescript
+contact_supervisor({
+  reason: "progress_update",
+  message: "Discovered the bug is in the retry wrapper, not the API client. Fixing the wrapper will also close issue #42."
+})
+// → Progress update sent to supervisor planner
+```
+
+### What the Supervisor Sees
+
+The supervisor receives a formatted message with run metadata:
+
+```
+**From subagent-worker-78f659a3-1**
+
+Subagent needs a supervisor decision.
+Run: 78f659a3
+Agent: worker
+Child index: 0
+
+Which API should I use?
+```
+
+Reply hints work the same as regular `intercom` ask/reply flows. The supervisor can reply with `intercom({ action: "reply", message: "..." })` and the subagent receives the answer as the tool result.
+
 ## Tool Reference
 
 ### intercom
@@ -224,7 +285,20 @@ The planner typically uses `send`. If you prefer manual approval for outgoing no
 | `attachments` | array | Optional `file`, `snippet`, or `context` attachments |
 | `replyTo` | string | Optional message ID for threading or replying to an `ask` |
 
-### Actions
+### contact_supervisor
+
+Only registered in sessions where `pi-subagents` supplied the required child bridge metadata. Contacts the supervisor session that delegated the current task.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `reason` | string | `"need_decision"` (blocking, waits for reply) or `"progress_update"` (fire-and-forget) |
+| `message` | string | The decision request or progress update |
+
+**`need_decision`** — Sends a formatted ask to the supervisor and blocks until it replies (10-minute timeout). The reply comes back as the tool result. Includes run metadata in the message so the supervisor knows which subagent is asking.
+
+**`progress_update`** — Sends a non-blocking update to the supervisor. Returns immediately after delivery. Use only for meaningful progress or unexpected discoveries that change the plan.
+
+### intercom actions
 
 **`list`** — Returns all active intercom-connected sessions (excluding self) with name, working directory, model, and status.
 

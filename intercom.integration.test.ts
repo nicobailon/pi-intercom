@@ -9,6 +9,13 @@ import { ReplyTracker } from "./reply-tracker.ts";
 import type { Message, SessionInfo } from "./types.ts";
 
 const repoDir = process.cwd();
+const childEnvKeys = [
+  "PI_SUBAGENT_ORCHESTRATOR_TARGET",
+  "PI_SUBAGENT_RUN_ID",
+  "PI_SUBAGENT_CHILD_AGENT",
+  "PI_SUBAGENT_CHILD_INDEX",
+  "PI_SUBAGENT_INTERCOM_SESSION_NAME",
+] as const;
 const sharedHomeDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-home-"));
 const previousHome = process.env.HOME;
 const previousUserProfile = process.env.USERPROFILE;
@@ -48,6 +55,82 @@ async function waitForBrokerReady(broker: ChildProcessWithoutNullStreams): Promi
   });
 
   await ready;
+}
+
+async function withChildOrchestratorEnv<T>(metadata: {
+  orchestratorTarget?: string;
+  runId?: string;
+  agent?: string;
+  index?: string;
+  sessionName?: string;
+}, fn: () => T | Promise<T>): Promise<T> {
+  const previous = new Map<string, string | undefined>();
+  for (const key of childEnvKeys) {
+    previous.set(key, process.env[key]);
+    delete process.env[key];
+  }
+  if (metadata.orchestratorTarget !== undefined) process.env.PI_SUBAGENT_ORCHESTRATOR_TARGET = metadata.orchestratorTarget;
+  if (metadata.runId !== undefined) process.env.PI_SUBAGENT_RUN_ID = metadata.runId;
+  if (metadata.agent !== undefined) process.env.PI_SUBAGENT_CHILD_AGENT = metadata.agent;
+  if (metadata.index !== undefined) process.env.PI_SUBAGENT_CHILD_INDEX = metadata.index;
+  if (metadata.sessionName !== undefined) process.env.PI_SUBAGENT_INTERCOM_SESSION_NAME = metadata.sessionName;
+  try {
+    return await fn();
+  } finally {
+    for (const key of childEnvKeys) {
+      const value = previous.get(key);
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+function createExtensionHarness(sessionName = "child-worker") {
+  const events = new EventEmitter();
+  const lifecycleHandlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
+  const tools: Array<{ name: string; execute: (...args: any[]) => Promise<any> }> = [];
+  const entries: Array<{ type: string; data: unknown }> = [];
+  const pi = {
+    getSessionName: () => sessionName,
+    events: {
+      on: (channel: string, handler: (payload: unknown) => void) => {
+        events.on(channel, handler);
+        return () => events.off(channel, handler);
+      },
+      emit: (channel: string, payload: unknown) => events.emit(channel, payload),
+    },
+    on: (event: string, handler: (payload: unknown, ctx: unknown) => unknown) => {
+      const handlers = lifecycleHandlers.get(event) ?? [];
+      handlers.push(handler);
+      lifecycleHandlers.set(event, handlers);
+    },
+    registerMessageRenderer: () => undefined,
+    registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => {
+      tools.push(tool);
+    },
+    registerCommand: () => undefined,
+    registerShortcut: () => undefined,
+    sendMessage: () => undefined,
+    appendEntry: (type: string, data: unknown) => entries.push({ type, data }),
+  };
+  const ctx = {
+    cwd: repoDir,
+    model: { id: "child-model" },
+    sessionManager: { getSessionId: () => "session-child-test" },
+    isIdle: () => true,
+    hasUI: false,
+  };
+  return {
+    pi,
+    ctx,
+    tools,
+    entries,
+    async emitLifecycle(event: string) {
+      for (const handler of lifecycleHandlers.get(event) ?? []) {
+        await handler({}, ctx);
+      }
+    },
+  };
 }
 
 async function setupClients() {
@@ -108,6 +191,174 @@ function waitForReply(client: InstanceType<typeof IntercomClient>, replyTo: stri
     client.on("message", handler);
   });
 }
+
+test("supervisor tool registers only when child metadata is present", async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+
+  await withChildOrchestratorEnv({}, () => {
+    const harness = createExtensionHarness();
+    piIntercomExtension(harness.pi as never);
+    assert.deepEqual(harness.tools.map((tool) => tool.name), ["intercom"]);
+  });
+
+  await withChildOrchestratorEnv({
+    orchestratorTarget: "orchestrator",
+    runId: "78f659a3",
+    agent: "worker",
+    index: "0",
+    sessionName: "subagent-worker-78f659a3-1",
+  }, () => {
+    const harness = createExtensionHarness();
+    piIntercomExtension(harness.pi as never);
+    assert.deepEqual(harness.tools.map((tool) => tool.name), ["contact_supervisor", "intercom"]);
+  });
+});
+
+test("child supervisor tool resolves target and includes run metadata", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { orchestrator, cleanup } = await setupClients();
+
+  try {
+    await withChildOrchestratorEnv({
+      orchestratorTarget: "orchestrator",
+      runId: "78f659a3",
+      agent: "worker",
+      index: "0",
+      sessionName: "subagent-worker-78f659a3-1",
+    }, async () => {
+      const harness = createExtensionHarness("subagent-worker-78f659a3-1");
+      piIntercomExtension(harness.pi as never);
+      await harness.emitLifecycle("session_start");
+
+      const supervisorTool = harness.tools.find((tool) => tool.name === "contact_supervisor")!;
+
+      const askReceived = once(orchestrator, "message") as Promise<[SessionInfo, Message]>;
+      const askResultPromise = supervisorTool.execute("ask-1", { reason: "need_decision", message: "Which API should I use?" }, new AbortController().signal, undefined, harness.ctx);
+      const [askFrom, askMessage] = await askReceived;
+      assert.equal(askMessage.expectsReply, true);
+      assert.match(askMessage.content.text, /Subagent needs a supervisor decision/);
+      assert.match(askMessage.content.text, /Run: 78f659a3/);
+      assert.match(askMessage.content.text, /Agent: worker/);
+      assert.match(askMessage.content.text, /Child index: 0/);
+      assert.match(askMessage.content.text, /Which API should I use\?/);
+
+      const reply = await orchestrator.send(askFrom.id, { text: "Use the stable API.", replyTo: askMessage.id });
+      assert.equal(reply.delivered, true);
+      const askResult = await askResultPromise;
+      assert.equal(askResult.isError, false);
+      assert.match(askResult.content[0]?.text ?? "", /Use the stable API/);
+
+      const updateReceived = once(orchestrator, "message") as Promise<[SessionInfo, Message]>;
+      const updateResult = await supervisorTool.execute("update-1", { reason: "progress_update", message: "Found a schema mismatch." }, new AbortController().signal, undefined, harness.ctx);
+      const [_updateFrom, updateMessage] = await updateReceived;
+      assert.equal(updateMessage.expectsReply, undefined);
+      assert.match(updateMessage.content.text, /Subagent progress update/);
+      assert.match(updateMessage.content.text, /Run: 78f659a3/);
+      assert.match(updateMessage.content.text, /Agent: worker/);
+      assert.match(updateMessage.content.text, /Found a schema mismatch/);
+      assert.equal(updateResult.isError, false);
+
+      await harness.emitLifecycle("session_shutdown");
+    });
+  } finally {
+    await cleanup();
+  }
+});
+
+test("child supervisor tool rejects invalid reasons", async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+
+  await withChildOrchestratorEnv({
+    orchestratorTarget: "orchestrator",
+    runId: "78f659a3",
+    agent: "worker",
+    index: "0",
+  }, async () => {
+    const harness = createExtensionHarness();
+    piIntercomExtension(harness.pi as never);
+    const supervisorTool = harness.tools.find((tool) => tool.name === "contact_supervisor")!;
+    const result = await supervisorTool.execute("invalid-1", { reason: "done", message: "Finished." }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(result.isError, true);
+    assert.match(result.content[0]?.text ?? "", /Invalid reason/);
+  });
+});
+
+test("child supervisor tool preserves delivery failure reasons", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { cleanup } = await setupClients();
+
+  try {
+    await withChildOrchestratorEnv({
+      orchestratorTarget: "missing-orchestrator",
+      runId: "78f659a3",
+      agent: "worker",
+      index: "0",
+    }, async () => {
+      const harness = createExtensionHarness();
+      piIntercomExtension(harness.pi as never);
+      await harness.emitLifecycle("session_start");
+      const supervisorTool = harness.tools.find((tool) => tool.name === "contact_supervisor")!;
+      const updateResult = await supervisorTool.execute("update-1", { reason: "progress_update", message: "Blocked." }, new AbortController().signal, undefined, harness.ctx);
+      assert.equal(updateResult.isError, true);
+      assert.match(updateResult.content[0]?.text ?? "", /Session not found/);
+      assert.equal(updateResult.details?.reason, "Session not found");
+
+      const askResult = await supervisorTool.execute("ask-1", { reason: "need_decision", message: "Which path?" }, new AbortController().signal, undefined, harness.ctx);
+      assert.equal(askResult.isError, true);
+      assert.match(askResult.content[0]?.text ?? "", /Session not found/);
+
+      const secondAskResult = await supervisorTool.execute("ask-2", { reason: "need_decision", message: "Still blocked." }, new AbortController().signal, undefined, harness.ctx);
+      assert.equal(secondAskResult.isError, true);
+      assert.match(secondAskResult.content[0]?.text ?? "", /Session not found/);
+      assert.doesNotMatch(secondAskResult.content[0]?.text ?? "", /Already waiting/);
+      await harness.emitLifecycle("session_shutdown");
+    });
+  } finally {
+    await cleanup();
+  }
+});
+
+test("child supervisor tool clears reply waiter when cancelled", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { orchestrator, cleanup } = await setupClients();
+
+  try {
+    await withChildOrchestratorEnv({
+      orchestratorTarget: "orchestrator",
+      runId: "78f659a3",
+      agent: "worker",
+      index: "0",
+      sessionName: "subagent-worker-78f659a3-1",
+    }, async () => {
+      const harness = createExtensionHarness("subagent-worker-78f659a3-1");
+      piIntercomExtension(harness.pi as never);
+      await harness.emitLifecycle("session_start");
+      const supervisorTool = harness.tools.find((tool) => tool.name === "contact_supervisor")!;
+
+      const controller = new AbortController();
+      const cancelledMessage = once(orchestrator, "message") as Promise<[SessionInfo, Message]>;
+      const cancelledResultPromise = supervisorTool.execute("ask-cancelled", { reason: "need_decision", message: "Should I continue?" }, controller.signal, undefined, harness.ctx);
+      await cancelledMessage;
+      controller.abort();
+      const cancelledResult = await cancelledResultPromise;
+      assert.equal(cancelledResult.isError, true);
+      assert.match(cancelledResult.content[0]?.text ?? "", /Cancelled/);
+
+      const nextMessage = once(orchestrator, "message") as Promise<[SessionInfo, Message]>;
+      const nextResultPromise = supervisorTool.execute("ask-next", { reason: "need_decision", message: "Can I ask again?" }, new AbortController().signal, undefined, harness.ctx);
+      const [from, message] = await nextMessage;
+      assert.match(message.content.text, /Can I ask again/);
+      const reply = await orchestrator.send(from.id, { text: "Yes.", replyTo: message.id });
+      assert.equal(reply.delivered, true);
+      const nextResult = await nextResultPromise;
+      assert.equal(nextResult.isError, false);
+      assert.match(nextResult.content[0]?.text ?? "", /Yes\./);
+      await harness.emitLifecycle("session_shutdown");
+    });
+  } finally {
+    await cleanup();
+  }
+});
 
 test("full ask/reply round-trip works with reply target resolved from current turn context", { concurrency: false }, async () => {
   const { planner, orchestrator, cleanup } = await setupClients();

@@ -26,7 +26,7 @@ export class InlineMessageComponent implements Component {
     if (width < 3) {
       return [truncateToWidth(`From ${this.from.name || this.from.id.slice(0, 8)}`, width)];
     }
-    const bodyWidth = Math.max(1, Math.min(width - 2, 58));
+    const bodyWidth = Math.max(1, width - 2);
 
     const senderName = this.from.name || this.from.id.slice(0, 8);
     const header = ` 📨 From: ${senderName} (${this.from.cwd}) `;
