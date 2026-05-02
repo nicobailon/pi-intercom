@@ -3,6 +3,12 @@ import { join } from "path";
 import { homedir } from "os";
 
 export interface IntercomConfig {
+  /** Broker command used to spawn the broker process (e.g. "npx" or "bun") */
+  brokerCommand: string;
+
+  /** Arguments passed to the broker command before the broker script path */
+  brokerArgs: string[];
+
   /** Require confirmation before non-reply sends from interactive sessions */
   confirmSend: boolean;
 
@@ -19,6 +25,8 @@ export interface IntercomConfig {
 const CONFIG_PATH = join(homedir(), ".pi/agent/intercom/config.json");
 
 const defaults: IntercomConfig = {
+  brokerCommand: "npx",
+  brokerArgs: ["--no-install", "tsx"],
   confirmSend: false,
   enabled: true,
   replyHint: true,
@@ -38,6 +46,31 @@ export function loadConfig(): IntercomConfig {
 
     const parsedConfig = parsed as Record<string, unknown>;
     const config: IntercomConfig = { ...defaults };
+
+    if (Object.hasOwn(parsedConfig, "brokerCommand")) {
+      if (typeof parsedConfig.brokerCommand !== "string") {
+        throw new Error(`"brokerCommand" must be a string`);
+      }
+      const brokerCommand = parsedConfig.brokerCommand.trim();
+      if (!brokerCommand) {
+        throw new Error(`"brokerCommand" must not be empty`);
+      }
+      config.brokerCommand = brokerCommand;
+    }
+
+    if (Object.hasOwn(parsedConfig, "brokerArgs")) {
+      if (!Array.isArray(parsedConfig.brokerArgs)) {
+        throw new Error(`"brokerArgs" must be an array`);
+      }
+      const brokerArgs: string[] = [];
+      for (const arg of parsedConfig.brokerArgs) {
+        if (typeof arg !== "string") {
+          throw new Error(`"brokerArgs" items must be strings`);
+        }
+        brokerArgs.push(arg);
+      }
+      config.brokerArgs = brokerArgs;
+    }
 
     if (Object.hasOwn(parsedConfig, "confirmSend")) {
       if (typeof parsedConfig.confirmSend !== "boolean") {

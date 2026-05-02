@@ -44,24 +44,53 @@ test("getBrokerLaunchSpec uses wscript launcher on Windows without writing files
   const intercomDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-"));
 
   try {
-    const spec = getBrokerLaunchSpec("C:/repo/broker.ts", "C:/repo", "win32", intercomDir, "C:/Program Files/nodejs/node.exe");
+    const spec = getBrokerLaunchSpec(
+      "C:/repo/broker.ts",
+      "npx",
+      ["--no-install", "tsx"],
+      "C:/repo",
+      "win32",
+      intercomDir,
+      "C:/Program Files/nodejs/node.exe",
+    );
     assert.equal(spec.command, "wscript.exe");
     assert.deepEqual(spec.args, [path.join(intercomDir, "broker-launch.vbs")]);
     assert.equal(spec.kind, "windows-launcher");
+    assert.equal(spec.launcherCommandLine, `"C:/Program Files/nodejs/node.exe" "${path.join("C:/repo", "node_modules", "tsx", "dist", "cli.mjs")}" "C:/repo/broker.ts"`);
     assert.equal(existsSync(path.join(intercomDir, "broker-launch.vbs")), false);
   } finally {
     rmSync(intercomDir, { recursive: true, force: true });
   }
 });
 
+test("getBrokerLaunchSpec uses custom broker command on Windows", () => {
+  const intercomDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-"));
+
+  try {
+    const spec = getBrokerLaunchSpec("C:/repo/broker.ts", "bun", ["--smol"], "C:/repo", "win32", intercomDir, "C:/Program Files/nodejs/node.exe");
+    assert.equal(spec.command, "wscript.exe");
+    assert.equal(spec.kind, "windows-launcher");
+    assert.equal(spec.launcherCommandLine, `"bun" "--smol" "C:/repo/broker.ts"`);
+  } finally {
+    rmSync(intercomDir, { recursive: true, force: true });
+  }
+});
+
 test("getBrokerLaunchSpec uses npx + tsx on non-Windows", () => {
-  const spec = getBrokerLaunchSpec("C:/repo/broker.ts", "C:/repo", "linux", "/tmp/intercom", "/usr/bin/node");
+  const spec = getBrokerLaunchSpec("C:/repo/broker.ts", "npx", ["--no-install", "tsx"], "C:/repo", "linux", "/tmp/intercom", "/usr/bin/node");
   assert.equal(spec.command, "npx");
   assert.deepEqual(spec.args, [
     "--no-install",
     "tsx",
     "C:/repo/broker.ts",
   ]);
+  assert.equal(spec.kind, "direct");
+});
+
+test("getBrokerLaunchSpec uses custom broker command on non-Windows", () => {
+  const spec = getBrokerLaunchSpec("/repo/broker.ts", "bun", [], "/repo", "linux", "/tmp/intercom", "/usr/bin/node");
+  assert.equal(spec.command, "bun");
+  assert.deepEqual(spec.args, ["/repo/broker.ts"]);
   assert.equal(spec.kind, "direct");
 });
 

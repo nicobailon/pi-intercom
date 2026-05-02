@@ -363,6 +363,8 @@ Create `~/.pi/agent/intercom/config.json`:
 
 ```json
 {
+  "brokerCommand": "npx",
+  "brokerArgs": ["--no-install", "tsx"],
   "confirmSend": false,
   "enabled": true,
   "replyHint": true,
@@ -372,10 +374,21 @@ Create `~/.pi/agent/intercom/config.json`:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
+| `brokerCommand` | `"npx"` | Command used to start the local broker process |
+| `brokerArgs` | `["--no-install", "tsx"]` | Arguments passed to `brokerCommand` before the broker script path |
 | `confirmSend` | false | Show a confirmation dialog before non-reply sends from an interactive session with UI |
 | `enabled` | true | Enable/disable intercom entirely |
 | `replyHint` | true | Include reply instruction in incoming messages |
 | `status` | — | Optional custom status suffix shown after the automatic lifecycle status, for example `thinking · researching` |
+
+For example, if you have Bun installed and want it to start the broker directly, use:
+
+```json
+{
+  "brokerCommand": "bun",
+  "brokerArgs": []
+}
+```
 
 Pi-intercom publishes live session status automatically. Sessions register as `idle`, switch to `thinking` while the agent is running, show `tool:<name>` during tool execution, and return to `idle` on agent completion. If `status` is set in config, it is appended as context instead of replacing the lifecycle status.
 
