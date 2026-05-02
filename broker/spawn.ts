@@ -70,6 +70,8 @@ function writeWindowsHiddenLauncher(
 
 export function getBrokerLaunchSpec(
   brokerPath: string,
+  brokerCommand: string,
+  brokerArgs: string[],
   extensionDir: string = EXTENSION_DIR,
   platform: NodeJS.Platform = process.platform,
   intercomDir: string = INTERCOM_DIR,
@@ -88,8 +90,8 @@ export function getBrokerLaunchSpec(
 
   return {
     kind: "direct",
-    command: "npx",
-    args: ["--no-install", "tsx", brokerPath],
+    command: brokerCommand,
+    args: [...brokerArgs, brokerPath],
   };
 }
 
@@ -113,7 +115,7 @@ function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
-export async function spawnBrokerIfNeeded(): Promise<void> {
+export async function spawnBrokerIfNeeded(brokerCommand: string, brokerArgs: string[]): Promise<void> {
   mkdirSync(INTERCOM_DIR, { recursive: true });
 
   if (await isBrokerRunning()) {
@@ -132,7 +134,7 @@ export async function spawnBrokerIfNeeded(): Promise<void> {
     }
 
     const brokerPath = join(dirname(fileURLToPath(import.meta.url)), "broker.ts");
-    const launch = getBrokerLaunchSpec(brokerPath);
+    const launch = getBrokerLaunchSpec(brokerPath, brokerCommand, brokerArgs);
     if (launch.kind === "windows-launcher") {
       writeWindowsHiddenLauncher(launch.launcherCommandLine, launch.launcherPath);
     }

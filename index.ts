@@ -661,7 +661,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       client = nextClient;
       attachClientHandlers(nextClient);
       try {
-        await spawnBrokerIfNeeded();
+        await spawnBrokerIfNeeded(config.brokerCommand, config.brokerArgs);
         await nextClient.connect(buildRegistration());
         if (shuttingDown) {
           await nextClient.disconnect();
