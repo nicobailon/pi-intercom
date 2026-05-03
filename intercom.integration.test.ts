@@ -91,21 +91,49 @@ interface CapturedToolResult {
   details?: Record<string, unknown>;
 }
 
+interface RenderToolResult {
+  content: Array<{ type: string; text: string }>;
+  details?: Record<string, unknown>;
+}
+
+interface RenderedComponent {
+  render(width: number): string[];
+}
+
+interface RenderTheme {
+  fg(name: string, text: string): string;
+  bold(text: string): string;
+}
+
 interface CapturedTool {
   name: string;
   parameters?: unknown;
   execute: (toolCallId: string, params: Record<string, unknown>, signal: AbortSignal, onUpdate: unknown, ctx: unknown) => Promise<CapturedToolResult>;
+  renderCall?: (args: Record<string, unknown>, theme: RenderTheme, context: Record<string, unknown>) => RenderedComponent;
+  renderResult?: (result: RenderToolResult, options: { expanded?: boolean; isPartial?: boolean }, theme: RenderTheme, context: Record<string, unknown>) => RenderedComponent;
+}
+
+const renderTheme: RenderTheme = {
+  fg: (_name, text) => text,
+  bold: (text) => text,
+};
+
+function renderToText(component: RenderedComponent): string {
+  return component.render(120).map((line) => line.trimEnd()).join("\n");
 }
 
 function createExtensionHarness(sessionName = "child-worker", options: {
   abort?: () => void;
   hasUI?: boolean;
   isIdle?: () => boolean;
+  ui?: unknown;
 } = {}) {
   const events = new EventEmitter();
   const lifecycleHandlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
+  const commands = new Map<string, (args: string, ctx: unknown) => unknown>();
   const tools: CapturedTool[] = [];
   const entries: Array<{ type: string; data: unknown }> = [];
+  const sentMessages: Array<{ message: { customType?: string; content?: string; details?: unknown }; options?: { triggerTurn?: boolean; deliverAs?: string } }> = [];
   const pi = {
     getSessionName: () => sessionName,
     events: {
@@ -124,9 +152,13 @@ function createExtensionHarness(sessionName = "child-worker", options: {
     registerTool: (tool: CapturedTool) => {
       tools.push(tool);
     },
-    registerCommand: () => undefined,
+    registerCommand: (name: string, command: { handler: (args: string, ctx: unknown) => unknown }) => {
+      commands.set(name, command.handler);
+    },
     registerShortcut: () => undefined,
-    sendMessage: () => undefined,
+    sendMessage: (message: { customType?: string; content?: string; details?: unknown }, options?: { triggerTurn?: boolean; deliverAs?: string }) => {
+      sentMessages.push({ message, options });
+    },
     appendEntry: (type: string, data: unknown) => entries.push({ type, data }),
   };
   const ctx = {
@@ -136,15 +168,18 @@ function createExtensionHarness(sessionName = "child-worker", options: {
     isIdle: options.isIdle ?? (() => true),
     hasUI: options.hasUI ?? false,
     abort: options.abort ?? (() => undefined),
+    ui: options.ui,
   };
   return {
     pi,
     ctx,
     tools,
+    commands,
     entries,
-    async emitLifecycle(event: string) {
+    sentMessages,
+    async emitLifecycle(event: string, payload: unknown = {}, eventContext: unknown = ctx) {
       for (const handler of lifecycleHandlers.get(event) ?? []) {
-        await handler({}, ctx);
+        await handler(payload, eventContext);
       }
     },
   };
@@ -214,6 +249,289 @@ function waitForReply(client: InstanceType<typeof IntercomClient>, replyTo: stri
   });
 }
 
+async function waitForSessionByName(client: InstanceType<typeof IntercomClient>, name: string): Promise<SessionInfo> {
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline) {
+    const session = (await client.listSessions()).find((candidate) => candidate.name === name);
+    if (session) {
+      return session;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  const sessions = await client.listSessions();
+  throw new Error(`Timed out waiting for ${name}; saw ${JSON.stringify(sessions.map((session) => session.name))}`);
+}
+
+async function waitForSessionStatus(client: InstanceType<typeof IntercomClient>, name: string, status: string): Promise<SessionInfo> {
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline) {
+    const session = (await client.listSessions()).find((candidate) => candidate.name === name);
+    if (session?.status === status) {
+      return session;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  const sessions = await client.listSessions();
+  throw new Error(`Timed out waiting for ${name} status ${status}; saw ${JSON.stringify(sessions.map((session) => ({ name: session.name, status: session.status })))}`);
+}
+
+async function waitForSessionModel(client: InstanceType<typeof IntercomClient>, name: string, model: string): Promise<SessionInfo> {
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline) {
+    const session = (await client.listSessions()).find((candidate) => candidate.name === name);
+    if (session?.model === model) {
+      return session;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  const sessions = await client.listSessions();
+  throw new Error(`Timed out waiting for ${name} model ${model}; saw ${JSON.stringify(sessions.map((session) => ({ name: session.name, model: session.model })))}`);
+}
+
+test("intercom tool renders compact call and result rows", async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness();
+
+  piIntercomExtension(harness.pi as never);
+  const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+
+  assert.ok(intercomTool.renderCall);
+  assert.ok(intercomTool.renderResult);
+  assert.match(renderToText(intercomTool.renderCall({
+    action: "ask",
+    to: "planner",
+    message: "Need a decision before I continue with this implementation.",
+    attachments: [{ type: "snippet", name: "note.ts", content: "const ok = true;" }],
+  }, renderTheme, {})), /intercom ask → planner \(1 attachment\)\n  Need a decision/);
+
+  const resultText = renderToText(intercomTool.renderResult({
+    content: [{ type: "text", text: "Message sent to planner" }],
+    details: { delivered: true, messageId: "abcdef123456" },
+  }, { isPartial: false, expanded: false }, renderTheme, { isError: false, expanded: false }));
+  assert.match(resultText, /✓ Message sent to planner \(abcdef12\)/);
+
+  const errorText = renderToText(intercomTool.renderResult({
+    content: [{ type: "text", text: "Missing 'to' or 'message' parameter" }],
+    details: { error: true, reason: "Missing target" },
+  }, { isPartial: false, expanded: true }, renderTheme, { isError: false, expanded: true }));
+  assert.match(errorText, /✗ Missing 'to' or 'message' parameter/);
+  assert.match(errorText, /Reason: Missing target/);
+});
+
+test("contact supervisor tool renders reason and reply state", async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+
+  await withChildOrchestratorEnv({
+    orchestratorTarget: "orchestrator",
+    runId: "78f659a3",
+    agent: "worker",
+    index: "0",
+  }, () => {
+    const harness = createExtensionHarness();
+    piIntercomExtension(harness.pi as never);
+    const supervisorTool = harness.tools.find((tool) => tool.name === "contact_supervisor")!;
+
+    assert.ok(supervisorTool.renderCall);
+    assert.ok(supervisorTool.renderResult);
+    assert.match(renderToText(supervisorTool.renderCall({
+      reason: "interview_request",
+      message: "Please answer these before I continue.",
+      interview: { title: "API migration", questions: [] },
+    }, renderTheme, {})), /contact_supervisor interview_request API migration\n  Please answer/);
+
+    const warningText = renderToText(supervisorTool.renderResult({
+      content: [{ type: "text", text: "Reply from supervisor:\nUse stable API" }],
+      details: { structuredReplyParseError: "reply JSON must include a responses array" },
+    }, { isPartial: false }, renderTheme, { isError: false }));
+    assert.match(warningText, /⚠ Reply from supervisor:\nUse stable API/);
+    assert.match(warningText, /Structured reply parse issue: reply JSON must include a responses array/);
+
+    const failureText = renderToText(supervisorTool.renderResult({
+      content: [{ type: "text", text: "Invalid reason" }],
+      details: { error: true },
+    }, { isPartial: false }, renderTheme, { isError: false }));
+    assert.match(failureText, /✗ Invalid reason/);
+  });
+});
+
+test("sessions publish automatic lifecycle status", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+  const harness = createExtensionHarness("status-worker", { hasUI: true });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+
+    await waitForSessionStatus(planner, "status-worker", "idle");
+
+    const freshEventContext = {
+      ...harness.ctx,
+      model: { id: "fresh-model" },
+      sessionManager: { getSessionId: () => "session-child-test" },
+    };
+    await harness.emitLifecycle("model_select", { model: { id: "fresh-model" } }, freshEventContext);
+    await waitForSessionModel(planner, "status-worker", "fresh-model");
+
+    await harness.emitLifecycle("agent_start");
+    await waitForSessionStatus(planner, "status-worker", "thinking");
+
+    await harness.emitLifecycle("tool_execution_start", { toolCallId: "tool-1", toolName: "bash" });
+    await waitForSessionStatus(planner, "status-worker", "tool:bash");
+    await harness.emitLifecycle("tool_execution_start", { toolCallId: "tool-2", toolName: "read" });
+
+    await harness.emitLifecycle("tool_execution_end", { toolCallId: "tool-1", toolName: "bash" });
+    await waitForSessionStatus(planner, "status-worker", "tool:read");
+
+    await harness.emitLifecycle("tool_execution_end", { toolCallId: "tool-2", toolName: "read" });
+    await waitForSessionStatus(planner, "status-worker", "thinking");
+
+    await harness.emitLifecycle("agent_end");
+    await waitForSessionStatus(planner, "status-worker", "idle");
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("busy interactive sessions idle-gate top-level asks without aborting", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+  let abortCount = 0;
+  let idle = false;
+  const harness = createExtensionHarness("interactive-worker", {
+    abort: () => { abortCount += 1; },
+    hasUI: true,
+    isIdle: () => idle,
+  });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+
+    const target = await waitForSessionByName(planner, "interactive-worker");
+
+    const delivered = await planner.send(target.id, {
+      messageId: "interactive-busy-ask",
+      text: "Can you respond after your current turn?",
+      expectsReply: true,
+    });
+    assert.equal(delivered.delivered, true);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.equal(abortCount, 0);
+    assert.equal(harness.sentMessages.length, 0);
+
+    idle = true;
+    await harness.emitLifecycle("agent_end");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.equal(abortCount, 0);
+    assert.equal(harness.sentMessages.length, 1);
+    assert.equal(harness.sentMessages[0]?.message.customType, "intercom_message");
+    assert.equal(harness.sentMessages[0]?.options?.triggerTurn, true);
+    assert.match(harness.sentMessages[0]?.message.content ?? "", /Can you respond after your current turn/);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("deferred startup connect is cancelled on shutdown", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+  const harness = createExtensionHarness("shutdown-before-start", { hasUI: true });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    await harness.emitLifecycle("session_shutdown");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const sessions = await planner.listSessions();
+    assert.equal(sessions.some((session) => session.name === "shutdown-before-start"), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("stale overlay work stops after same-session restart", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+  let customCalls = 0;
+  let resolveFirstCustom: ((value: unknown) => void) | undefined;
+  const ui = {
+    notify: () => undefined,
+    custom: async () => {
+      customCalls += 1;
+      if (customCalls > 1) {
+        return { sent: false };
+      }
+      return new Promise((resolve) => {
+        resolveFirstCustom = resolve;
+      });
+    },
+  };
+  const harness = createExtensionHarness("overlay-worker", { hasUI: true, ui });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    await waitForSessionByName(planner, "overlay-worker");
+
+    const overlayPromise = Promise.resolve(harness.commands.get("intercom")!("", harness.ctx));
+    const deadline = Date.now() + 2000;
+    while (!resolveFirstCustom && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.ok(resolveFirstCustom, "overlay should reach the session picker");
+
+    const plannerSession = await waitForSessionByName(planner, "planner");
+    await harness.emitLifecycle("session_shutdown");
+    await harness.emitLifecycle("session_start");
+    resolveFirstCustom(plannerSession);
+    await overlayPromise;
+
+    assert.equal(customCalls, 1);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("queued inbound messages are discarded after shutdown", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+  let idle = false;
+  const harness = createExtensionHarness("disposed-worker", {
+    hasUI: true,
+    isIdle: () => idle,
+  });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const target = await waitForSessionByName(planner, "disposed-worker");
+
+    const delivered = await planner.send(target.id, {
+      messageId: "disposed-ask",
+      text: "This should not deliver after shutdown.",
+      expectsReply: true,
+    });
+    assert.equal(delivered.delivered, true);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(harness.sentMessages.length, 0);
+
+    await harness.emitLifecycle("session_shutdown");
+    idle = true;
+    await harness.emitLifecycle("agent_end");
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    assert.equal(harness.sentMessages.length, 0);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("busy non-interactive sessions auto-reply to top-level asks without aborting", { concurrency: false }, async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const { planner, cleanup } = await setupClients();
@@ -228,9 +546,7 @@ test("busy non-interactive sessions auto-reply to top-level asks without abortin
     piIntercomExtension(harness.pi as never);
     await harness.emitLifecycle("session_start");
 
-    const sessions = await planner.listSessions();
-    const target = sessions.find((session) => session.name === "pipe-worker");
-    assert.ok(target, "pipe-worker should register with intercom");
+    const target = await waitForSessionByName(planner, "pipe-worker");
 
     const askId = "pipe-mode-ask";
     const replyPromise = waitForReply(planner, askId, 1000);

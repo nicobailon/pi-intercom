@@ -70,13 +70,15 @@ Press **Alt+M** or type `/intercom` to open the session list overlay:
 
 ### From the Agent
 
-The agent can list sessions and send messages using the `intercom` tool. For common patterns like planner-worker delegation, the bundled `pi-intercom` skill provides copy-paste ready examples:
+The agent can list sessions and send messages using the `intercom` tool. Tool calls and results render as compact transcript rows so send/ask/reply flows are easy to scan. For common patterns like planner-worker delegation, the bundled `pi-intercom` skill provides copy-paste ready examples:
 
 ```typescript
 // List active sessions
 intercom({ action: "list" })
-// → • research — ~/projects/api (claude-sonnet-4) [researching]
-// → • executor — ~/projects/api (claude-sonnet-4) [idle]
+// → **Current session:**
+// → • executor (20d43841) — ~/projects/api (claude-sonnet-4) [self, idle]
+// → **Other sessions:**
+// → • research (6332faab) — ~/projects/api (claude-sonnet-4) [same cwd, thinking]
 
 // Send a message
 intercom({ action: "send", to: "research", message: "Check if UserService.validate() handles null" })
@@ -113,7 +115,7 @@ Found the issue — UserService.validate() doesn't check for null input.
 See auth.ts:142-156.
 ```
 
-The reply hint (enabled by default) now points to `intercom({ action: "reply", ... })`, which resolves to the exact sender and original message ID under the hood. Threading is still exact — replies still go out as a normal `send` with the right `replyTo` value so the waiting caller can match the response. The message triggers a new turn, so the agent can respond or act on it immediately. If the message includes attachments, their content is also included in the agent-visible message body. Messages are rendered inline in the chat and also written to Pi session history as extension entries.
+The reply hint (enabled by default) points to `intercom({ action: "reply", ... })`, so recipients do not need raw sender or `replyTo` IDs. Idle recipients get a new turn immediately; busy interactive recipients receive the message once they go idle. Attachment content is included in the agent-visible body, and messages are rendered inline and stored in Pi session history.
 
 ## Workflow: Planner-Worker Coordination
 
@@ -200,7 +202,7 @@ To reply, use the intercom tool: intercom({ action: "reply", message: "..." })
 Only GET/PUT/DELETE — never POST. Max 3 retries with exponential backoff starting at 100ms.
 ```
 
-This matters because the agent receiving the message doesn't need to reconstruct raw `to` and `replyTo` IDs — the hint is right there. Combined with `triggerTurn` (which wakes the recipient agent on delivery), it enables real back-and-forth conversation without any complex protocol machinery. If the reply happens later instead of in the triggered turn, `intercom({ action: "reply" })` falls back to the single unresolved inbound ask, and `intercom({ action: "pending" })` shows who is still waiting.
+This matters because the agent receiving the message doesn't need to reconstruct raw `to` and `replyTo` IDs — the hint is right there. Combined with idle-gated `triggerTurn` delivery, it enables real back-and-forth conversation without interrupting work in progress. If the reply happens later instead of in the triggered turn, `intercom({ action: "reply" })` falls back to the single unresolved inbound ask, and `intercom({ action: "pending" })` shows who is still waiting.
 
 ### `send` vs `ask`
 
@@ -334,7 +336,7 @@ Only registered in sessions where `pi-subagents` supplied the required child bri
 
 ### intercom actions
 
-**`list`** — Returns all active intercom-connected sessions (excluding self) with name, working directory, model, and status.
+**`list`** — Returns the current session plus other active intercom-connected sessions with name, short ID, working directory, model, and live status. Status is derived automatically from Pi lifecycle events: `idle`, `thinking`, or `tool:<name>`.
 
 **`send`** — Sends a message to the specified session. By default it sends immediately, including in interactive sessions. Set `confirmSend: true` in config if you want a confirmation dialog for non-reply sends. Replies that include `replyTo` skip confirmation. Returns delivery confirmation.
 
@@ -373,7 +375,9 @@ Create `~/.pi/agent/intercom/config.json`:
 | `confirmSend` | false | Show a confirmation dialog before non-reply sends from an interactive session with UI |
 | `enabled` | true | Enable/disable intercom entirely |
 | `replyHint` | true | Include reply instruction in incoming messages |
-| `status` | — | Custom status shown to other sessions |
+| `status` | — | Optional custom status suffix shown after the automatic lifecycle status, for example `thinking · researching` |
+
+Pi-intercom publishes live session status automatically. Sessions register as `idle`, switch to `thinking` while the agent is running, show `tool:<name>` during tool execution, and return to `idle` on agent completion. If `status` is set in config, it is appended as context instead of replacing the lifecycle status.
 
 ## How It Works
 
@@ -404,6 +408,8 @@ graph TB
 The broker is a standalone TypeScript process that manages session registration and message routing. It auto-spawns when the first intercom-enabled session needs it and exits after 5 seconds when the last connected session disconnects. Clients now reconnect automatically if the broker disappears and later comes back.
 
 Messages use length-prefixed JSON over a local socket/pipe transport (4-byte length + JSON payload) to handle fragmentation properly. The protocol includes request correlation for session listing, explicit delivery failures, and validation for malformed or out-of-order messages.
+
+Async extension work (startup, inbound flushes, reconnects, overlays, and relays) no-ops if the session shuts down or reloads before it settles.
 
 Runtime files live at `~/.pi/agent/intercom/`:
 - `broker.sock` — Unix domain socket for communication (macOS/Linux only; Windows uses a named pipe instead)

@@ -6,7 +6,7 @@ export interface IntercomConfig {
   /** Require confirmation before non-reply sends from interactive sessions */
   confirmSend: boolean;
 
-  /** Custom status shown to other sessions */
+  /** Optional custom status suffix shown after automatic lifecycle status */
   status?: string;
   
   /** Enable/disable intercom (default: true) */

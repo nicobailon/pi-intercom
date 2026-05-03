@@ -70,7 +70,7 @@ Before sending, verify who's connected:
 
 ```typescript
 intercom({ action: "list" })
-// → Shows all connected sessions with names, cwd, models, and status
+// → Shows all connected sessions with names, cwd, models, and live status (`idle`, `thinking`, `tool:<name>`)
 ```
 
 ### Pattern 3: Reply Naturally
@@ -200,7 +200,7 @@ it as a `contact_supervisor` escalation.
 | `ask` | Blocks until reply (10 min timeout) | You need an answer to continue |
 | `reply` | Responds to the active or pending inbound ask | You were asked something and need to answer naturally |
 | `pending` | Lists unresolved inbound asks | You need to see who is waiting before replying |
-| `list` | Returns all sessions | You need to discover targets |
+| `list` | Returns all sessions with live status | You need to discover targets or choose an idle peer |
 | `status` | Returns your connection state | Troubleshooting |
 
 ## Optional: Visible Peer Sessions via cmux or tmux

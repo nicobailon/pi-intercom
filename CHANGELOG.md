@@ -4,6 +4,14 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-05-03
+
+### Changed
+- Busy interactive sessions now queue inbound intercom messages until the receiver is idle instead of aborting the active turn.
+- Sessions now publish automatic lifecycle status (`idle`, `thinking`, or `tool:<name>`) through intercom presence updates.
+- Deferred startup connection, delayed inbound flushes, overlay work, reconnect attempts, and relay callbacks now guard against stale session contexts after shutdown or reload.
+- `intercom` and `contact_supervisor` tool calls/results now use compact custom transcript renderers.
+
 ## [0.4.1] - 2026-05-02
 
 ### Added
