@@ -20,6 +20,9 @@ export interface IntercomConfig {
   
   /** Show reply hint in incoming messages (default: true) */
   replyHint: boolean;
+
+  /** Timeout in ms for ask/contact_supervisor replies. Infinity = no timeout. Default: 600000 (10 minutes) */
+  replyTimeoutMs?: number;
 }
 
 const CONFIG_PATH = join(homedir(), ".pi/agent/intercom/config.json");
@@ -30,6 +33,7 @@ const defaults: IntercomConfig = {
   confirmSend: false,
   enabled: true,
   replyHint: true,
+  replyTimeoutMs: 600_000,
 };
 
 export function loadConfig(): IntercomConfig {
@@ -98,6 +102,16 @@ export function loadConfig(): IntercomConfig {
         throw new Error(`"status" must be a string`);
       }
       config.status = parsedConfig.status;
+    }
+
+    if (Object.hasOwn(parsedConfig, "replyTimeoutMs")) {
+      if (typeof parsedConfig.replyTimeoutMs !== "number") {
+        throw new Error(`"replyTimeoutMs" must be a number`);
+      }
+      if (!Number.isFinite(parsedConfig.replyTimeoutMs) && parsedConfig.replyTimeoutMs !== Infinity) {
+        throw new Error(`"replyTimeoutMs" must be a finite number or Infinity`);
+      }
+      config.replyTimeoutMs = parsedConfig.replyTimeoutMs;
     }
 
     return config;

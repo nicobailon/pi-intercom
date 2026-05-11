@@ -14,11 +14,15 @@ export interface Message {
   timestamp: number;
   replyTo?: string;
   expectsReply?: boolean;
+  contentType?: MessageContentType;
   content: {
     text: string;
     attachments?: Attachment[];
   };
+  payload?: Record<string, unknown>;
 }
+
+export type MessageContentType = string;
 
 export interface Attachment {
   type: "file" | "snippet" | "context";

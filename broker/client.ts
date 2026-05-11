@@ -13,6 +13,8 @@ interface SendOptions {
   replyTo?: string;
   expectsReply?: boolean;
   messageId?: string;
+  contentType?: string;
+  payload?: Record<string, unknown>;
 }
 
 interface SendResult {
@@ -487,6 +489,8 @@ export class IntercomClient extends EventEmitter {
       timestamp: Date.now(),
       replyTo: options.replyTo,
       expectsReply: options.expectsReply,
+      contentType: options.contentType,
+      payload: options.payload,
       content: {
         text: options.text,
         attachments: options.attachments,
