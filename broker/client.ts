@@ -251,6 +251,8 @@ export class IntercomClient extends EventEmitter {
       socket.on("close", onClose);
       
       socket.on("error", onSocketError);
+      // Keep a permanent guard for late read errors emitted during or after destroy().
+      socket.on("error", () => {});
       this.once("_registered", onRegistered);
       
       try {
