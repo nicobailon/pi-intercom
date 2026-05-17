@@ -4,6 +4,9 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+### Fixed
+- Switched Pi runtime imports and peer dependencies from the deprecated `@mariozechner/*` packages to `@earendil-works/*` so `pi install npm:pi-intercom` no longer pulls deprecated package warnings.
+
 ## [0.6.0] - 2026-05-03
 
 ### Added
