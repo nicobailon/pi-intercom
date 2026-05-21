@@ -559,7 +559,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     if (!client || !currentSessionId || !getLiveContext()) {
       return;
     }
-    client.updatePresence({ status: currentStatus() });
+    client.updatePresence({ ...buildPresenceIdentity(pi, currentSessionId), status: currentStatus() });
   }
   function currentSessionTargetMatches(to: string, resolvedTo?: string | null, activeClient?: IntercomClient): boolean {
     const targets = new Set<string>();
@@ -1018,6 +1018,24 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         status: currentStatus(),
       });
     }
+  });
+
+
+  pi.registerCommand("intercom-name", {
+    description: "Set the pi session name and immediately sync pi-intercom presence (usage: /intercom-name <name>)",
+    handler: async (args, ctx) => {
+      const name = args.trim();
+      if (!name) {
+        const current = pi.getSessionName();
+        ctx.ui.notify(current ? `Intercom session name: ${current}` : "Usage: /intercom-name <name>", "info");
+        return;
+      }
+
+      pi.setSessionName(name);
+      currentSessionId = ctx.sessionManager.getSessionId();
+      syncPresenceIdentity(currentSessionId);
+      ctx.ui.notify(`Intercom session name synced: ${name}`, "info");
+    },
   });
 
   pi.registerMessageRenderer("intercom_message", (message, _options, theme) => {
