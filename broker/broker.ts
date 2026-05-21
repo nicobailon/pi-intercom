@@ -4,7 +4,7 @@ import { join } from "path";
 import { homedir } from "os";
 import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.js";
-import { getBrokerSocketPath } from "./paths.js";
+import { getBrokerSocketPath, isTcpMode, parseTcpPort, writeBrokerPort } from "./paths.js";
 import type { SessionInfo, Message, Attachment, BrokerMessage } from "../types.js";
 
 const INTERCOM_DIR = join(homedir(), ".pi/agent/intercom");
@@ -112,9 +112,16 @@ class IntercomBroker {
   }
 
   start(): void {
-    this.server.listen(SOCKET_PATH, () => {
+    const listenOpts: any = isTcpMode(SOCKET_PATH)
+      ? { port: parseTcpPort(SOCKET_PATH), host: '127.0.0.1' }
+      : SOCKET_PATH;
+
+    this.server.listen(listenOpts, () => {
       writeFileSync(PID_PATH, String(process.pid));
-      console.log(`Intercom broker started (pid: ${process.pid})`);
+      if (isTcpMode(SOCKET_PATH)) {
+        writeBrokerPort(parseTcpPort(SOCKET_PATH));
+      }
+      console.log(`Intercom broker started (pid: ${process.pid}, transport: ${isTcpMode(SOCKET_PATH) ? 'TCP port ' + SOCKET_PATH : 'pipe ' + SOCKET_PATH})`);
     });
     process.on("SIGTERM", () => this.shutdown());
     process.on("SIGINT", () => this.shutdown());

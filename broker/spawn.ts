@@ -4,7 +4,7 @@ import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { homedir } from "os";
 import net from "net";
-import { getBrokerSocketPath } from "./paths.js";
+import { getBrokerSocketPath, isTcpMode, parseTcpPort } from "./paths.js";
 
 const INTERCOM_DIR = join(homedir(), ".pi/agent/intercom");
 const EXTENSION_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -212,7 +212,9 @@ async function isBrokerRunning(): Promise<boolean> {
 
 function checkSocketConnectable(): Promise<boolean> {
   return new Promise((resolve) => {
-    const socket = net.connect(BROKER_SOCKET);
+    const socket = isTcpMode(BROKER_SOCKET)
+      ? net.connect({ port: parseTcpPort(BROKER_SOCKET), host: '127.0.0.1' })
+      : net.connect(BROKER_SOCKET);
     const finish = (isConnected: boolean) => {
       clearTimeout(timeout);
       socket.off("connect", onConnect);

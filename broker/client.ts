@@ -2,7 +2,7 @@ import { EventEmitter } from "events";
 import net from "net";
 import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.js";
-import { getBrokerSocketPath } from "./paths.js";
+import { getBrokerSocketPath, isTcpMode, parseTcpPort } from "./paths.js";
 import type { SessionInfo, Message, Attachment } from "../types.js";
 
 const BROKER_SOCKET = getBrokerSocketPath();
@@ -155,7 +155,9 @@ export class IntercomClient extends EventEmitter {
     }
 
     return new Promise((resolve, reject) => {
-      const socket = net.connect(BROKER_SOCKET);
+      const socket = isTcpMode(BROKER_SOCKET)
+        ? net.connect({ port: parseTcpPort(BROKER_SOCKET), host: '127.0.0.1' })
+        : net.connect(BROKER_SOCKET);
       this.socket = socket;
       this.disconnectError = null;
       let settled = false;
