@@ -1020,10 +1020,13 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
   });
 
-  pi.registerMessageRenderer("intercom_message", (message, _options, theme) => {
+  pi.registerMessageRenderer("intercom_message", (message, options, theme) => {
     const details = message.details as { from: SessionInfo; message: Message; replyCommand?: string; bodyText?: string } | undefined;
     if (!details) return undefined;
-    return new InlineMessageComponent(details.from, details.message, theme, details.replyCommand, details.bodyText);
+    // CustomMessageComponent calls our renderer with { expanded } on setExpanded/rebuild.
+    // Collapse intercom when tool outputs are collapsed, expand when tool outputs expand.
+    const collapsed = !options.expanded;
+    return new InlineMessageComponent(details.from, details.message, theme, details.replyCommand, details.bodyText, collapsed);
   });
 
   const childOrchestratorMetadata = readChildOrchestratorMetadata();
