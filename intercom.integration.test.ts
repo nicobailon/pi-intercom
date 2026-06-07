@@ -773,6 +773,57 @@ test("child supervisor tool preserves delivery failure reasons", { concurrency: 
   }
 });
 
+test("child supervisor tool isolates concurrent reply waiters by replyTo", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { orchestrator, cleanup } = await setupClients();
+
+  try {
+    await withChildOrchestratorEnv({
+      orchestratorTarget: "orchestrator",
+      runId: "78f659a3",
+      agent: "worker",
+      index: "0",
+      sessionName: "subagent-worker-78f659a3-1",
+    }, async () => {
+      const harness = createExtensionHarness("subagent-worker-78f659a3-1");
+      piIntercomExtension(harness.pi as never);
+      await harness.emitLifecycle("session_start");
+      const supervisorTool = harness.tools.find((tool) => tool.name === "contact_supervisor")!;
+
+      const received: Array<[SessionInfo, Message]> = [];
+      const receivedBoth = new Promise<void>((resolve) => {
+        orchestrator.on("message", (from, message) => {
+          received.push([from, message]);
+          if (received.length === 2) resolve();
+        });
+      });
+
+      const firstResultPromise = supervisorTool.execute("ask-concurrent-1", { reason: "need_decision", message: "First decision?" }, new AbortController().signal, undefined, harness.ctx);
+      const secondResultPromise = supervisorTool.execute("ask-concurrent-2", { reason: "need_decision", message: "Second decision?" }, new AbortController().signal, undefined, harness.ctx);
+      await receivedBoth;
+
+      assert.equal(received.length, 2);
+      assert.notEqual(received[0]?.[1].id, received[1]?.[1].id);
+      assert.match(received[0]?.[1].content.text ?? "", /First decision\?/);
+      assert.match(received[1]?.[1].content.text ?? "", /Second decision\?/);
+
+      const secondReply = await orchestrator.send(received[1]![0].id, { text: "Second answer.", replyTo: received[1]![1].id });
+      assert.equal(secondReply.delivered, true);
+      const firstReply = await orchestrator.send(received[0]![0].id, { text: "First answer.", replyTo: received[0]![1].id });
+      assert.equal(firstReply.delivered, true);
+
+      const [firstResult, secondResult] = await Promise.all([firstResultPromise, secondResultPromise]);
+      assert.equal(firstResult.isError, false);
+      assert.equal(secondResult.isError, false);
+      assert.match(firstResult.content[0]?.text ?? "", /First answer/);
+      assert.match(secondResult.content[0]?.text ?? "", /Second answer/);
+      await harness.emitLifecycle("session_shutdown");
+    });
+  } finally {
+    await cleanup();
+  }
+});
+
 test("child supervisor tool clears reply waiter when cancelled", { concurrency: false }, async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const { orchestrator, cleanup } = await setupClients();
