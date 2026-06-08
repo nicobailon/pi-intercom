@@ -10,7 +10,9 @@ import type { Message, SessionInfo } from "./types.ts";
 
 const repoDir = process.cwd();
 const childEnvKeys = [
+  "PI_INTERCOM_SESSION_ID",
   "PI_SUBAGENT_ORCHESTRATOR_TARGET",
+  "PI_SUBAGENT_ORCHESTRATOR_SESSION_ID",
   "PI_SUBAGENT_RUN_ID",
   "PI_SUBAGENT_CHILD_AGENT",
   "PI_SUBAGENT_CHILD_INDEX",
@@ -57,8 +59,23 @@ async function waitForBrokerReady(broker: ChildProcessWithoutNullStreams): Promi
   await ready;
 }
 
+async function connectTestClient(name: string): Promise<InstanceType<typeof IntercomClient>> {
+  const client = new IntercomClient();
+  await client.connect({
+    name,
+    cwd: repoDir,
+    model: "test-model",
+    pid: process.pid,
+    startedAt: Date.now(),
+    lastActivity: Date.now(),
+  });
+  return client;
+}
+
 async function withChildOrchestratorEnv<T>(metadata: {
   orchestratorTarget?: string;
+  orchestratorSessionId?: string;
+  inheritedIntercomSessionId?: string;
   runId?: string;
   agent?: string;
   index?: string;
@@ -69,7 +86,9 @@ async function withChildOrchestratorEnv<T>(metadata: {
     previous.set(key, process.env[key]);
     delete process.env[key];
   }
+  if (metadata.inheritedIntercomSessionId !== undefined) process.env.PI_INTERCOM_SESSION_ID = metadata.inheritedIntercomSessionId;
   if (metadata.orchestratorTarget !== undefined) process.env.PI_SUBAGENT_ORCHESTRATOR_TARGET = metadata.orchestratorTarget;
+  if (metadata.orchestratorSessionId !== undefined) process.env.PI_SUBAGENT_ORCHESTRATOR_SESSION_ID = metadata.orchestratorSessionId;
   if (metadata.runId !== undefined) process.env.PI_SUBAGENT_RUN_ID = metadata.runId;
   if (metadata.agent !== undefined) process.env.PI_SUBAGENT_CHILD_AGENT = metadata.agent;
   if (metadata.index !== undefined) process.env.PI_SUBAGENT_CHILD_INDEX = metadata.index;
@@ -194,25 +213,8 @@ async function setupClients() {
 
   try {
     await waitForBrokerReady(broker);
-    const planner = new IntercomClient();
-    const orchestrator = new IntercomClient();
-
-    await planner.connect({
-      name: "planner",
-      cwd: repoDir,
-      model: "test-model",
-      pid: process.pid,
-      startedAt: Date.now(),
-      lastActivity: Date.now(),
-    });
-    await orchestrator.connect({
-      name: "orchestrator",
-      cwd: repoDir,
-      model: "test-model",
-      pid: process.pid,
-      startedAt: Date.now(),
-      lastActivity: Date.now(),
-    });
+    const planner = await connectTestClient("planner");
+    const orchestrator = await connectTestClient("orchestrator");
 
     return {
       planner,
@@ -591,6 +593,139 @@ test("supervisor tool registers only when child metadata is present", async () =
     assert.match(JSON.stringify(supervisorTool?.parameters), /interview_request/);
     assert.match(JSON.stringify(supervisorTool?.parameters), /questions/);
   });
+});
+
+test("sessions publish their broker id for subagent inheritance", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+  const previousIntercomSessionId = process.env.PI_INTERCOM_SESSION_ID;
+  process.env.PI_INTERCOM_SESSION_ID = "parent-broker-session";
+  const harness = createExtensionHarness("supervisor-for-env", { hasUI: true });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+
+    const supervisorSession = await waitForSessionByName(planner, "supervisor-for-env");
+    assert.equal(process.env.PI_INTERCOM_SESSION_ID, supervisorSession.id);
+
+    await harness.emitLifecycle("session_shutdown");
+    assert.equal(process.env.PI_INTERCOM_SESSION_ID, "parent-broker-session");
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+    if (previousIntercomSessionId === undefined) delete process.env.PI_INTERCOM_SESSION_ID;
+    else process.env.PI_INTERCOM_SESSION_ID = previousIntercomSessionId;
+  }
+});
+
+test("child supervisor tool routes by stable broker id when supervisor names collide", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { orchestrator, cleanup } = await setupClients();
+  let duplicateOrchestrator: InstanceType<typeof IntercomClient> | undefined;
+
+  try {
+    duplicateOrchestrator = await connectTestClient("orchestrator");
+
+    const sessions = await orchestrator.listSessions();
+    assert.equal(sessions.filter((session) => session.name === "orchestrator").length, 2);
+
+    await withChildOrchestratorEnv({
+      orchestratorTarget: "orchestrator",
+      orchestratorSessionId: orchestrator.sessionId!,
+      runId: "78f659a3",
+      agent: "worker",
+      index: "0",
+      sessionName: "subagent-worker-78f659a3-1",
+    }, async () => {
+      const harness = createExtensionHarness("subagent-worker-78f659a3-1");
+      piIntercomExtension(harness.pi as never);
+      await harness.emitLifecycle("session_start");
+
+      const supervisorTool = harness.tools.find((tool) => tool.name === "contact_supervisor")!;
+      const updateReceived = once(orchestrator, "message") as Promise<[SessionInfo, Message]>;
+      const updateResult = await supervisorTool.execute("update-duplicate-name", { reason: "progress_update", message: "Found a schema mismatch." }, new AbortController().signal, undefined, harness.ctx);
+      const [_from, updateMessage] = await updateReceived;
+
+      assert.equal(updateResult.isError, false);
+      assert.match(updateMessage.content.text, /Subagent progress update/);
+      assert.match(updateMessage.content.text, /Run: 78f659a3/);
+      assert.match(updateMessage.content.text, /Found a schema mismatch/);
+
+      await harness.emitLifecycle("session_shutdown");
+    });
+  } finally {
+    await duplicateOrchestrator?.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("child supervisor tool uses inherited parent broker id when explicit id is absent", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { orchestrator, cleanup } = await setupClients();
+  let duplicateOrchestrator: InstanceType<typeof IntercomClient> | undefined;
+
+  try {
+    duplicateOrchestrator = await connectTestClient("orchestrator");
+
+    await withChildOrchestratorEnv({
+      orchestratorTarget: "orchestrator",
+      inheritedIntercomSessionId: orchestrator.sessionId!,
+      runId: "78f659a3",
+      agent: "worker",
+      index: "0",
+      sessionName: "subagent-worker-78f659a3-1",
+    }, async () => {
+      const harness = createExtensionHarness("subagent-worker-78f659a3-1");
+      piIntercomExtension(harness.pi as never);
+      await harness.emitLifecycle("session_start");
+
+      const supervisorTool = harness.tools.find((tool) => tool.name === "contact_supervisor")!;
+      const updateReceived = once(orchestrator, "message") as Promise<[SessionInfo, Message]>;
+      const updateResult = await supervisorTool.execute("update-inherited-id", { reason: "progress_update", message: "Inherited routing works." }, new AbortController().signal, undefined, harness.ctx);
+      const [_from, updateMessage] = await updateReceived;
+
+      assert.equal(updateResult.isError, false);
+      assert.match(updateMessage.content.text, /Inherited routing works/);
+
+      await harness.emitLifecycle("session_shutdown");
+    });
+  } finally {
+    await duplicateOrchestrator?.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("child supervisor tool falls back to target when broker id is stale", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { orchestrator, cleanup } = await setupClients();
+
+  try {
+    await withChildOrchestratorEnv({
+      orchestratorTarget: "orchestrator",
+      orchestratorSessionId: "stale-broker-session",
+      runId: "78f659a3",
+      agent: "worker",
+      index: "0",
+      sessionName: "subagent-worker-78f659a3-1",
+    }, async () => {
+      const harness = createExtensionHarness("subagent-worker-78f659a3-1");
+      piIntercomExtension(harness.pi as never);
+      await harness.emitLifecycle("session_start");
+
+      const supervisorTool = harness.tools.find((tool) => tool.name === "contact_supervisor")!;
+      const updateReceived = once(orchestrator, "message") as Promise<[SessionInfo, Message]>;
+      const updateResult = await supervisorTool.execute("update-stale-id", { reason: "progress_update", message: "Fallback routing works." }, new AbortController().signal, undefined, harness.ctx);
+      const [_from, updateMessage] = await updateReceived;
+
+      assert.equal(updateResult.isError, false);
+      assert.match(updateMessage.content.text, /Fallback routing works/);
+
+      await harness.emitLifecycle("session_shutdown");
+    });
+  } finally {
+    await cleanup();
+  }
 });
 
 test("child supervisor tool resolves target and includes run metadata", { concurrency: false }, async () => {

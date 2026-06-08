@@ -17,7 +17,9 @@ const SUBAGENT_RESULT_INTERCOM_DELIVERY_EVENT = "subagent:result-intercom-delive
 const INBOUND_FLUSH_DELAY_MS = 200;
 const INBOUND_IDLE_RETRY_MS = 500;
 const DEFAULT_UNNAMED_SESSION_ALIAS_PREFIX = "subagent-chat";
+const INTERCOM_SESSION_ID_ENV = "PI_INTERCOM_SESSION_ID";
 const SUBAGENT_ORCHESTRATOR_TARGET_ENV = "PI_SUBAGENT_ORCHESTRATOR_TARGET";
+const SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV = "PI_SUBAGENT_ORCHESTRATOR_SESSION_ID";
 const SUBAGENT_RUN_ID_ENV = "PI_SUBAGENT_RUN_ID";
 const SUBAGENT_CHILD_AGENT_ENV = "PI_SUBAGENT_CHILD_AGENT";
 const SUBAGENT_CHILD_INDEX_ENV = "PI_SUBAGENT_CHILD_INDEX";
@@ -25,6 +27,7 @@ const SUBAGENT_INTERCOM_SESSION_NAME_ENV = "PI_SUBAGENT_INTERCOM_SESSION_NAME";
 
 interface ChildOrchestratorMetadata {
   orchestratorTarget: string;
+  orchestratorSessionId?: string;
   runId: string;
   agent: string;
   index: string;
@@ -78,21 +81,30 @@ function formatAttachments(attachments: Attachment[]): string {
 }
 function readChildOrchestratorMetadata(): ChildOrchestratorMetadata | null {
   const orchestratorTarget = process.env[SUBAGENT_ORCHESTRATOR_TARGET_ENV]?.trim();
+  const explicitOrchestratorSessionId = process.env[SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV]?.trim();
+  const inheritedOrchestratorSessionId = process.env[INTERCOM_SESSION_ID_ENV]?.trim();
+  const orchestratorSessionId = explicitOrchestratorSessionId || inheritedOrchestratorSessionId;
   const runId = process.env[SUBAGENT_RUN_ID_ENV]?.trim();
   const agent = process.env[SUBAGENT_CHILD_AGENT_ENV]?.trim();
   const index = process.env[SUBAGENT_CHILD_INDEX_ENV]?.trim();
-  if (!orchestratorTarget || !runId || !agent || !index) {
+  if (!(orchestratorTarget || orchestratorSessionId) || !runId || !agent || !index) {
     return null;
   }
   const sessionName = process.env[SUBAGENT_INTERCOM_SESSION_NAME_ENV]?.trim();
   return {
-    orchestratorTarget,
+    orchestratorTarget: orchestratorTarget || orchestratorSessionId!,
+    ...(orchestratorSessionId ? { orchestratorSessionId } : {}),
     runId,
     agent,
     index,
     ...(sessionName ? { sessionName } : {}),
   };
 }
+
+function supervisorRoutingTarget(metadata: ChildOrchestratorMetadata): string {
+  return metadata.orchestratorSessionId ?? metadata.orchestratorTarget;
+}
+
 function formatChildOrchestratorMessage(kind: "ask" | "update" | "interview", metadata: ChildOrchestratorMetadata, message: string): string {
   const heading = kind === "ask"
     ? "Subagent needs a supervisor decision."
@@ -414,6 +426,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   const config: IntercomConfig = loadConfig();
   let runtimeContext: ExtensionContext | null = null;
   let currentSessionId: string | null = null;
+  let publishedIntercomSessionId: string | null = null;
+  let previousIntercomSessionIdEnv: string | undefined;
   let currentModel = "unknown";
   let sessionStartedAt: number | null = null;
   let reconnectTimer: NodeJS.Timeout | null = null;
@@ -531,6 +545,27 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     const activeToolName = activeTools.values().next().value;
     const lifecycleStatus = activeToolName ? `tool:${activeToolName}` : agentRunning ? "thinking" : "idle";
     return config.status ? `${lifecycleStatus} · ${config.status}` : lifecycleStatus;
+  }
+  function publishIntercomSessionId(sessionId: string | null): void {
+    if (!sessionId) {
+      return;
+    }
+    if (publishedIntercomSessionId === null) {
+      previousIntercomSessionIdEnv = process.env[INTERCOM_SESSION_ID_ENV];
+    }
+    process.env[INTERCOM_SESSION_ID_ENV] = sessionId;
+    publishedIntercomSessionId = sessionId;
+  }
+  function clearPublishedIntercomSessionId(): void {
+    if (publishedIntercomSessionId && process.env[INTERCOM_SESSION_ID_ENV] === publishedIntercomSessionId) {
+      if (previousIntercomSessionIdEnv === undefined) {
+        delete process.env[INTERCOM_SESSION_ID_ENV];
+      } else {
+        process.env[INTERCOM_SESSION_ID_ENV] = previousIntercomSessionIdEnv;
+      }
+    }
+    publishedIntercomSessionId = null;
+    previousIntercomSessionIdEnv = undefined;
   }
   function buildRegistration(): Omit<SessionInfo, "id"> {
     const liveContext = getLiveContext();
@@ -706,6 +741,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       }
       rejectReplyWaiter(new Error(`Disconnected while waiting for reply: ${error.message}`, { cause: error }));
       client = null;
+      clearPublishedIntercomSessionId();
       if (!shuttingDown && !disposed) {
         clearReconnectTimer();
         scheduleReconnect();
@@ -739,6 +775,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       throw new Error("Intercom shutting down");
     }
     if (client && client.isConnected()) {
+      publishIntercomSessionId(client.sessionId);
       return client;
     }
     const contextAtStart = getLiveContext();
@@ -762,6 +799,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
           throw new Error("Intercom runtime no longer active");
         }
         client = nextClient;
+        publishIntercomSessionId(nextClient.sessionId);
         reconnectAttempt = 0;
         return nextClient;
       } catch (error) {
@@ -795,6 +833,20 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       throw new Error(`Multiple sessions named "${nameOrId}" are connected. Use the session ID instead.`);
     }
     return byName[0]?.id ?? null;
+  }
+  async function resolveSupervisorTarget(activeClient: IntercomClient, metadata: ChildOrchestratorMetadata): Promise<string> {
+    if (metadata.orchestratorSessionId) {
+      const bySessionId = await resolveSessionTarget(activeClient, metadata.orchestratorSessionId);
+      if (bySessionId) {
+        return bySessionId;
+      }
+      if (metadata.orchestratorTarget !== metadata.orchestratorSessionId) {
+        return await resolveSessionTarget(activeClient, metadata.orchestratorTarget) ?? metadata.orchestratorTarget;
+      }
+    }
+
+    const routeTarget = supervisorRoutingTarget(metadata);
+    return await resolveSessionTarget(activeClient, routeTarget) ?? routeTarget;
   }
   function deliverLocalSubagentRelayMessage(sender: "subagent-control" | "subagent-result", status: string, messageText: string): void {
     const now = Date.now();
@@ -956,6 +1008,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       await client.disconnect();
       client = null;
     }
+    clearPublishedIntercomSessionId();
     runtimeContext = null;
     currentSessionId = null;
     sessionStartedAt = null;
@@ -1111,10 +1164,13 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         const metadata = childOrchestratorMetadata;
         let sendTo: string;
         try {
-          sendTo = await resolveSessionTarget(connectedClient, metadata.orchestratorTarget) ?? metadata.orchestratorTarget;
+          sendTo = await resolveSupervisorTarget(connectedClient, metadata);
         } catch (error) {
+          const stableIdHint = metadata.orchestratorSessionId
+            ? ""
+            : ` Ensure ${SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV} or ${INTERCOM_SESSION_ID_ENV} is available for stable supervisor routing.`;
           return {
-            content: [{ type: "text", text: `Failed to resolve supervisor target: ${getErrorMessage(error)}` }],
+            content: [{ type: "text", text: `Failed to resolve supervisor target: ${getErrorMessage(error)}${stableIdHint}` }],
             isError: true,
             details: { error: true },
           };

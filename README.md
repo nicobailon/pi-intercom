@@ -220,14 +220,19 @@ This workflow requires [`pi-subagents`](https://github.com/nicobailon/pi-subagen
 
 ### When the Tool Appears
 
-`contact_supervisor` only registers when `pi-subagents` sets all of these environment variables:
+`contact_supervisor` registers when `pi-subagents` sets the run metadata plus a supervisor route target:
 
 - `PI_SUBAGENT_ORCHESTRATOR_TARGET` — the supervisor session name or ID
+- `PI_SUBAGENT_ORCHESTRATOR_SESSION_ID` — optional stable broker session ID for the supervisor; preferred for routing when names collide
 - `PI_SUBAGENT_RUN_ID` — the run identifier
 - `PI_SUBAGENT_CHILD_AGENT` — the agent type
 - `PI_SUBAGENT_CHILD_INDEX` — the child index within the run
 
-If any are missing, the session falls back to the regular `intercom` tool.
+`PI_SUBAGENT_ORCHESTRATOR_TARGET` is used for display and backwards-compatible name routing. When `PI_SUBAGENT_ORCHESTRATOR_SESSION_ID` is present, `contact_supervisor` routes to that exact broker session first, so duplicate display names do not make supervisor messages ambiguous. If that broker session ID is no longer connected, the tool falls back to `PI_SUBAGENT_ORCHESTRATOR_TARGET`.
+
+For bridge implementations that inherit the parent process environment, pi-intercom also publishes the current broker session ID as `PI_INTERCOM_SESSION_ID`. A child can use that inherited value as its supervisor session ID when an explicit `PI_SUBAGENT_ORCHESTRATOR_SESSION_ID` is not set.
+
+If run metadata or all supervisor route targets are missing, the session falls back to the regular `intercom` tool.
 
 ### Three Reasons
 
