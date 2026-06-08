@@ -53,6 +53,24 @@ test("reply with to resolves matching pending ask", () => {
   assert.equal(tracker.resolveReplyTarget({ to: "planner-id" }, 1002).message.id, "ask-1");
 });
 
+test("reply with replyTo resolves a specific pending ask", () => {
+  const tracker = new ReplyTracker();
+  tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "First"), 1000);
+  tracker.recordIncomingMessage(createSession("reviewer-id", "reviewer"), createMessage("ask-2", "Second"), 1001);
+
+  assert.equal(tracker.resolveReplyTarget({ replyTo: "ask-2" }, 1002).from.id, "reviewer-id");
+  assert.throws(() => tracker.resolveReplyTarget({ replyTo: "missing-ask" }, 1002), /No pending ask with replyTo/);
+});
+
+test("reply with replyTo can resolve the current turn context", () => {
+  const tracker = new ReplyTracker();
+  const context = tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "Need a decision"), 1000);
+  tracker.queueTurnContext(context);
+  tracker.beginTurn(1001);
+
+  assert.equal(tracker.resolveReplyTarget({ replyTo: "ask-1" }, 1002).from.id, "planner-id");
+});
+
 test("reply errors when no context and no pending asks", () => {
   const tracker = new ReplyTracker();
 
@@ -74,4 +92,16 @@ test("reply removes pending ask after successful reply", () => {
   tracker.markReplied("ask-1");
 
   assert.deepEqual(tracker.listPending(1001), []);
+});
+
+test("dismiss removes a stale pending ask and current turn context", () => {
+  const tracker = new ReplyTracker();
+  const context = tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "Need a decision"), 1000);
+  tracker.queueTurnContext(context);
+  tracker.beginTurn(1001);
+
+  assert.equal(tracker.dismissPendingAsk("ask-1"), true);
+  assert.equal(tracker.dismissPendingAsk("ask-1"), false);
+  assert.deepEqual(tracker.listPending(1002), []);
+  assert.throws(() => tracker.resolveReplyTarget({}, 1002), /No active intercom context to reply to/);
 });

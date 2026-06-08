@@ -17,6 +17,7 @@ const SUBAGENT_RESULT_INTERCOM_DELIVERY_EVENT = "subagent:result-intercom-delive
 const INBOUND_FLUSH_DELAY_MS = 200;
 const INBOUND_IDLE_RETRY_MS = 500;
 const DEFAULT_UNNAMED_SESSION_ALIAS_PREFIX = "subagent-chat";
+const SESSION_NOT_FOUND_REASON = "Session not found";
 const SUBAGENT_ORCHESTRATOR_TARGET_ENV = "PI_SUBAGENT_ORCHESTRATOR_TARGET";
 const SUBAGENT_RUN_ID_ENV = "PI_SUBAGENT_RUN_ID";
 const SUBAGENT_CHILD_AGENT_ENV = "PI_SUBAGENT_CHILD_AGENT";
@@ -408,6 +409,12 @@ function previewText(value: unknown, maxLength = 72): string | undefined {
 }
 function firstTextContent(result: { content?: Array<{ type: string; text?: string }> }): string {
   return result.content?.find((item) => item.type === "text" && typeof item.text === "string")?.text?.replace(/\*\*/g, "") ?? "";
+}
+function isDisconnectedSessionFailure(reason: string | undefined): boolean {
+  return reason === SESSION_NOT_FOUND_REASON;
+}
+function formatPendingAskDismissedNote(dismissed: boolean): string {
+  return dismissed ? " The pending ask was removed because the sender is no longer connected." : "";
 }
 export default function piIntercomExtension(pi: ExtensionAPI) {
   let client: IntercomClient | null = null;
@@ -1426,10 +1433,13 @@ Usage:
             });
             if (!result.delivered) {
               const errorText = result.reason ?? "Session may not exist or has disconnected.";
+              const dismissedPendingAsk = typeof replyTo === "string" && isDisconnectedSessionFailure(result.reason)
+                ? replyTracker.dismissPendingAsk(replyTo)
+                : false;
               return {
-                content: [{ type: "text", text: `Message to "${to}" was not delivered: ${errorText}` }],
+                content: [{ type: "text", text: `Message to "${to}" was not delivered: ${errorText}${formatPendingAskDismissedNote(dismissedPendingAsk)}` }],
                 isError: true,
-                details: { messageId: result.id, delivered: false, reason: result.reason },
+                details: { messageId: result.id, delivered: false, reason: result.reason, pendingAskDismissed: dismissedPendingAsk },
               };
             }
             pi.appendEntry("intercom_sent", {
@@ -1571,7 +1581,10 @@ Usage:
           }
 
           try {
-            const target = replyTracker.resolveReplyTarget({ to });
+            const target = replyTracker.resolveReplyTarget({
+              to,
+              replyTo: typeof replyTo === "string" ? replyTo : undefined,
+            });
             if (target.from.id === connectedClient.sessionId) {
               return {
                 content: [{ type: "text", text: "Cannot message the current session" }],
@@ -1585,10 +1598,19 @@ Usage:
             });
             if (!result.delivered) {
               const errorText = result.reason ?? "Session may not exist or has disconnected.";
+              const dismissedPendingAsk = isDisconnectedSessionFailure(result.reason)
+                ? replyTracker.dismissPendingAsk(target.message.id)
+                : false;
               return {
-                content: [{ type: "text", text: `Reply to "${target.from.name || target.from.id}" was not delivered: ${errorText}` }],
+                content: [{ type: "text", text: `Reply to "${target.from.name || target.from.id}" was not delivered: ${errorText}${formatPendingAskDismissedNote(dismissedPendingAsk)}` }],
                 isError: true,
-                details: { messageId: result.id, delivered: false, reason: result.reason },
+                details: {
+                  messageId: result.id,
+                  delivered: false,
+                  reason: result.reason,
+                  replyTo: target.message.id,
+                  pendingAskDismissed: dismissedPendingAsk,
+                },
               };
             }
             replyTracker.markReplied(target.message.id);

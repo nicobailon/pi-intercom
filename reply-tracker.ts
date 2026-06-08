@@ -48,8 +48,20 @@ export class ReplyTracker {
     this.currentTurnContext = null;
   }
 
-  resolveReplyTarget(options: { to?: string }, now = Date.now()): IntercomContext {
+  resolveReplyTarget(options: { to?: string; replyTo?: string }, now = Date.now()): IntercomContext {
     this.pruneExpired(now);
+
+    if (options.replyTo) {
+      const matchingCurrentContext = this.currentTurnContext?.message.id === options.replyTo
+        ? this.currentTurnContext
+        : null;
+      const matchingPendingAsk = this.pendingAsks.get(options.replyTo) ?? null;
+      const target = matchingCurrentContext ?? matchingPendingAsk;
+      if (!target) {
+        throw new Error(`No pending ask with replyTo \"${options.replyTo}\"`);
+      }
+      return target;
+    }
 
     if (this.currentTurnContext) {
       return this.currentTurnContext;
@@ -81,10 +93,11 @@ export class ReplyTracker {
   }
 
   markReplied(replyTo: string): void {
-    this.pendingAsks.delete(replyTo);
-    if (this.currentTurnContext?.message.id === replyTo) {
-      this.currentTurnContext = null;
-    }
+    this.removePendingAsk(replyTo);
+  }
+
+  dismissPendingAsk(replyTo: string): boolean {
+    return this.removePendingAsk(replyTo);
   }
 
   listPending(now = Date.now()): IntercomContext[] {
@@ -98,5 +111,14 @@ export class ReplyTracker {
         this.pendingAsks.delete(messageId);
       }
     }
+  }
+
+  private removePendingAsk(replyTo: string): boolean {
+    const removedPendingAsk = this.pendingAsks.delete(replyTo);
+    const removedCurrentContext = this.currentTurnContext?.message.id === replyTo;
+    if (removedCurrentContext) {
+      this.currentTurnContext = null;
+    }
+    return removedPendingAsk || removedCurrentContext;
   }
 }

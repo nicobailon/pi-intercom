@@ -967,3 +967,49 @@ test("async ask can be replied to later from the single pending ask fallback", {
     await cleanup();
   }
 });
+
+test("reply dismisses a pending ask when the sender disconnected", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("reply-worker", { hasUI: true });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+
+    const target = await waitForSessionByName(planner, "reply-worker");
+    const delivered = await planner.send(target.id, {
+      messageId: "stale-ask",
+      text: "Please reply after I disconnect.",
+      expectsReply: true,
+    });
+    assert.equal(delivered.delivered, true);
+
+    const deadline = Date.now() + 2000;
+    while (harness.sentMessages.length === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(harness.sentMessages.length, 1);
+
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const pendingBeforeReply = await intercomTool.execute("pending-before", { action: "pending" }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(pendingBeforeReply.isError, false);
+    assert.match(pendingBeforeReply.content[0]?.text ?? "", /stale-ask/);
+
+    await planner.disconnect();
+
+    const replyResult = await intercomTool.execute("reply-stale", { action: "reply", message: "ok" }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(replyResult.isError, true);
+    assert.match(replyResult.content[0]?.text ?? "", /Session not found/);
+    assert.match(replyResult.content[0]?.text ?? "", /pending ask was removed/);
+    assert.equal(replyResult.details?.replyTo, "stale-ask");
+    assert.equal(replyResult.details?.pendingAskDismissed, true);
+
+    const pendingAfterReply = await intercomTool.execute("pending-after", { action: "pending" }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(pendingAfterReply.isError, false);
+    assert.match(pendingAfterReply.content[0]?.text ?? "", /No unresolved inbound asks/);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
