@@ -15,6 +15,19 @@ const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
 const SUBAGENT_RESULT_INTERCOM_EVENT = "subagent:result-intercom";
 const SUBAGENT_RESULT_INTERCOM_DELIVERY_EVENT = "subagent:result-intercom-delivery";
 const INBOUND_FLUSH_DELAY_MS = 200;
+// pi exposes no session-name-changed event, so a `/name` rename made while the
+// session is idle does not reach the broker until an unrelated event (turn_start,
+// model_select, a tool call) happens to re-sync presence. Until then other
+// sessions keep seeing the stale fallback alias and sends to the new name fail.
+// Poll for the resolved presence name and push an update only when it actually
+// changes. The timer is unref()'d so it never keeps the process alive. Fixes #11.
+// PI_INTERCOM_NAME_POLL_MS overrides the cadence (used by tests; also lets a
+// deployment tune how quickly renames propagate).
+const PRESENCE_NAME_POLL_INTERVAL_MS = 3000;
+function presenceNamePollIntervalMs(): number {
+  const raw = Number(process.env.PI_INTERCOM_NAME_POLL_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : PRESENCE_NAME_POLL_INTERVAL_MS;
+}
 const INBOUND_IDLE_RETRY_MS = 500;
 const DEFAULT_UNNAMED_SESSION_ALIAS_PREFIX = "subagent-chat";
 const SUBAGENT_ORCHESTRATOR_TARGET_ENV = "PI_SUBAGENT_ORCHESTRATOR_TARGET";
@@ -421,6 +434,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   let reconnectPromiseGeneration: number | null = null;
   let startupConnectTimer: NodeJS.Timeout | null = null;
   let reconnectAttempt = 0;
+  let presenceNamePollTimer: NodeJS.Timeout | null = null;
+  let lastPresenceName: string | null = null;
   let shuttingDown = false;
   let disposed = true;
   let runtimeStarted = false;
@@ -497,6 +512,31 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     clearTimeout(inboundFlushTimer);
     inboundFlushTimer = null;
   }
+  function clearPresenceNamePoll(): void {
+    if (!presenceNamePollTimer) {
+      return;
+    }
+    clearInterval(presenceNamePollTimer);
+    presenceNamePollTimer = null;
+  }
+  function startPresenceNamePoll(): void {
+    if (presenceNamePollTimer) {
+      return;
+    }
+    presenceNamePollTimer = setInterval(() => {
+      if (!client || !currentSessionId || !getLiveContext()) {
+        return;
+      }
+      const name = buildPresenceIdentity(pi, currentSessionId).name;
+      if (name === lastPresenceName) {
+        return;
+      }
+      lastPresenceName = name;
+      client.updatePresence({ name, status: currentStatus() });
+    }, presenceNamePollIntervalMs());
+    // Do not let the heartbeat keep the Node event loop alive on its own.
+    presenceNamePollTimer.unref?.();
+  }
   function getLiveContext(ctx: ExtensionContext | null = runtimeContext, generation = runtimeGeneration): ExtensionContext | null {
     if (disposed || shuttingDown || generation !== runtimeGeneration || !ctx) {
       return null;
@@ -553,7 +593,10 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     if (!client || !getLiveContext()) {
       return;
     }
-    client.updatePresence({ ...buildPresenceIdentity(pi, sessionId), status: currentStatus() });
+    const identity = buildPresenceIdentity(pi, sessionId);
+    // Track the last pushed name so the presence-name poll only emits on change.
+    lastPresenceName = identity.name;
+    client.updatePresence({ ...identity, status: currentStatus() });
   }
   function syncPresenceStatus(): void {
     if (!client || !currentSessionId || !getLiveContext()) {
@@ -923,6 +966,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     currentModel = ctx.model?.id ?? "unknown";
     sessionStartedAt = Date.now();
     agentRunning = false;
+    lastPresenceName = null;
+    startPresenceNamePoll();
     activeTools.clear();
     const startupGeneration = runtimeGeneration;
     startupConnectTimer = setTimeout(() => {
@@ -946,6 +991,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     runtimeGeneration += 1;
     clearStartupConnectTimer();
     clearReconnectTimer();
+    clearPresenceNamePoll();
+    lastPresenceName = null;
     rejectReplyWaiter(new Error("Session shutting down"));
     replyTracker.reset();
     pendingIdleMessages.length = 0;

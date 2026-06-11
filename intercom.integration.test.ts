@@ -127,6 +127,7 @@ function createExtensionHarness(sessionName = "child-worker", options: {
   hasUI?: boolean;
   isIdle?: () => boolean;
   ui?: unknown;
+  getSessionName?: () => string | undefined;
 } = {}) {
   const events = new EventEmitter();
   const lifecycleHandlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
@@ -135,7 +136,7 @@ function createExtensionHarness(sessionName = "child-worker", options: {
   const entries: Array<{ type: string; data: unknown }> = [];
   const sentMessages: Array<{ message: { customType?: string; content?: string; details?: unknown }; options?: { triggerTurn?: boolean; deliverAs?: string } }> = [];
   const pi = {
-    getSessionName: () => sessionName,
+    getSessionName: options.getSessionName ?? (() => sessionName),
     events: {
       on: (channel: string, handler: (payload: unknown) => void) => {
         events.on(channel, handler);
@@ -391,6 +392,45 @@ test("sessions publish automatic lifecycle status", { concurrency: false }, asyn
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await cleanup();
+  }
+});
+
+test("renaming an idle session propagates to the broker without a new turn (#11)", { concurrency: false }, async () => {
+  // Regression for #11: a /name rename made while the session is idle must reach
+  // the broker via the presence-name poll, so peers can target the new name
+  // without waiting for an unrelated turn_start/model_select/tool call. A check
+  // that only asserted the initial name would pass even with the bug, so the
+  // point of this test is the post-rename discovery + the stale-name absence.
+  const previousPoll = process.env.PI_INTERCOM_NAME_POLL_MS;
+  process.env.PI_INTERCOM_NAME_POLL_MS = "25";
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+  let advertisedName = "subagent-chat-pre";
+  const harness = createExtensionHarness("unused", {
+    hasUI: true,
+    getSessionName: () => advertisedName,
+  });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+
+    // Initial fallback name is advertised.
+    await waitForSessionByName(planner, "subagent-chat-pre");
+
+    // Rename while idle — no turn_start, no model_select, no tool call.
+    advertisedName = "DCA-worker";
+
+    // Poll must publish the new name, and the stale one must disappear.
+    const renamed = await waitForSessionByName(planner, "DCA-worker");
+    assert.equal(renamed.name, "DCA-worker");
+    const names = (await planner.listSessions()).map((s) => s.name);
+    assert.equal(names.includes("subagent-chat-pre"), false);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+    if (previousPoll === undefined) delete process.env.PI_INTERCOM_NAME_POLL_MS;
+    else process.env.PI_INTERCOM_NAME_POLL_MS = previousPoll;
   }
 });
 
