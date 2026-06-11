@@ -756,7 +756,9 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       attachClientHandlers(nextClient);
       try {
         await spawnBrokerIfNeeded(config.brokerCommand, config.brokerArgs);
-        await nextClient.connect(buildRegistration());
+        // Pass the pi session id as the stable broker id so the routing identity
+        // survives reconnects (a peer's resolved name->id stays valid).
+        await nextClient.connect(buildRegistration(), currentSessionId ?? undefined);
         if (!getLiveContext(contextAtStart, generationAtStart)) {
           await nextClient.disconnect();
           throw new Error("Intercom runtime no longer active");

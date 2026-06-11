@@ -149,10 +149,11 @@ export class IntercomClient extends EventEmitter {
     return socket;
   }
 
-  connect(session: Omit<SessionInfo, "id">): Promise<void> {
+  connect(session: Omit<SessionInfo, "id">, sessionId?: string): Promise<void> {
     if (this.socket) {
       return Promise.reject(new Error("Already connected"));
     }
+    const stableSessionId = sessionId?.trim() || undefined;
 
     return new Promise((resolve, reject) => {
       const socket = net.connect(BROKER_SOCKET);
@@ -254,7 +255,7 @@ export class IntercomClient extends EventEmitter {
       this.once("_registered", onRegistered);
       
       try {
-        writeMessage(socket, { type: "register", session });
+        writeMessage(socket, { type: "register", session, ...(stableSessionId ? { sessionId: stableSessionId } : {}) });
       } catch (error) {
         cleanupConnectionAttempt();
         cleanupSocketListeners();

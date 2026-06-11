@@ -28,7 +28,10 @@ export interface Attachment {
 }
 
 export type ClientMessage =
-  | { type: "register"; session: Omit<SessionInfo, "id"> }
+  // sessionId: optional caller-supplied stable id (the pi session id). When
+  // present the broker uses it as the routing identity so it survives
+  // reconnects; older clients omit it and the broker assigns a random id.
+  | { type: "register"; session: Omit<SessionInfo, "id">; sessionId?: string }
   | { type: "unregister" }
   | { type: "list"; requestId: string }
   | { type: "send"; to: string; message: Message }

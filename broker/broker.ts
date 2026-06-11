@@ -135,10 +135,15 @@ class IntercomBroker {
 
     socket.on("close", () => {
       if (sessionId) {
-        this.sessions.delete(sessionId);
-        this.broadcast({ type: "session_left", sessionId }, sessionId);
-
-        this.scheduleShutdownCheck();
+        // Only tear down the registry entry if it still points at THIS socket.
+        // With stable ids a reconnect may have already rebound this id to a new
+        // socket; the late close of the old socket must not evict the new one.
+        const existing = this.sessions.get(sessionId);
+        if (!existing || existing.socket === socket) {
+          this.sessions.delete(sessionId);
+          this.broadcast({ type: "session_left", sessionId }, sessionId);
+          this.scheduleShutdownCheck();
+        }
       }
     });
 
@@ -184,10 +189,17 @@ class IntercomBroker {
         if (currentId) {
           throw new Error("Received duplicate register message");
         }
-        
-        const id = randomUUID();
+
+        // Prefer a caller-supplied stable id (the pi session id) so the routing
+        // identity survives reconnects; a peer that resolved name->id keeps a
+        // valid target instead of hitting "Session not found" after the target
+        // reconnects with a fresh id. Fall back to a random id for older clients.
+        const requestedId = typeof clientMessage.sessionId === "string" ? clientMessage.sessionId.trim() : "";
+        const id = requestedId || randomUUID();
         setId(id);
         const info: SessionInfo = { ...clientMessage.session, id };
+        // A reconnect can arrive before the previous socket's close fires; the
+        // newest socket wins for this id.
         this.sessions.set(id, { socket, info });
         
         if (this.shutdownTimer) {

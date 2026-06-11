@@ -394,6 +394,58 @@ test("sessions publish automatic lifecycle status", { concurrency: false }, asyn
   }
 });
 
+test("a caller-supplied stable id survives reconnect so id-routing keeps working", { concurrency: false }, async () => {
+  // Regression for the "Session not found" race: a peer resolves name->id and
+  // sends by id, but the target reconnects with a fresh id in between. With a
+  // caller-supplied stable id (the pi session id), the broker id is unchanged
+  // across reconnects, so the previously-resolved id still routes. A test that
+  // only sent once would pass even with per-connect random ids — the point is
+  // the SECOND send, to the SAME id, AFTER a reconnect.
+  const STABLE_ID = "session-stable-abc12345";
+  const { planner, cleanup } = await setupClients();
+
+  const connectWorker = async () => {
+    const worker = new IntercomClient();
+    await worker.connect({
+      name: "stable-worker",
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    }, STABLE_ID);
+    return worker;
+  };
+  const nextMessage = (c: InstanceType<typeof IntercomClient>): Promise<Message> =>
+    new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { c.off("message", h); reject(new Error("no message")); }, 4000);
+      const h = (_from: SessionInfo, m: Message) => { clearTimeout(timer); c.off("message", h); resolve(m); };
+      c.on("message", h);
+    });
+
+  let worker = await connectWorker();
+  try {
+    // Broker honored the supplied id.
+    assert.equal(worker.sessionId, STABLE_ID);
+    const seen = await waitForSessionByName(planner, "stable-worker");
+    assert.equal(seen.id, STABLE_ID);
+
+    // Reconnect the worker (new socket) with the SAME stable id.
+    await worker.disconnect();
+    worker = await connectWorker();
+    assert.equal(worker.sessionId, STABLE_ID);
+
+    // The id resolved before the reconnect still routes.
+    const inbound = nextMessage(worker);
+    const result = await planner.send(STABLE_ID, { text: "still reachable" });
+    assert.equal(result.delivered, true);
+    assert.equal((await inbound).content.text, "still reachable");
+  } finally {
+    await worker.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
 test("busy interactive sessions idle-gate top-level asks without aborting", { concurrency: false }, async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const { planner, cleanup } = await setupClients();
