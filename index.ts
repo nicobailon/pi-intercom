@@ -7,7 +7,7 @@ import { spawnBrokerIfNeeded } from "./broker/spawn.ts";
 import { SessionListOverlay } from "./ui/session-list.ts";
 import { ComposeOverlay, type ComposeResult } from "./ui/compose.ts";
 import { InlineMessageComponent } from "./ui/inline-message.ts";
-import { loadConfig, type IntercomConfig } from "./config.ts";
+import { loadConfig, resolveAskTimeoutMs, type IntercomConfig } from "./config.ts";
 import type { SessionInfo, Message, Attachment } from "./types.ts";
 import { ReplyTracker } from "./reply-tracker.ts";
 
@@ -368,6 +368,15 @@ function parseSubagentIntercomPayload(payload: unknown): { to: string; message: 
   const requestId = typeof record.requestId === "string" ? record.requestId : undefined;
   return { to: record.to, message: record.message, ...(requestId ? { requestId } : {}) };
 }
+function formatAskTimeout(ms: number): string {
+  if (ms % 60000 === 0) {
+    const minutes = ms / 60000;
+    return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  }
+  const seconds = Math.round(ms / 1000);
+  return `${seconds} second${seconds === 1 ? "" : "s"}`;
+}
+
 function resolveIntercomPresenceName(sessionName: string | undefined, sessionId: string): string {
   const trimmedName = sessionName?.trim();
   if (trimmedName) {
@@ -427,7 +436,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   let runtimeGeneration = 0;
   let agentRunning = false;
   const activeTools = new Map<string, string>();
-  const replyTracker = new ReplyTracker();
+  const replyTracker = new ReplyTracker(resolveAskTimeoutMs());
   const pendingIdleMessages: InboundMessageEntry[] = [];
   let inboundFlushTimer: NodeJS.Timeout | null = null;
   let replyWaiter: {
@@ -443,10 +452,11 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     if (signal?.aborted) {
       return Promise.reject(new Error("Cancelled"));
     }
+    const askTimeoutMs = resolveAskTimeoutMs();
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
-        rejectReplyWaiter(new Error(`No reply from "${from}" within 10 minutes`));
-      }, 10 * 60 * 1000);
+        rejectReplyWaiter(new Error(`No reply from "${from}" within ${formatAskTimeout(askTimeoutMs)}`));
+      }, askTimeoutMs);
       const cleanup = () => {
         clearTimeout(timeout);
         signal?.removeEventListener("abort", onAbort);

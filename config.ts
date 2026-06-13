@@ -24,6 +24,22 @@ export interface IntercomConfig {
 
 const CONFIG_PATH = join(homedir(), ".pi/agent/intercom/config.json");
 
+/** Default reply timeout (ms) for a blocking `ask`. */
+export const DEFAULT_ASK_TIMEOUT_MS = 10 * 60 * 1000;
+
+// Configurable ask reply timeout. The extension uses it to bound waitForReply;
+// the broker uses it as a TTL to prune stale ask edges, so a timed-out ask
+// cannot leave a phantom edge that later trips the mutual-ask deadlock guard.
+// Both processes read the same env var, keeping the values aligned. Values
+// below 1s are ignored to avoid pathological busy-waiting.
+export function resolveAskTimeoutMs(): number {
+  const raw = Number(process.env.PI_INTERCOM_ASK_TIMEOUT_MS);
+  if (Number.isFinite(raw) && raw >= 1000) {
+    return raw;
+  }
+  return DEFAULT_ASK_TIMEOUT_MS;
+}
+
 const defaults: IntercomConfig = {
   brokerCommand: "npx",
   brokerArgs: ["--no-install", "tsx"],

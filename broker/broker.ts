@@ -5,6 +5,7 @@ import { homedir } from "os";
 import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.js";
 import { getBrokerSocketPath } from "./paths.js";
+import { resolveAskTimeoutMs } from "../config.js";
 import type { SessionInfo, Message, Attachment, BrokerMessage } from "../types.js";
 
 const INTERCOM_DIR = join(homedir(), ".pi/agent/intercom");
@@ -99,6 +100,15 @@ class IntercomBroker {
   private server: net.Server;
   private shutdownTimer: NodeJS.Timeout | null = null;
 
+  // Outstanding ask edges: askerId -> { to, questionId, at }. A session has at
+  // most one outstanding ask (the extension enforces a single reply waiter), so
+  // a single entry per asker suffices. Used to refuse a mutual "ask" before it
+  // blocks: if A asks B while B is already awaiting A's reply, A's ask is
+  // rejected immediately instead of both turns stalling until the reply
+  // timeout. Whichever ask the broker dequeues first wins (FIFO).
+  private askEdges = new Map<string, { to: string; questionId: string; at: number }>();
+  private readonly askTimeoutMs = resolveAskTimeoutMs();
+
   constructor() {
     mkdirSync(INTERCOM_DIR, { recursive: true });
     if (process.platform !== "win32") {
@@ -136,6 +146,7 @@ class IntercomBroker {
     socket.on("close", () => {
       if (sessionId) {
         this.sessions.delete(sessionId);
+        this.clearAskEdgesFor(sessionId);
         this.broadcast({ type: "session_left", sessionId }, sessionId);
 
         this.scheduleShutdownCheck();
@@ -202,6 +213,7 @@ class IntercomBroker {
 
       case "unregister": {
         this.sessions.delete(currentId);
+        this.clearAskEdgesFor(currentId);
         this.broadcast({ type: "session_left", sessionId: currentId }, currentId);
         setId(null);
         this.scheduleShutdownCheck();
@@ -242,6 +254,33 @@ class IntercomBroker {
             });
             break;
           }
+
+          const recipientId = targets[0].info.id;
+          const now = Date.now();
+          this.pruneAskEdges(now);
+          if (message.expectsReply === true) {
+            // Mutual-ask deadlock guard: if the recipient is already awaiting a
+            // reply from this sender, a reverse ask would block both turns until
+            // the reply timeout. Refuse it immediately so the caller fails fast.
+            const reverse = this.askEdges.get(recipientId);
+            if (reverse && reverse.to === currentId) {
+              writeMessage(socket, {
+                type: "delivery_failed",
+                messageId: message.id,
+                reason: `Mutual ask refused: "${targets[0].info.name ?? recipientId}" is already awaiting a reply from you. Use send/reply instead of ask, or wait for the pending ask to resolve.`,
+              });
+              break;
+            }
+            this.askEdges.set(currentId, { to: recipientId, questionId: message.id, at: now });
+          } else if (typeof message.replyTo === "string") {
+            // A reply clears the asker's edge. The reply flows answerer -> asker,
+            // so the asker is this message's recipient; match the question id.
+            const askerEdge = this.askEdges.get(recipientId);
+            if (askerEdge && askerEdge.questionId === message.replyTo) {
+              this.askEdges.delete(recipientId);
+            }
+          }
+
           writeMessage(targets[0].socket, {
             type: "message",
             from: fromSession.info,
@@ -297,6 +336,27 @@ class IntercomBroker {
 
       default:
         throw new Error(`Unknown client message type: ${clientMessage.type}`);
+    }
+  }
+
+  // Drop ask edges older than the configured reply timeout, matching the
+  // extension's waitForReply timeout so a timed-out ask leaves no phantom edge.
+  private pruneAskEdges(now: number): void {
+    for (const [asker, edge] of this.askEdges) {
+      if (now - edge.at > this.askTimeoutMs) {
+        this.askEdges.delete(asker);
+      }
+    }
+  }
+
+  // On disconnect, drop this session's own outstanding ask and any ask awaiting
+  // a reply from it, so a peer can re-ask without falsely tripping the guard.
+  private clearAskEdgesFor(id: string): void {
+    this.askEdges.delete(id);
+    for (const [asker, edge] of this.askEdges) {
+      if (edge.to === id) {
+        this.askEdges.delete(asker);
+      }
     }
   }
 

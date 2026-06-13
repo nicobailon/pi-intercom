@@ -381,6 +381,24 @@ Create `~/.pi/agent/intercom/config.json`:
 | `replyHint` | true | Include reply instruction in incoming messages |
 | `status` | — | Optional custom status suffix shown after the automatic lifecycle status, for example `thinking · researching` |
 
+### Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PI_INTERCOM_ASK_TIMEOUT_MS` | `600000` (10 min) | How long a blocking `ask` waits for a reply before failing. Also used by the broker as the TTL for pruning stale ask edges. Values below `1000` are ignored. |
+
+### Deadlock prevention
+
+`ask` blocks the caller's turn until a reply arrives, so two sessions that `ask`
+each other at the same time would each wait for a reply the other cannot send
+while blocked — a deadlock that only clears at the reply timeout. The broker
+prevents this: it tracks each session's outstanding `ask` and, if a session
+asks a peer that is **already awaiting a reply from it**, the reverse `ask` is
+refused immediately with a `Mutual ask refused` delivery error instead of
+blocking. Whichever `ask` the broker processes first wins (FIFO); the other
+fails fast so the caller can fall back to `send`/`reply`. A plain `send` (no
+reply expected) is never affected.
+
 For example, if you have Bun installed and want it to start the broker directly, use:
 
 ```json

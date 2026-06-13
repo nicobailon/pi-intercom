@@ -967,3 +967,69 @@ test("async ask can be replied to later from the single pending ask fallback", {
     await cleanup();
   }
 });
+
+test("mutual ask is refused immediately so two sessions cannot deadlock", { concurrency: false }, async () => {
+  // Regression for the mutual-ask deadlock: A asks B (expectsReply) and B asks
+  // A back before A's reply lands. Without the guard both turns block in their
+  // own ask until the reply timeout. The broker tracks the outstanding ask edge
+  // and refuses the reverse ask immediately (FIFO: whichever ask it dequeues
+  // first wins). Asserting only delivery of the first ask would pass even with
+  // the bug; the point is the SECOND, reverse ask failing fast — and a plain
+  // send / a reply still working so the guard is not over-broad.
+  const { planner, orchestrator, cleanup } = await setupClients();
+  try {
+    const askA = await planner.send(orchestrator.sessionId!, {
+      messageId: "ask-A",
+      text: "A asks B",
+      expectsReply: true,
+    });
+    assert.equal(askA.delivered, true);
+
+    // Reverse ask while A is still awaiting B's reply → refused immediately.
+    const askB = await orchestrator.send(planner.sessionId!, {
+      messageId: "ask-B",
+      text: "B asks A",
+      expectsReply: true,
+    });
+    assert.equal(askB.delivered, false);
+    assert.match(askB.reason ?? "", /Mutual ask refused/i);
+
+    // A plain (non-reply) send in the reverse direction is unaffected.
+    const plain = await orchestrator.send(planner.sessionId!, { text: "just a note" });
+    assert.equal(plain.delivered, true);
+
+    // Answering A's ask clears the edge; B may then ask A.
+    const reply = await orchestrator.send(planner.sessionId!, { text: "here is B's answer", replyTo: "ask-A" });
+    assert.equal(reply.delivered, true);
+
+    const askBAgain = await orchestrator.send(planner.sessionId!, {
+      messageId: "ask-B2",
+      text: "now B asks A",
+      expectsReply: true,
+    });
+    assert.equal(askBAgain.delivered, true);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("resolveAskTimeoutMs honours PI_INTERCOM_ASK_TIMEOUT_MS and ignores junk", async () => {
+  const { resolveAskTimeoutMs, DEFAULT_ASK_TIMEOUT_MS } = await import("./config.ts");
+  const previous = process.env.PI_INTERCOM_ASK_TIMEOUT_MS;
+  try {
+    delete process.env.PI_INTERCOM_ASK_TIMEOUT_MS;
+    assert.equal(resolveAskTimeoutMs(), DEFAULT_ASK_TIMEOUT_MS);
+
+    process.env.PI_INTERCOM_ASK_TIMEOUT_MS = "30000";
+    assert.equal(resolveAskTimeoutMs(), 30000);
+
+    // Below the 1s floor and non-numeric values fall back to the default.
+    process.env.PI_INTERCOM_ASK_TIMEOUT_MS = "500";
+    assert.equal(resolveAskTimeoutMs(), DEFAULT_ASK_TIMEOUT_MS);
+    process.env.PI_INTERCOM_ASK_TIMEOUT_MS = "not-a-number";
+    assert.equal(resolveAskTimeoutMs(), DEFAULT_ASK_TIMEOUT_MS);
+  } finally {
+    if (previous === undefined) delete process.env.PI_INTERCOM_ASK_TIMEOUT_MS;
+    else process.env.PI_INTERCOM_ASK_TIMEOUT_MS = previous;
+  }
+});
