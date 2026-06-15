@@ -101,7 +101,7 @@ export class SessionListOverlay implements Component {
   }
 
   render(width: number): string[] {
-    const innerWidth = Math.max(36, Math.min(width - 2, 88));
+    const innerWidth = Math.max(36, Math.min(width, 88));
     const contentWidth = Math.max(1, innerWidth - 2);
     const footer = `${this.keybindings.getKeys("tui.select.confirm").join("/")}: Message • ${this.keybindings.getKeys("tui.select.cancel").join("/")}: Close`;
     const border = (text: string) => this.theme.fg("accent", text);

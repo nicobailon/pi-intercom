@@ -103,7 +103,7 @@ export class ComposeOverlay implements Component {
   }
 
   render(width: number): string[] {
-    const innerWidth = Math.max(24, Math.min(width - 2, 72));
+    const innerWidth = Math.max(24, Math.min(width, 72));
     const contentWidth = Math.max(1, innerWidth - 2);
     const footer = `${this.keybindings.getKeys("tui.select.confirm").join("/")}: Send • ${this.keybindings.getKeys("tui.select.cancel").join("/")}: Close`;
     const border = (text: string) => this.theme.fg("accent", text);
