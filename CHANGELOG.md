@@ -4,6 +4,9 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+### Fixed
+- Forked/replaced sessions now register with the broker. The runtime was only initialized on `session_start`; when a session's id changed in-process without a fresh `session_start` (forking/branching a session, or a resume path that adopts an id), it never (re-)registered and stayed unreachable until a full process restart. Re-initialize on the first turn whose live session id diverges from the registered identity (or when no `session_start` ever fired).
+
 ## [0.6.0] - 2026-05-03
 
 ### Added

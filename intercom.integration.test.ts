@@ -127,7 +127,10 @@ function createExtensionHarness(sessionName = "child-worker", options: {
   hasUI?: boolean;
   isIdle?: () => boolean;
   ui?: unknown;
+  sessionId?: string;
+  getSessionName?: () => string | undefined;
 } = {}) {
+  let harnessSessionId = options.sessionId ?? "session-child-test";
   const events = new EventEmitter();
   const lifecycleHandlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
   const commands = new Map<string, (args: string, ctx: unknown) => unknown>();
@@ -135,7 +138,7 @@ function createExtensionHarness(sessionName = "child-worker", options: {
   const entries: Array<{ type: string; data: unknown }> = [];
   const sentMessages: Array<{ message: { customType?: string; content?: string; details?: unknown }; options?: { triggerTurn?: boolean; deliverAs?: string } }> = [];
   const pi = {
-    getSessionName: () => sessionName,
+    getSessionName: options.getSessionName ?? (() => sessionName),
     events: {
       on: (channel: string, handler: (payload: unknown) => void) => {
         events.on(channel, handler);
@@ -164,7 +167,7 @@ function createExtensionHarness(sessionName = "child-worker", options: {
   const ctx = {
     cwd: repoDir,
     model: { id: "child-model" },
-    sessionManager: { getSessionId: () => "session-child-test" },
+    sessionManager: { getSessionId: () => harnessSessionId },
     isIdle: options.isIdle ?? (() => true),
     hasUI: options.hasUI ?? false,
     abort: options.abort ?? (() => undefined),
@@ -177,6 +180,9 @@ function createExtensionHarness(sessionName = "child-worker", options: {
     commands,
     entries,
     sentMessages,
+    setSessionId(id: string) {
+      harnessSessionId = id;
+    },
     async emitLifecycle(event: string, payload: unknown = {}, eventContext: unknown = ctx) {
       for (const handler of lifecycleHandlers.get(event) ?? []) {
         await handler(payload, eventContext);
@@ -260,6 +266,19 @@ async function waitForSessionByName(client: InstanceType<typeof IntercomClient>,
   }
   const sessions = await client.listSessions();
   throw new Error(`Timed out waiting for ${name}; saw ${JSON.stringify(sessions.map((session) => session.name))}`);
+}
+
+async function waitForSessionNameSuffix(client: InstanceType<typeof IntercomClient>, suffix: string): Promise<SessionInfo> {
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline) {
+    const session = (await client.listSessions()).find((candidate) => candidate.name?.endsWith(suffix));
+    if (session) {
+      return session;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  const sessions = await client.listSessions();
+  throw new Error(`Timed out waiting for session name *${suffix}; saw ${JSON.stringify(sessions.map((session) => session.name))}`);
 }
 
 async function waitForSessionStatus(client: InstanceType<typeof IntercomClient>, name: string, status: string): Promise<SessionInfo> {
@@ -450,6 +469,60 @@ test("deferred startup connect is cancelled on shutdown", { concurrency: false }
     const sessions = await planner.listSessions();
     assert.equal(sessions.some((session) => session.name === "shutdown-before-start"), false);
   } finally {
+    await cleanup();
+  }
+});
+
+test("a forked session that starts on its first turn (no session_start) registers with the broker", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+  // Reproduces the fork/resume path where the process adopts a session id but no
+  // session_start fires for it; the first lifecycle signal is a turn_start.
+  // Before the fix the runtime never initialized, so the session was invisible
+  // to peers until a full process restart.
+  const harness = createExtensionHarness("forked-first-turn", { hasUI: true, sessionId: "session-fork-1111" });
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("turn_start");
+    const session = await waitForSessionByName(planner, "forked-first-turn");
+    assert.equal(session.name, "forked-first-turn");
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("an in-process session fork re-registers under the new identity", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+  // With no /name, the advertised presence name is derived from the session id,
+  // so a fork changes the advertised name — observable here. Before the fix the
+  // stale-context guard rejected every handler once the id diverged, so the
+  // session stayed stranded under its pre-fork identity.
+  const nameForId = (id: string) => (id.startsWith("session-") ? id.slice("session-".length) : id).slice(0, 8);
+  const harness = createExtensionHarness("ignored", {
+    hasUI: true,
+    sessionId: "session-AAAAAAAAAA",
+    getSessionName: () => undefined,
+  });
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    await waitForSessionNameSuffix(planner, nameForId("session-AAAAAAAAAA"));
+
+    // Fork: the live session id changes without a fresh session_start.
+    harness.setSessionId("session-BBBBBBBBBB");
+    await harness.emitLifecycle("turn_start");
+
+    await waitForSessionNameSuffix(planner, nameForId("session-BBBBBBBBBB"));
+    const sessions = await planner.listSessions();
+    assert.equal(
+      sessions.some((session) => session.name?.endsWith(nameForId("session-AAAAAAAAAA"))),
+      false,
+      "old identity should no longer be registered after the fork",
+    );
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
     await cleanup();
   }
 });

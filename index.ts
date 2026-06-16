@@ -907,10 +907,11 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       acknowledge: true,
     });
   });
-  pi.on("session_start", (_event, ctx) => {
-    if (!config.enabled) {
-      return;
-    }
+  // Initialize (or re-initialize) the intercom runtime for `ctx`'s current
+  // session. Used by `session_start` and by the fork/replace recovery path in
+  // `adoptSessionContext` when the session id changes without a fresh
+  // `session_start` (e.g. forking/branching a session in-process).
+  function startSessionRuntime(ctx: ExtensionContext): void {
     shuttingDown = false;
     disposed = false;
     runtimeStarted = true;
@@ -918,6 +919,14 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     reconnectAttempt = 0;
     clearReconnectTimer();
     clearStartupConnectTimer();
+    // A fork/replace can swap the session id mid-process without a fresh
+    // session_start; drop any client still registered under the previous
+    // identity so we re-register cleanly under the new session id.
+    if (client) {
+      const staleClient = client;
+      client = null;
+      void staleClient.disconnect().catch(() => {});
+    }
     runtimeContext = ctx;
     currentSessionId = ctx.sessionManager.getSessionId();
     currentModel = ctx.model?.id ?? "unknown";
@@ -938,6 +947,43 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         scheduleReconnect();
       });
     }, 0);
+  }
+  // Detect an in-process session fork/replace and (re-)initialize so the broker
+  // registration follows the live session. This covers two cases that otherwise
+  // strand a session until a full process restart:
+  //   1. the runtime never started because no `session_start` fired for this
+  //      session (a fork/resume path that adopts an id silently), and
+  //   2. the live session id diverged from the registered identity.
+  // In case 2 the stale-context guard in `getLiveContext` would reject every
+  // lifecycle handler, and `currentSessionId` is only advanced inside those
+  // (now-rejected) handlers — so without this the id can never catch up.
+  // This is only called from turn-level events, which fire exclusively for a
+  // live session, so the `disposed`/`shuttingDown` flags (true both before the
+  // first session_start and after a real shutdown) are intentionally not used
+  // to gate adoption — startSessionRuntime resets them.
+  // Returns true when a re-init was triggered and the caller should stop
+  // processing the current event (the runtime is being rebuilt asynchronously).
+  function adoptSessionContext(ctx: ExtensionContext): boolean {
+    if (!config.enabled) {
+      return false;
+    }
+    let liveSessionId: string;
+    try {
+      liveSessionId = ctx.sessionManager.getSessionId();
+    } catch {
+      return false;
+    }
+    if (!runtimeStarted || (currentSessionId !== null && liveSessionId !== currentSessionId)) {
+      startSessionRuntime(ctx);
+      return true;
+    }
+    return false;
+  }
+  pi.on("session_start", (_event, ctx) => {
+    if (!config.enabled) {
+      return;
+    }
+    startSessionRuntime(ctx);
   });
   
   pi.on("session_shutdown", async () => {
@@ -999,6 +1045,12 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     scheduleInboundFlush(0);
   });
   pi.on("turn_start", (_event, ctx) => {
+    // Recover from an in-process fork/replace (or a missing session_start)
+    // before the stale-context guard rejects this event and strands the
+    // session under its previous identity.
+    if (adoptSessionContext(ctx)) {
+      return;
+    }
     if (!getLiveContext(ctx)) {
       return;
     }
