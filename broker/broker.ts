@@ -1,13 +1,12 @@
 import net from "net";
 import { writeFileSync, unlinkSync, mkdirSync } from "fs";
 import { join } from "path";
-import { homedir } from "os";
 import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.js";
-import { getBrokerSocketPath } from "./paths.js";
+import { getBrokerSocketPath, getIntercomDir } from "./paths.js";
 import type { SessionInfo, Message, Attachment, BrokerMessage } from "../types.js";
 
-const INTERCOM_DIR = join(homedir(), ".pi/agent/intercom");
+const INTERCOM_DIR = getIntercomDir();
 const SOCKET_PATH = getBrokerSocketPath();
 const PID_PATH = join(INTERCOM_DIR, "broker.pid");
 
