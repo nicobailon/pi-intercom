@@ -354,6 +354,198 @@ test("contact supervisor tool renders reason and reply state", async () => {
   });
 });
 
+test("concurrent intercom asks both deliver and resolve replies independently", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const harness = createExtensionHarness("ask-worker");
+  const escapedErrors: unknown[] = [];
+  const plannerMessages: Array<{ from: SessionInfo; message: Message }> = [];
+  const orchestratorMessages: Array<{ from: SessionInfo; message: Message }> = [];
+  const onUnhandledRejection = (reason: unknown) => {
+    escapedErrors.push(reason);
+  };
+  const onUncaughtException = (error: unknown) => {
+    escapedErrors.push(error);
+  };
+  const onPlannerMessage = (from: SessionInfo, message: Message) => {
+    plannerMessages.push({ from, message });
+  };
+  const onOrchestratorMessage = (from: SessionInfo, message: Message) => {
+    orchestratorMessages.push({ from, message });
+  };
+
+  process.prependListener("unhandledRejection", onUnhandledRejection);
+  process.prependListener("uncaughtException", onUncaughtException);
+  planner.on("message", onPlannerMessage);
+  orchestrator.on("message", onOrchestratorMessage);
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    await waitForSessionByName(planner, "ask-worker");
+
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const firstAsk = intercomTool.execute("ask-concurrent-1", {
+      action: "ask",
+      to: "planner",
+      message: "First concurrent question",
+    }, new AbortController().signal, undefined, harness.ctx);
+    const secondAsk = intercomTool.execute("ask-concurrent-2", {
+      action: "ask",
+      to: "orchestrator",
+      message: "Second concurrent question",
+    }, new AbortController().signal, undefined, harness.ctx);
+
+    const deadline = Date.now() + 5000;
+    while (plannerMessages.length + orchestratorMessages.length < 2 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+
+    assert.equal(plannerMessages.length, 1);
+    assert.equal(orchestratorMessages.length, 1);
+    await orchestrator.send(orchestratorMessages[0]!.from.id, { text: "orchestrator reply", replyTo: orchestratorMessages[0]!.message.id });
+    await planner.send(plannerMessages[0]!.from.id, { text: "planner reply", replyTo: plannerMessages[0]!.message.id });
+
+    const results = await Promise.race([
+      Promise.all([firstAsk, secondAsk]),
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("Timed out waiting for concurrent asks")), 5000)),
+    ]);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(escapedErrors.map((error) => error instanceof Error ? error.message : String(error)), []);
+    assert.equal(results.filter((result) => result.isError).length, 0);
+    assert.match(
+      results[0]!.content[0]?.text ?? "",
+      /Reply from planner:[\s\S]*planner reply/,
+    );
+    assert.match(
+      results[1]!.content[0]?.text ?? "",
+      /Reply from orchestrator:[\s\S]*orchestrator reply/,
+    );
+  } finally {
+    process.off("unhandledRejection", onUnhandledRejection);
+    process.off("uncaughtException", onUncaughtException);
+    planner.off("message", onPlannerMessage);
+    orchestrator.off("message", onOrchestratorMessage);
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("intercom ask ignores a matching reply id from the wrong sender", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+  const imposter = new IntercomClient();
+  const harness = createExtensionHarness("ask-worker");
+  const plannerMessages: Array<{ from: SessionInfo; message: Message }> = [];
+  const onPlannerMessage = (from: SessionInfo, message: Message) => {
+    plannerMessages.push({ from, message });
+  };
+  planner.on("message", onPlannerMessage);
+
+  try {
+    await imposter.connect({
+      name: "imposter",
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    });
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    await waitForSessionByName(planner, "ask-worker");
+
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const askResultPromise = intercomTool.execute("ask-wrong-sender", {
+      action: "ask",
+      to: "planner",
+      message: "Question for the real planner",
+    }, new AbortController().signal, undefined, harness.ctx);
+
+    const deadline = Date.now() + 5000;
+    while (plannerMessages.length < 1 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(plannerMessages.length, 1);
+    const [{ from, message }] = plannerMessages;
+
+    const wrongReply = await imposter.send(from.id, { text: "spoofed reply", replyTo: message.id });
+    assert.equal(wrongReply.delivered, true);
+    const raceResult = await Promise.race([
+      askResultPromise.then(() => "resolved"),
+      new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 100)),
+    ]);
+    assert.equal(raceResult, "pending");
+
+    const correctReply = await planner.send(from.id, { text: "real reply", replyTo: message.id });
+    assert.equal(correctReply.delivered, true);
+    const askResult = await askResultPromise;
+    assert.equal(askResult.isError, false);
+    assert.match(askResult.content[0]?.text ?? "", /real reply/);
+  } finally {
+    planner.off("message", onPlannerMessage);
+    await harness.emitLifecycle("session_shutdown");
+    await imposter.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("session shutdown rejects all concurrent intercom asks", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const harness = createExtensionHarness("ask-worker");
+  const plannerMessages: Array<{ from: SessionInfo; message: Message }> = [];
+  const orchestratorMessages: Array<{ from: SessionInfo; message: Message }> = [];
+  const onPlannerMessage = (from: SessionInfo, message: Message) => {
+    plannerMessages.push({ from, message });
+  };
+  const onOrchestratorMessage = (from: SessionInfo, message: Message) => {
+    orchestratorMessages.push({ from, message });
+  };
+  planner.on("message", onPlannerMessage);
+  orchestrator.on("message", onOrchestratorMessage);
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    await waitForSessionByName(planner, "ask-worker");
+
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const firstAsk = intercomTool.execute("ask-shutdown-1", {
+      action: "ask",
+      to: "planner",
+      message: "First question before shutdown",
+    }, new AbortController().signal, undefined, harness.ctx);
+    const secondAsk = intercomTool.execute("ask-shutdown-2", {
+      action: "ask",
+      to: "orchestrator",
+      message: "Second question before shutdown",
+    }, new AbortController().signal, undefined, harness.ctx);
+
+    const deadline = Date.now() + 5000;
+    while (plannerMessages.length + orchestratorMessages.length < 2 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(plannerMessages.length, 1);
+    assert.equal(orchestratorMessages.length, 1);
+
+    await harness.emitLifecycle("session_shutdown");
+    const results = await Promise.race([
+      Promise.all([firstAsk, secondAsk]),
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("Timed out waiting for shutdown rejection")), 5000)),
+    ]);
+    assert.equal(results.filter((result) => result.isError).length, 2);
+    assert.match(results[0]!.content[0]?.text ?? "", /Session shutting down/);
+    assert.match(results[1]!.content[0]?.text ?? "", /Session shutting down/);
+  } finally {
+    planner.off("message", onPlannerMessage);
+    orchestrator.off("message", onOrchestratorMessage);
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
 test("sessions publish automatic lifecycle status", { concurrency: false }, async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const { planner, cleanup } = await setupClients();
@@ -699,6 +891,87 @@ test("child supervisor tool resolves target and includes run metadata", { concur
       await harness.emitLifecycle("session_shutdown");
     });
   } finally {
+    await cleanup();
+  }
+});
+
+test("concurrent supervisor decisions both deliver and resolve replies independently", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { orchestrator, cleanup } = await setupClients();
+  const escapedErrors: unknown[] = [];
+  const supervisorMessages: Array<{ from: SessionInfo; message: Message }> = [];
+  const onUnhandledRejection = (reason: unknown) => {
+    escapedErrors.push(reason);
+  };
+  const onUncaughtException = (error: unknown) => {
+    escapedErrors.push(error);
+  };
+  const onSupervisorMessage = (from: SessionInfo, message: Message) => {
+    supervisorMessages.push({ from, message });
+  };
+
+  process.prependListener("unhandledRejection", onUnhandledRejection);
+  process.prependListener("uncaughtException", onUncaughtException);
+  orchestrator.on("message", onSupervisorMessage);
+
+  try {
+    await withChildOrchestratorEnv({
+      orchestratorTarget: "orchestrator",
+      runId: "78f659a3",
+      agent: "worker",
+      index: "0",
+      sessionName: "subagent-worker-78f659a3-1",
+    }, async () => {
+      const harness = createExtensionHarness("subagent-worker-78f659a3-1");
+      piIntercomExtension(harness.pi as never);
+      try {
+        await harness.emitLifecycle("session_start");
+        const supervisorTool = harness.tools.find((tool) => tool.name === "contact_supervisor")!;
+
+        const firstDecision = supervisorTool.execute("supervisor-concurrent-1", {
+          reason: "need_decision",
+          message: "First supervisor decision?",
+        }, new AbortController().signal, undefined, harness.ctx);
+        const secondDecision = supervisorTool.execute("supervisor-concurrent-2", {
+          reason: "need_decision",
+          message: "Second supervisor decision?",
+        }, new AbortController().signal, undefined, harness.ctx);
+
+        const deadline = Date.now() + 5000;
+        while (supervisorMessages.length < 2 && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        assert.equal(supervisorMessages.length, 2);
+
+        const firstMessage = supervisorMessages.find(({ message }) => message.content.text.includes("First supervisor decision?"))!;
+        const secondMessage = supervisorMessages.find(({ message }) => message.content.text.includes("Second supervisor decision?"))!;
+        await orchestrator.send(secondMessage.from.id, { text: "Second supervisor reply.", replyTo: secondMessage.message.id });
+        await orchestrator.send(firstMessage.from.id, { text: "First supervisor reply.", replyTo: firstMessage.message.id });
+
+        const results = await Promise.race([
+          Promise.all([firstDecision, secondDecision]),
+          new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("Timed out waiting for supervisor decisions")), 5000)),
+        ]);
+        await new Promise((resolve) => setImmediate(resolve));
+
+        assert.deepEqual(escapedErrors.map((error) => error instanceof Error ? error.message : String(error)), []);
+        assert.equal(results.filter((result) => result.isError).length, 0);
+        assert.match(
+          results[0]!.content[0]?.text ?? "",
+          /Reply from supervisor:[\s\S]*First supervisor reply\./,
+        );
+        assert.match(
+          results[1]!.content[0]?.text ?? "",
+          /Reply from supervisor:[\s\S]*Second supervisor reply\./,
+        );
+      } finally {
+        await harness.emitLifecycle("session_shutdown");
+      }
+    });
+  } finally {
+    process.off("unhandledRejection", onUnhandledRejection);
+    process.off("uncaughtException", onUncaughtException);
+    orchestrator.off("message", onSupervisorMessage);
     await cleanup();
   }
 });
