@@ -65,6 +65,25 @@ function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
+class ReplyWaiterBusyError extends Error {
+  constructor() {
+    super("Already waiting for a reply");
+    this.name = "ReplyWaiterBusyError";
+  }
+}
+
+function isReplyWaiterBusyError(error: unknown): error is ReplyWaiterBusyError {
+  return error instanceof ReplyWaiterBusyError;
+}
+
+function alreadyWaitingForReplyResult() {
+  return {
+    content: [{ type: "text" as const, text: "Already waiting for a reply" }],
+    isError: true,
+    details: { error: true },
+  };
+}
+
 function formatAttachments(attachments: Attachment[]): string {
   let text = "";
   for (const att of attachments) {
@@ -438,10 +457,10 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   } | null = null;
   function waitForReply(from: string, replyTo: string, signal?: AbortSignal): Promise<Message> {
     if (replyWaiter) {
-      return Promise.reject(new Error("Already waiting for a reply"));
+      throw new ReplyWaiterBusyError();
     }
     if (signal?.aborted) {
-      return Promise.reject(new Error("Cancelled"));
+      throw new Error("Cancelled");
     }
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -1170,20 +1189,20 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         }
 
         if (replyWaiter) {
-          return {
-            content: [{ type: "text", text: "Already waiting for a reply" }],
-            isError: true,
-            details: { error: true },
-          };
+          return alreadyWaitingForReplyResult();
         }
 
         let replyPromise: Promise<Message> | null = null;
+        let ownsReplyWaiter = false;
         try {
           const questionId = randomUUID();
           replyPromise = waitForReply(sendTo, questionId, signal);
+          ownsReplyWaiter = true;
           replyPromise.catch(() => undefined);
           if (signal?.aborted) {
-            rejectReplyWaiter(new Error("Cancelled"));
+            if (ownsReplyWaiter) {
+              rejectReplyWaiter(new Error("Cancelled"));
+            }
             try {
               await replyPromise;
             } catch {
@@ -1205,7 +1224,9 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
           });
           if (!sendResult.delivered) {
             const errorText = sendResult.reason ?? "Session may not exist or has disconnected.";
-            rejectReplyWaiter(new Error(`Message to "${metadata.orchestratorTarget}" was not delivered: ${errorText}`));
+            if (ownsReplyWaiter) {
+              rejectReplyWaiter(new Error(`Message to "${metadata.orchestratorTarget}" was not delivered: ${errorText}`));
+            }
             if (replyPromise) {
               try {
                 await replyPromise;
@@ -1251,7 +1272,12 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
               : {}),
           };
         } catch (error) {
-          rejectReplyWaiter(toError(error));
+          if (isReplyWaiterBusyError(error)) {
+            return alreadyWaitingForReplyResult();
+          }
+          if (ownsReplyWaiter) {
+            rejectReplyWaiter(toError(error));
+          }
           if (replyPromise) {
             try {
               await replyPromise;
@@ -1465,11 +1491,7 @@ Usage:
           }
 
           if (replyWaiter) {
-            return {
-              content: [{ type: "text", text: "Already waiting for a reply" }],
-              isError: true,
-              details: { error: true },
-            };
+            return alreadyWaitingForReplyResult();
           }
 
           if (_signal?.aborted) {
@@ -1480,6 +1502,7 @@ Usage:
             };
           }
           let replyPromise: Promise<Message> | null = null;
+          let ownsReplyWaiter = false;
 
           try {
             const sendTo = await resolveSessionTarget(connectedClient, to) ?? to;
@@ -1497,8 +1520,13 @@ Usage:
                 details: { error: true },
               };
             }
+            if (replyWaiter) {
+              return alreadyWaitingForReplyResult();
+            }
             const questionId = randomUUID();
             replyPromise = waitForReply(sendTo, questionId, _signal);
+            ownsReplyWaiter = true;
+            replyPromise.catch(() => undefined);
             const sendResult = await connectedClient.send(sendTo, {
               messageId: questionId,
               text: message,
@@ -1509,7 +1537,9 @@ Usage:
 
             if (!sendResult.delivered) {
               const errorText = sendResult.reason ?? "Session may not exist or has disconnected.";
-              rejectReplyWaiter(new Error(`Message to "${to}" was not delivered: ${errorText}`));
+              if (ownsReplyWaiter) {
+                rejectReplyWaiter(new Error(`Message to "${to}" was not delivered: ${errorText}`));
+              }
               if (replyPromise) {
                 try {
                   await replyPromise;
@@ -1545,7 +1575,12 @@ Usage:
               isError: false,
             };
           } catch (error) {
-            rejectReplyWaiter(toError(error));
+            if (isReplyWaiterBusyError(error)) {
+              return alreadyWaitingForReplyResult();
+            }
+            if (ownsReplyWaiter) {
+              rejectReplyWaiter(toError(error));
+            }
             if (replyPromise) {
               try {
                 await replyPromise;
