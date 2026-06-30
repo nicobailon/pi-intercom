@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { homedir } from "os";
+import { createRequire } from "module";
 import net from "net";
 import { getBrokerSocketPath } from "./paths.js";
 
@@ -31,7 +32,18 @@ function sleep(ms: number): Promise<void> {
 }
 
 export function getTsxCliPath(extensionDir: string = EXTENSION_DIR): string {
-  return join(extensionDir, "node_modules", "tsx", "dist", "cli.mjs");
+  // Resolve tsx via Node's module resolution so it works regardless of whether
+  // tsx is bundled under extensionDir/node_modules or hoisted to a workspace
+  // root by npm. We resolve the tsx package main entry (its "exports" field
+  // does not expose ./dist/cli.mjs as a subpath) and then locate cli.mjs next
+  // to it. Falls back to the legacy relative path if resolution fails.
+  try {
+    const requireFromExtension = createRequire(import.meta.url);
+    const tsxMain = requireFromExtension.resolve("tsx");
+    return join(dirname(tsxMain), "cli.mjs");
+  } catch {
+    return join(extensionDir, "node_modules", "tsx", "dist", "cli.mjs");
+  }
 }
 
 function quoteWindowsArg(value: string): string {

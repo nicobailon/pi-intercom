@@ -12,9 +12,14 @@ import {
   getWindowsHiddenLauncherPath,
 } from "./spawn.js";
 
-test("getTsxCliPath points at local tsx cli", () => {
+test("getTsxCliPath resolves tsx cli via module resolution", () => {
   const cliPath = getTsxCliPath("C:/repo");
-  assert.equal(cliPath, path.join("C:/repo", "node_modules", "tsx", "dist", "cli.mjs"));
+  // getTsxCliPath resolves the tsx package main entry and locates cli.mjs next
+  // to it, so the path reflects the real install location (bundled under
+  // extensionDir or hoisted by npm) rather than a hardcoded relative path.
+  assert.equal(path.basename(cliPath), "cli.mjs");
+  assert.equal(path.basename(path.dirname(cliPath)), "dist");
+  assert.equal(path.basename(path.dirname(path.dirname(cliPath))), "tsx");
 });
 
 test("getWindowsHiddenLauncherPath points at the broker launcher script", () => {
@@ -22,15 +27,16 @@ test("getWindowsHiddenLauncherPath points at the broker launcher script", () => 
   assert.equal(launcherPath, path.join("C:/tmp/intercom", "broker-launch.vbs"));
 });
 
-test("getWindowsBrokerCommandLine wraps node, tsx cli, and broker path", () => {
+test("getWindowsBrokerCommandLine wraps node, resolved tsx cli, and broker path", () => {
   const commandLine = getWindowsBrokerCommandLine(
     "C:/repo/broker.ts",
     "C:/repo",
     "C:/Program Files/nodejs/node.exe",
   );
+  const expectedTsxPath = getTsxCliPath("C:/repo");
   assert.equal(
     commandLine,
-    `"C:/Program Files/nodejs/node.exe" "${path.join("C:/repo", "node_modules", "tsx", "dist", "cli.mjs")}" "C:/repo/broker.ts"`,
+    `"C:/Program Files/nodejs/node.exe" "${expectedTsxPath}" "C:/repo/broker.ts"`,
   );
 });
 
@@ -56,7 +62,8 @@ test("getBrokerLaunchSpec uses wscript launcher on Windows without writing files
     assert.equal(spec.command, "wscript.exe");
     assert.deepEqual(spec.args, [path.join(intercomDir, "broker-launch.vbs")]);
     assert.equal(spec.kind, "windows-launcher");
-    assert.equal(spec.launcherCommandLine, `"C:/Program Files/nodejs/node.exe" "${path.join("C:/repo", "node_modules", "tsx", "dist", "cli.mjs")}" "C:/repo/broker.ts"`);
+    const expectedTsxPath = getTsxCliPath("C:/repo");
+    assert.equal(spec.launcherCommandLine, `"C:/Program Files/nodejs/node.exe" "${expectedTsxPath}" "C:/repo/broker.ts"`);
     assert.equal(existsSync(path.join(intercomDir, "broker-launch.vbs")), false);
   } finally {
     rmSync(intercomDir, { recursive: true, force: true });
