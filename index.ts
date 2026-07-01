@@ -1718,7 +1718,7 @@ Usage:
 
     const selectedSession = await ctx.ui.custom<SessionInfo | undefined>(
       (_tui, theme, keybindings, done) => new SessionListOverlay(theme, keybindings, currentSession, sessions, done),
-      { overlay: true }
+      { overlay: true, overlayOptions: { width: 88 } }
     ).catch(() => undefined);
 
     if (!selectedSession || !getLiveContext(ctx, overlayGeneration)) return;
@@ -1735,7 +1735,7 @@ Usage:
 
     const result = await ctx.ui.custom<ComposeResult>(
       (tui, theme, keybindings, done) => new ComposeOverlay(tui, theme, keybindings, selectedSession, targetLabel, overlayClient, done),
-      { overlay: true }
+      { overlay: true, overlayOptions: { width: 72 } }
     ).catch(() => undefined);
 
     if (result?.sent && result.messageId && result.text && getLiveContext(ctx, overlayGeneration)) {
