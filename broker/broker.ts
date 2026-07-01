@@ -82,6 +82,10 @@ function isMessage(value: unknown): value is Message {
     || (Array.isArray(content.attachments) && content.attachments.every(isAttachment));
 }
 
+function isSessionId(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
 function isSessionRegistration(value: unknown): value is Omit<SessionInfo, "id"> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return false;
@@ -151,11 +155,13 @@ class IntercomBroker {
 
     socket.on("close", () => {
       if (sessionId) {
-        this.sessions.delete(sessionId);
-        this.clearAskEdgesForSession(sessionId);
-        this.broadcast({ type: "session_left", sessionId }, sessionId);
-
-        this.scheduleShutdownCheck();
+        const existing = this.sessions.get(sessionId);
+        if (existing?.socket === socket) {
+          this.sessions.delete(sessionId);
+          this.clearAskEdgesForSession(sessionId);
+          this.broadcast({ type: "session_left", sessionId }, sessionId);
+          this.scheduleShutdownCheck();
+        }
       }
     });
 
@@ -202,7 +208,18 @@ class IntercomBroker {
           throw new Error("Received duplicate register message");
         }
         
-        const id = randomUUID();
+        let id: string = randomUUID();
+        if (clientMessage.sessionId !== undefined) {
+          if (!isSessionId(clientMessage.sessionId)) {
+            throw new Error("Invalid register sessionId");
+          }
+          id = clientMessage.sessionId;
+        }
+        const previous = this.sessions.get(id);
+        if (previous) {
+          this.clearAskEdgesForSession(id);
+          previous.socket.end();
+        }
         setId(id);
         const info: SessionInfo = { ...clientMessage.session, id };
         this.sessions.set(id, { socket, info });
@@ -221,11 +238,14 @@ class IntercomBroker {
         if (!currentId) {
           throw new Error("Received unregister before register");
         }
-        this.sessions.delete(currentId);
-        this.clearAskEdgesForSession(currentId);
-        this.broadcast({ type: "session_left", sessionId: currentId }, currentId);
+        const existing = this.sessions.get(currentId);
+        if (existing?.socket === socket) {
+          this.sessions.delete(currentId);
+          this.clearAskEdgesForSession(currentId);
+          this.broadcast({ type: "session_left", sessionId: currentId }, currentId);
+          this.scheduleShutdownCheck();
+        }
         setId(null);
-        this.scheduleShutdownCheck();
         break;
       }
 
@@ -261,7 +281,7 @@ class IntercomBroker {
         const targets = this.findSessions(clientMessage.to);
         if (targets.length === 1) {
           const fromSession = this.sessions.get(currentId);
-          if (!fromSession) {
+          if (!fromSession || fromSession.socket !== socket) {
             writeMessage(socket, {
               type: "delivery_failed",
               messageId: message.id,
@@ -326,8 +346,9 @@ class IntercomBroker {
         if (typeof clientMessage.messageId !== "string") {
           throw new Error("Invalid cancel_ask message");
         }
+        const session = this.sessions.get(currentId);
         const edge = this.askEdges.get(clientMessage.messageId);
-        if (edge?.from === currentId) {
+        if (session?.socket === socket && edge?.from === currentId) {
           this.askEdges.delete(clientMessage.messageId);
         }
         break;
@@ -338,7 +359,7 @@ class IntercomBroker {
           throw new Error("Received presence before register");
         }
         const session = this.sessions.get(currentId);
-        if (session) {
+        if (session?.socket === socket) {
           if (clientMessage.name !== undefined) {
             if (typeof clientMessage.name !== "string") {
               throw new Error("Invalid presence name");
@@ -391,7 +412,14 @@ class IntercomBroker {
     }
 
     const lowerName = nameOrId.toLowerCase();
-    return Array.from(this.sessions.values()).filter(session => session.info.name?.toLowerCase() === lowerName);
+    const byName = Array.from(this.sessions.values()).filter(session => session.info.name?.toLowerCase() === lowerName);
+    if (byName.length > 0) {
+      return byName;
+    }
+
+    return Array.from(this.sessions.entries())
+      .filter(([id]) => id.startsWith(nameOrId))
+      .map(([, session]) => session);
   }
 
   private broadcast(msg: BrokerMessage, exclude?: string): void {

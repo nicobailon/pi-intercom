@@ -12,6 +12,7 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 - Restricted Unix intercom runtime directory, socket, PID, and spawn-lock permissions.
 - Rechecked single-flight ask state after session target resolution so concurrent regular asks fail safely instead of crashing on an unhandled rejected reply waiter.
 - Refused broker-level mutual asks that would deadlock two sessions, and cleared outstanding ask edges when asks are replied to, cancelled, or disconnected.
+- Stabilized intercom session addressing across reconnects, idle `/name` changes, replaced Pi sessions, supervisor routing, pending replies, and short-ID targeting.
 - Aligned intercom overlay widths with their rendered modal boxes. Thanks to Cat for PR #43.
 - Marked failed `intercom` and `contact_supervisor` tool results through Pi's `tool_result` error flag path while preserving structured renderer details.
 - Limited the intercom overlay to TUI mode and unsubscribed subagent relay event handlers during session shutdown.

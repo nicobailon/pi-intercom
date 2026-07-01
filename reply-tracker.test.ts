@@ -54,6 +54,15 @@ test("reply with to resolves matching pending ask", () => {
   assert.equal(tracker.resolveReplyTarget({ to: "planner-id" }, 1002).message.id, "ask-1");
 });
 
+test("replyTo resolves the exact pending ask", () => {
+  const tracker = new ReplyTracker();
+  tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "First"), 1000);
+  tracker.recordIncomingMessage(createSession("reviewer-id", "reviewer"), createMessage("ask-2", "Second"), 1001);
+
+  assert.equal(tracker.resolveReplyTarget({ replyTo: "ask-2" }, 1002).from.id, "reviewer-id");
+  assert.throws(() => tracker.resolveReplyTarget({ to: "planner", replyTo: "ask-2" }, 1002), /is not from/);
+});
+
 test("reply errors when no context and no pending asks", () => {
   const tracker = new ReplyTracker();
 
@@ -90,4 +99,25 @@ test("ask timeout can be configured from environment", () => {
     if (previous === undefined) delete process.env.PI_INTERCOM_ASK_TIMEOUT_MS;
     else process.env.PI_INTERCOM_ASK_TIMEOUT_MS = previous;
   }
+});
+
+test("pending asks can be explicitly dismissed without removing retryable failures", () => {
+  const tracker = new ReplyTracker();
+  tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "Need a decision"), 1000);
+  tracker.recordIncomingMessage(createSession("reviewer-id", "reviewer"), createMessage("ask-2", "Retryable"), 1001);
+
+  tracker.dismissPendingAsk("ask-1");
+
+  assert.deepEqual(tracker.listPending(1002).map((context) => context.message.id), ["ask-2"]);
+});
+
+test("dismissing a pending ask removes queued turn context", () => {
+  const tracker = new ReplyTracker();
+  const context = tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "Need a decision"), 1000);
+  tracker.queueTurnContext(context);
+
+  tracker.dismissPendingAsk("ask-1");
+  tracker.beginTurn(1001);
+
+  assert.throws(() => tracker.resolveReplyTarget({}, 1002), /No active intercom context to reply to/);
 });
