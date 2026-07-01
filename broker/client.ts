@@ -520,6 +520,23 @@ export class IntercomClient extends EventEmitter {
     });
   }
 
+  cancelAsk(messageId: string): void {
+    if (this.disconnecting) {
+      return;
+    }
+
+    const socket = this.socket;
+    if (!socket || !this._sessionId || socket.destroyed || socket.writableEnded || !socket.writable) {
+      return;
+    }
+
+    try {
+      writeMessage(socket, { type: "cancel_ask", messageId });
+    } catch {
+      // Cancellation is best-effort; local waiter cleanup must still proceed.
+    }
+  }
+
   updatePresence(updates: { name?: string; status?: string; model?: string }): void {
     if (this.disconnecting) {
       return;

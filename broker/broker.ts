@@ -10,6 +10,7 @@ import {
   INTERCOM_RUNTIME_FILE_MODE,
   restrictIntercomRuntimeFile,
 } from "./paths.ts";
+import { getAskTimeoutMs } from "../config.ts";
 import type { SessionInfo, Message, Attachment, BrokerMessage } from "../types.ts";
 
 const INTERCOM_DIR = getIntercomDirPath();
@@ -19,6 +20,12 @@ const PID_PATH = join(INTERCOM_DIR, "broker.pid");
 interface ConnectedSession {
   socket: net.Socket;
   info: SessionInfo;
+}
+
+interface AskEdge {
+  from: string;
+  to: string;
+  createdAt: number;
 }
 
 function isAttachment(value: unknown): value is Attachment {
@@ -101,8 +108,10 @@ function isSessionRegistration(value: unknown): value is Omit<SessionInfo, "id">
 
 class IntercomBroker {
   private sessions = new Map<string, ConnectedSession>();
+  private askEdges = new Map<string, AskEdge>();
   private server: net.Server;
   private shutdownTimer: NodeJS.Timeout | null = null;
+  private readonly askTimeoutMs = getAskTimeoutMs();
 
   constructor() {
     ensureIntercomRuntimeDir(INTERCOM_DIR);
@@ -143,6 +152,7 @@ class IntercomBroker {
     socket.on("close", () => {
       if (sessionId) {
         this.sessions.delete(sessionId);
+        this.clearAskEdgesForSession(sessionId);
         this.broadcast({ type: "session_left", sessionId }, sessionId);
 
         this.scheduleShutdownCheck();
@@ -208,7 +218,11 @@ class IntercomBroker {
       }
 
       case "unregister": {
+        if (!currentId) {
+          throw new Error("Received unregister before register");
+        }
         this.sessions.delete(currentId);
+        this.clearAskEdgesForSession(currentId);
         this.broadcast({ type: "session_left", sessionId: currentId }, currentId);
         setId(null);
         this.scheduleShutdownCheck();
@@ -226,6 +240,9 @@ class IntercomBroker {
       }
 
       case "send": {
+        if (!currentId) {
+          throw new Error("Received send before register");
+        }
         const message = clientMessage.message;
         const messageId = isMessage(message) ? message.id : "unknown";
 
@@ -238,6 +255,9 @@ class IntercomBroker {
           break;
         }
 
+        this.pruneAskEdges();
+        const replyEdge = message.replyTo ? this.askEdges.get(message.replyTo) : undefined;
+
         const targets = this.findSessions(clientMessage.to);
         if (targets.length === 1) {
           const fromSession = this.sessions.get(currentId);
@@ -249,11 +269,35 @@ class IntercomBroker {
             });
             break;
           }
-          writeMessage(targets[0].socket, {
+          const target = targets[0];
+          if (replyEdge && (replyEdge.to !== currentId || replyEdge.from !== target.info.id)) {
+            writeMessage(socket, {
+              type: "delivery_failed",
+              messageId: message.id,
+              reason: "Reply target does not match the pending ask",
+            });
+            break;
+          }
+          if (message.expectsReply) {
+            const reverseEdge = Array.from(this.askEdges.entries()).find(([edgeMessageId, edge]) => edgeMessageId !== message.replyTo && edge.from === target.info.id && edge.to === currentId);
+            if (reverseEdge) {
+              writeMessage(socket, {
+                type: "delivery_failed",
+                messageId: message.id,
+                reason: "Mutual ask refused: target session is already waiting for a reply from this session.",
+              });
+              break;
+            }
+            this.askEdges.set(message.id, { from: currentId, to: target.info.id, createdAt: Date.now() });
+          }
+          writeMessage(target.socket, {
             type: "message",
             from: fromSession.info,
             message,
           });
+          if (message.replyTo) {
+            this.askEdges.delete(message.replyTo);
+          }
           writeMessage(socket, { type: "delivered", messageId: message.id });
           break;
         }
@@ -275,7 +319,24 @@ class IntercomBroker {
         break;
       }
 
+      case "cancel_ask": {
+        if (!currentId) {
+          throw new Error("Received cancel_ask before register");
+        }
+        if (typeof clientMessage.messageId !== "string") {
+          throw new Error("Invalid cancel_ask message");
+        }
+        const edge = this.askEdges.get(clientMessage.messageId);
+        if (edge?.from === currentId) {
+          this.askEdges.delete(clientMessage.messageId);
+        }
+        break;
+      }
+
       case "presence": {
+        if (!currentId) {
+          throw new Error("Received presence before register");
+        }
         const session = this.sessions.get(currentId);
         if (session) {
           if (clientMessage.name !== undefined) {
@@ -307,6 +368,22 @@ class IntercomBroker {
     }
   }
 
+  private pruneAskEdges(now = Date.now()): void {
+    for (const [messageId, edge] of this.askEdges) {
+      if (now - edge.createdAt > this.askTimeoutMs) {
+        this.askEdges.delete(messageId);
+      }
+    }
+  }
+
+  private clearAskEdgesForSession(sessionId: string): void {
+    for (const [messageId, edge] of this.askEdges) {
+      if (edge.from === sessionId || edge.to === sessionId) {
+        this.askEdges.delete(messageId);
+      }
+    }
+  }
+
   private findSessions(nameOrId: string): ConnectedSession[] {
     const byId = this.sessions.get(nameOrId);
     if (byId) {
@@ -332,6 +409,7 @@ class IntercomBroker {
       session.socket.end();
     }
     this.sessions.clear();
+    this.askEdges.clear();
     if (process.platform !== "win32") {
       try {
         unlinkSync(SOCKET_PATH);

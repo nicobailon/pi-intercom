@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { getAskTimeoutMs } from "./config.ts";
 import { ReplyTracker } from "./reply-tracker.ts";
 import type { Message, SessionInfo } from "./types.ts";
 
@@ -74,4 +75,19 @@ test("reply removes pending ask after successful reply", () => {
   tracker.markReplied("ask-1");
 
   assert.deepEqual(tracker.listPending(1001), []);
+});
+
+test("ask timeout can be configured from environment", () => {
+  const previous = process.env.PI_INTERCOM_ASK_TIMEOUT_MS;
+  process.env.PI_INTERCOM_ASK_TIMEOUT_MS = "42";
+  try {
+    assert.equal(getAskTimeoutMs(), 42);
+    assert.throws(() => {
+      process.env.PI_INTERCOM_ASK_TIMEOUT_MS = "0";
+      getAskTimeoutMs();
+    }, /positive integer/);
+  } finally {
+    if (previous === undefined) delete process.env.PI_INTERCOM_ASK_TIMEOUT_MS;
+    else process.env.PI_INTERCOM_ASK_TIMEOUT_MS = previous;
+  }
 });

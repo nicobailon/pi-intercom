@@ -805,6 +805,199 @@ test("child supervisor tool preserves delivery failure reasons", { concurrency: 
   }
 });
 
+test("regular intercom asks fail safely when started concurrently", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { orchestrator, cleanup } = await setupClients();
+
+  try {
+    const harness = createExtensionHarness("regular-ask-worker");
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    await waitForSessionByName(orchestrator, "regular-ask-worker");
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+
+    const firstMessage = once(orchestrator, "message") as Promise<[SessionInfo, Message]>;
+    const firstAsk = intercomTool.execute("ask-1", { action: "ask", to: "orchestrator", message: "First?" }, new AbortController().signal, undefined, harness.ctx);
+    const secondAsk = intercomTool.execute("ask-2", { action: "ask", to: "orchestrator", message: "Second?" }, new AbortController().signal, undefined, harness.ctx);
+    const [from, askMessage] = await firstMessage;
+    assert.equal(askMessage.expectsReply, true);
+
+    const earlyResults = await Promise.race([
+      Promise.all([firstAsk, secondAsk]),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 100)),
+    ]);
+    assert.equal(earlyResults, null);
+
+    const pendingResult = await Promise.race([firstAsk, secondAsk]);
+    assert.equal(pendingResult.details?.error, true);
+    assert.match(pendingResult.content[0]?.text ?? "", /Already waiting/);
+
+    const reply = await orchestrator.send(from.id, { text: "First answer.", replyTo: askMessage.id });
+    assert.equal(reply.delivered, true);
+
+    const results = await Promise.all([firstAsk, secondAsk]);
+    assert.equal(results.filter((result) => result.details?.error === true).length, 1);
+    assert.equal(results.filter((result) => /First answer/.test(result.content[0]?.text ?? "")).length, 1);
+    await harness.emitLifecycle("session_shutdown");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("broker refuses reverse mutual asks until the original ask is answered", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+
+  try {
+    const askToOrchestrator = await planner.send(orchestrator.sessionId!, {
+      messageId: "planner-to-orchestrator",
+      text: "Can you decide?",
+      expectsReply: true,
+    });
+    assert.equal(askToOrchestrator.delivered, true);
+
+    const reverseAsk = await orchestrator.send(planner.sessionId!, {
+      messageId: "orchestrator-to-planner",
+      text: "Can you decide instead?",
+      expectsReply: true,
+    });
+    assert.equal(reverseAsk.delivered, false);
+    assert.match(reverseAsk.reason ?? "", /Mutual ask refused/);
+
+    const plainSend = await orchestrator.send(planner.sessionId!, { text: "Plain update still works." });
+    assert.equal(plainSend.delivered, true);
+
+    const reply = await orchestrator.send(planner.sessionId!, {
+      text: "Answered.",
+      replyTo: "planner-to-orchestrator",
+    });
+    assert.equal(reply.delivered, true);
+
+    const nextAsk = await orchestrator.send(planner.sessionId!, {
+      messageId: "orchestrator-to-planner-after-reply",
+      text: "Now can I ask?",
+      expectsReply: true,
+    });
+    assert.equal(nextAsk.delivered, true);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a reply can start a new reverse ask", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+
+  try {
+    const askToOrchestrator = await planner.send(orchestrator.sessionId!, {
+      messageId: "planner-to-orchestrator-transition",
+      text: "Can you decide?",
+      expectsReply: true,
+    });
+    assert.equal(askToOrchestrator.delivered, true);
+
+    const replyAndAsk = await orchestrator.send(planner.sessionId!, {
+      messageId: "orchestrator-reply-and-ask",
+      text: "I answered; can you decide the next thing?",
+      replyTo: "planner-to-orchestrator-transition",
+      expectsReply: true,
+    });
+    assert.equal(replyAndAsk.delivered, true);
+
+    const duplicateReverseAsk = await orchestrator.send(planner.sessionId!, {
+      messageId: "orchestrator-duplicate-reverse-ask",
+      text: "Can I ask another before the first is answered?",
+      expectsReply: true,
+    });
+    assert.equal(duplicateReverseAsk.delivered, true);
+
+    const plannerReverseAsk = await planner.send(orchestrator.sessionId!, {
+      messageId: "planner-reverse-while-orchestrator-waits",
+      text: "Can I ask while you wait?",
+      expectsReply: true,
+    });
+    assert.equal(plannerReverseAsk.delivered, false);
+    assert.match(plannerReverseAsk.reason ?? "", /Mutual ask refused/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("failed replies do not clear broker mutual-ask edges", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+
+  try {
+    const askToOrchestrator = await planner.send(orchestrator.sessionId!, {
+      messageId: "planner-to-orchestrator-missing-reply",
+      text: "Can you decide?",
+      expectsReply: true,
+    });
+    assert.equal(askToOrchestrator.delivered, true);
+
+    const missingReply = await orchestrator.send("missing-session", {
+      messageId: "reply-to-missing-session",
+      text: "Answered, maybe?",
+      replyTo: "planner-to-orchestrator-missing-reply",
+    });
+    assert.equal(missingReply.delivered, false);
+    assert.match(missingReply.reason ?? "", /Session not found/);
+
+    const reverseAsk = await orchestrator.send(planner.sessionId!, {
+      messageId: "reverse-after-missing-reply",
+      text: "Can I ask now?",
+      expectsReply: true,
+    });
+    assert.equal(reverseAsk.delivered, false);
+    assert.match(reverseAsk.reason ?? "", /Mutual ask refused/);
+
+    const deliveredReply = await orchestrator.send(planner.sessionId!, {
+      messageId: "reply-to-planner",
+      text: "Actually answered.",
+      replyTo: "planner-to-orchestrator-missing-reply",
+    });
+    assert.equal(deliveredReply.delivered, true);
+
+    const nextAsk = await orchestrator.send(planner.sessionId!, {
+      messageId: "reverse-after-delivered-reply",
+      text: "Now can I ask?",
+      expectsReply: true,
+    });
+    assert.equal(nextAsk.delivered, true);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("regular intercom ask cancellation clears broker mutual-ask edge", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { orchestrator, cleanup } = await setupClients();
+
+  try {
+    const harness = createExtensionHarness("cancel-cleanup-worker");
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const worker = await waitForSessionByName(orchestrator, "cancel-cleanup-worker");
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+
+    const controller = new AbortController();
+    const cancelledMessage = once(orchestrator, "message") as Promise<[SessionInfo, Message]>;
+    const cancelledResultPromise = intercomTool.execute("ask-cancelled", { action: "ask", to: "orchestrator", message: "Should I continue?" }, controller.signal, undefined, harness.ctx);
+    await cancelledMessage;
+    controller.abort();
+    const cancelledResult = await cancelledResultPromise;
+    assert.equal(cancelledResult.details?.error, true);
+    assert.match(cancelledResult.content[0]?.text ?? "", /Cancelled/);
+
+    const reverseAsk = await orchestrator.send(worker.id, {
+      messageId: "reverse-after-cancel",
+      text: "Can I ask after your cancellation?",
+      expectsReply: true,
+    });
+    assert.equal(reverseAsk.delivered, true);
+    await harness.emitLifecycle("session_shutdown");
+  } finally {
+    await cleanup();
+  }
+});
+
 test("child supervisor tool clears reply waiter when cancelled", { concurrency: false }, async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const { orchestrator, cleanup } = await setupClients();
