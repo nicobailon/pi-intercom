@@ -632,7 +632,19 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     return Boolean(resolvedTo && activeClient?.sessionId && resolvedTo === activeClient.sessionId)
       || targets.has(to.trim().toLowerCase());
   }
-  function sendIncomingMessage(entry: InboundMessageEntry, delivery: "trigger" | "followUp", generation = runtimeGeneration): void {
+  function shouldTriggerInboundMessage(entry: InboundMessageEntry, forceTrigger = false): boolean {
+    if (forceTrigger) {
+      return true;
+    }
+    if (config.inboundTrigger === "always") {
+      return true;
+    }
+    if (config.inboundTrigger === "replies") {
+      return Boolean(entry.message.replyTo);
+    }
+    return false;
+  }
+  function sendIncomingMessage(entry: InboundMessageEntry, delivery: "trigger" | "followUp", generation = runtimeGeneration, forceTrigger = false): void {
     if (runtimeStarted && !getLiveContext(runtimeContext, generation)) {
       return;
     }
@@ -648,7 +660,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         display: true,
         details: entry,
       },
-      delivery === "trigger"
+      delivery === "trigger" && shouldTriggerInboundMessage(entry, forceTrigger)
         ? { triggerTurn: true }
         : { deliverAs: "followUp" }
     );
@@ -894,7 +906,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         content: { text: messageText },
       },
       bodyText: messageText,
-    }, "trigger");
+    }, "trigger", runtimeGeneration, true);
   }
   function recordSubagentDeliveryError(entryType: string, to: string, message: string, error: unknown): void {
     pi.appendEntry(entryType, {

@@ -138,6 +138,14 @@ export function getBrokerLaunchSpec(
     };
   }
 
+  if (usesDefaultBrokerCommand(brokerCommand, brokerArgs)) {
+    return {
+      kind: "direct",
+      command: nodePath,
+      args: [getTsxCliPath(extensionDir), brokerPath],
+    };
+  }
+
   return {
     kind: "direct",
     command: brokerCommand,

@@ -15,17 +15,30 @@ import {
   type BrokerConnectTarget,
 } from "./paths.ts";
 import { getAskTimeoutMs } from "../config.ts";
-import type { SessionInfo, Message, Attachment, BrokerMessage } from "../types.ts";
+import type { SessionInfo, Message, Attachment, BrokerMessage, SessionRegistration } from "../types.ts";
 
 const INTERCOM_DIR = getIntercomDirPath();
 const LISTEN_TARGET = getBrokerListenTarget();
 const PID_PATH = join(INTERCOM_DIR, "broker.pid");
 const PORT_PATH = getBrokerPortFilePath(INTERCOM_DIR);
 const BROKER_STATE_ID = randomUUID();
+const MAX_SESSIONS = 128;
+const MAX_UNREGISTERED_CONNECTIONS = 32;
+const REGISTRATION_TIMEOUT_MS = 1000;
+const RATE_LIMIT_CAPACITY = 240;
+const RATE_LIMIT_REFILL_PER_SECOND = 120;
+const PRESENCE_HEARTBEAT_MS = 1000;
 
 interface ConnectedSession {
   socket: net.Socket;
   info: SessionInfo;
+  lastPresenceBroadcastAt: number;
+}
+
+interface ConnectionState {
+  socket: net.Socket;
+  tokens: number;
+  lastRefillAt: number;
 }
 
 interface AskEdge {
@@ -92,7 +105,7 @@ function isSessionId(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-function isSessionRegistration(value: unknown): value is Omit<SessionInfo, "id"> {
+function isSessionRegistration(value: unknown): value is SessionRegistration {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return false;
   }
@@ -119,6 +132,8 @@ function isSessionRegistration(value: unknown): value is Omit<SessionInfo, "id">
 class IntercomBroker {
   private sessions = new Map<string, ConnectedSession>();
   private askEdges = new Map<string, AskEdge>();
+  private connections = new Set<net.Socket>();
+  private unregisteredConnections = new Set<net.Socket>();
   private server: net.Server;
   private shutdownTimer: NodeJS.Timeout | null = null;
   private readonly askTimeoutMs = getAskTimeoutMs();
@@ -168,11 +183,50 @@ class IntercomBroker {
   }
 
   private handleConnection(socket: net.Socket): void {
+    this.connections.add(socket);
     let sessionId: string | null = null;
+    let registrationTimeout: NodeJS.Timeout | null = null;
+    const armRegistrationTimeout = () => {
+      if (registrationTimeout) {
+        clearTimeout(registrationTimeout);
+      }
+      this.unregisteredConnections.delete(socket);
+      this.unregisteredConnections.add(socket);
+      this.evictOldestUnregisteredConnections(socket);
+      registrationTimeout = setTimeout(() => {
+        if (!sessionId) {
+          socket.destroy();
+        }
+      }, REGISTRATION_TIMEOUT_MS);
+      registrationTimeout.unref?.();
+    };
+    const clearRegistrationTimeout = () => {
+      if (registrationTimeout) {
+        clearTimeout(registrationTimeout);
+        registrationTimeout = null;
+      }
+      this.unregisteredConnections.delete(socket);
+    };
+    armRegistrationTimeout();
+    const connection: ConnectionState = {
+      socket,
+      tokens: RATE_LIMIT_CAPACITY,
+      lastRefillAt: Date.now(),
+    };
 
     const reader = createMessageReader((msg) => {
+      if (!this.consumeToken(connection)) {
+        writeMessage(socket, { type: "error", error: "Intercom broker rate limit exceeded" });
+        socket.destroy(new Error("Intercom broker rate limit exceeded"));
+        return;
+      }
       this.handleMessage(socket, msg, sessionId, (id) => {
         sessionId = id;
+        if (id) {
+          clearRegistrationTimeout();
+        } else {
+          armRegistrationTimeout();
+        }
       });
     }, (error) => {
       socket.destroy(error);
@@ -181,6 +235,8 @@ class IntercomBroker {
     socket.on("data", reader);
 
     socket.on("close", () => {
+      clearRegistrationTimeout();
+      this.connections.delete(socket);
       if (sessionId) {
         const existing = this.sessions.get(sessionId);
         if (existing?.socket === socket) {
@@ -195,6 +251,36 @@ class IntercomBroker {
     socket.on("error", (error) => {
       console.error("Socket error:", error);
     });
+  }
+
+  private evictOldestUnregisteredConnections(currentSocket: net.Socket): void {
+    while (this.unregisteredConnections.size > MAX_UNREGISTERED_CONNECTIONS) {
+      const [oldest] = this.unregisteredConnections;
+      if (!oldest) {
+        return;
+      }
+      if (oldest === currentSocket && this.unregisteredConnections.size === 1) {
+        return;
+      }
+      this.unregisteredConnections.delete(oldest);
+      oldest.destroy();
+    }
+  }
+
+  private consumeToken(connection: ConnectionState, now = Date.now()): boolean {
+    const elapsedMs = now - connection.lastRefillAt;
+    if (elapsedMs > 0) {
+      connection.tokens = Math.min(
+        RATE_LIMIT_CAPACITY,
+        connection.tokens + elapsedMs * RATE_LIMIT_REFILL_PER_SECOND / 1000,
+      );
+      connection.lastRefillAt = now;
+    }
+    if (connection.tokens < 1) {
+      return false;
+    }
+    connection.tokens -= 1;
+    return true;
   }
 
   private scheduleShutdownCheck(): void {
@@ -265,13 +351,29 @@ class IntercomBroker {
           id = clientMessage.sessionId;
         }
         const previous = this.sessions.get(id);
+        if (!previous && this.sessions.size >= MAX_SESSIONS) {
+          writeMessage(socket, { type: "error", error: "Too many registered intercom sessions" });
+          socket.destroy();
+          break;
+        }
         if (previous) {
           this.clearAskEdgesForSession(id);
           previous.socket.end();
         }
         setId(id);
-        const info: SessionInfo = { ...clientMessage.session, id };
-        this.sessions.set(id, { socket, info });
+        const session = clientMessage.session;
+        const info: SessionInfo = {
+          id,
+          ...(session.name !== undefined ? { name: session.name } : {}),
+          cwd: session.cwd,
+          model: session.model,
+          pid: session.pid,
+          startedAt: session.startedAt,
+          lastActivity: session.lastActivity,
+          ...(session.status !== undefined ? { status: session.status } : {}),
+          trustedLocal: typeof LISTEN_TARGET === "string" && process.platform !== "win32",
+        };
+        this.sessions.set(id, { socket, info, lastPresenceBroadcastAt: Date.now() });
         
         if (this.shutdownTimer) {
           clearTimeout(this.shutdownTimer);
@@ -329,6 +431,14 @@ class IntercomBroker {
 
         const targets = this.findSessions(clientMessage.to);
         if (targets.length === 1) {
+          if (message.replyTo && !replyEdge) {
+            writeMessage(socket, {
+              type: "delivery_failed",
+              messageId: message.id,
+              reason: "Reply target does not match a pending ask",
+            });
+            break;
+          }
           const fromSession = this.sessions.get(currentId);
           if (!fromSession || fromSession.socket !== socket) {
             writeMessage(socket, {
@@ -409,26 +519,40 @@ class IntercomBroker {
         }
         const session = this.sessions.get(currentId);
         if (session?.socket === socket) {
+          let changed = false;
           if (clientMessage.name !== undefined) {
             if (typeof clientMessage.name !== "string") {
               throw new Error("Invalid presence name");
             }
-            session.info.name = clientMessage.name;
+            if (session.info.name !== clientMessage.name) {
+              session.info.name = clientMessage.name;
+              changed = true;
+            }
           }
           if (clientMessage.status !== undefined) {
             if (typeof clientMessage.status !== "string") {
               throw new Error("Invalid presence status");
             }
-            session.info.status = clientMessage.status;
+            if (session.info.status !== clientMessage.status) {
+              session.info.status = clientMessage.status;
+              changed = true;
+            }
           }
           if (clientMessage.model !== undefined) {
             if (typeof clientMessage.model !== "string") {
               throw new Error("Invalid presence model");
             }
-            session.info.model = clientMessage.model;
+            if (session.info.model !== clientMessage.model) {
+              session.info.model = clientMessage.model;
+              changed = true;
+            }
           }
-          session.info.lastActivity = Date.now();
-          this.broadcast({ type: "presence_update", session: session.info }, currentId);
+          const now = Date.now();
+          session.info.lastActivity = now;
+          if (changed || now - session.lastPresenceBroadcastAt >= PRESENCE_HEARTBEAT_MS) {
+            session.lastPresenceBroadcastAt = now;
+            this.broadcast({ type: "presence_update", session: session.info }, currentId);
+          }
         }
         break;
       }

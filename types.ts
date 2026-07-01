@@ -7,6 +7,8 @@ export interface SessionInfo {
   startedAt: number;
   lastActivity: number;
   status?: string;
+  peerUid?: number;
+  trustedLocal?: boolean;
 }
 
 export interface Message {
@@ -27,8 +29,10 @@ export interface Attachment {
   language?: string;
 }
 
+export type SessionRegistration = Omit<SessionInfo, "id" | "peerUid" | "trustedLocal">;
+
 export type ClientMessage =
-  | { type: "register"; session: Omit<SessionInfo, "id">; sessionId?: string; stateId?: string }
+  | { type: "register"; session: SessionRegistration; sessionId?: string; stateId?: string }
   | { type: "unregister" }
   | { type: "list"; requestId: string }
   | { type: "send"; to: string; message: Message }

@@ -17,6 +17,8 @@ export function getAskTimeoutMs(): number {
   return value;
 }
 
+export type InboundTriggerPolicy = "always" | "replies" | "never";
+
 export interface IntercomConfig {
   /** Broker command used to spawn the broker process (e.g. "npx" or "bun") */
   brokerCommand: string;
@@ -26,6 +28,9 @@ export interface IntercomConfig {
 
   /** Require confirmation before non-reply sends from interactive sessions */
   confirmSend: boolean;
+
+  /** Controls whether inbound broker messages may automatically trigger a model turn */
+  inboundTrigger: InboundTriggerPolicy;
 
   /** Optional custom status suffix shown after automatic lifecycle status */
   status?: string;
@@ -45,6 +50,7 @@ const defaults: IntercomConfig = {
   brokerCommand: "npx",
   brokerArgs: ["--no-install", "tsx"],
   confirmSend: false,
+  inboundTrigger: "always",
   enabled: true,
   replyHint: true,
 };
@@ -104,6 +110,17 @@ export function loadConfig(): IntercomConfig {
       config.enabled = parsedConfig.enabled;
     }
 
+    if (Object.hasOwn(parsedConfig, "inboundTrigger")) {
+      if (
+        parsedConfig.inboundTrigger !== "always"
+        && parsedConfig.inboundTrigger !== "replies"
+        && parsedConfig.inboundTrigger !== "never"
+      ) {
+        throw new Error(`"inboundTrigger" must be "always", "replies", or "never"`);
+      }
+      config.inboundTrigger = parsedConfig.inboundTrigger;
+    }
+
     if (Object.hasOwn(parsedConfig, "replyHint")) {
       if (typeof parsedConfig.replyHint !== "boolean") {
         throw new Error(`"replyHint" must be a boolean`);
@@ -121,6 +138,6 @@ export function loadConfig(): IntercomConfig {
     return config;
   } catch (error) {
     console.error(`Failed to load intercom config at ${configPath}:`, error);
-    return { ...defaults };
+    return { ...defaults, inboundTrigger: "never" };
   }
 }

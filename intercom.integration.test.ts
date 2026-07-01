@@ -203,7 +203,7 @@ function createExtensionHarness(sessionName: string | (() => string) = "child-wo
   };
 }
 
-async function connectRawRegistered(sessionId: string, name: string) {
+async function connectRawRegistered(sessionId: string, name: string, sessionOverrides: Record<string, unknown> = {}) {
   const net = await import("node:net");
   const { getBrokerSocketPath } = await import("./broker/paths.ts");
   const { createMessageReader, writeMessage } = await import("./broker/framing.ts");
@@ -230,6 +230,7 @@ async function connectRawRegistered(sessionId: string, name: string) {
       pid: process.pid,
       startedAt: Date.now(),
       lastActivity: Date.now(),
+      ...sessionOverrides,
     },
   });
   await registered;
@@ -509,6 +510,156 @@ test("broker accepts caller supplied stable IDs across reconnect", { concurrency
     assert.equal(reconnected.sessionId, "stable-session-id");
     await waitForSessionId(planner, "stable-session-id");
     await reconnected.disconnect();
+  } finally {
+    await worker.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("broker owns local trust metadata instead of trusting registration payloads", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const raw = await connectRawRegistered("trust-metadata-worker-id", "trust-metadata-worker", {
+    peerUid: 0,
+    trustedLocal: false,
+  });
+
+  try {
+    const session = await waitForSessionId(planner, "trust-metadata-worker-id");
+    assert.equal(session.trustedLocal, process.platform !== "win32");
+    assert.equal(session.peerUid, undefined);
+  } finally {
+    raw.socket.destroy();
+    await cleanup();
+  }
+});
+
+test("broker rejects unknown replyTo values instead of delivering forged replies", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+
+  try {
+    const result = await planner.send(orchestrator.sessionId!, {
+      text: "This is not a real reply.",
+      replyTo: "not-a-pending-ask",
+    });
+    assert.equal(result.delivered, false);
+    assert.match(result.reason ?? "", /pending ask/i);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("broker disconnects a connection that exceeds the local rate limit", { concurrency: false }, async () => {
+  const { cleanup } = await setupClients();
+  const raw = await connectRawRegistered("rate-limit-worker-id", "rate-limit-worker");
+
+  try {
+    raw.socket.on("error", () => undefined);
+    const closed = once(raw.socket, "close");
+    for (let i = 0; i < 300; i += 1) {
+      raw.writeMessage(raw.socket, { type: "list", requestId: `flood-${i}` });
+    }
+    await closed;
+    assert.equal(raw.socket.destroyed, true);
+  } finally {
+    raw.socket.destroy();
+    await cleanup();
+  }
+});
+
+test("broker idle raw connections cannot block legitimate registration", { concurrency: false }, async () => {
+  const net = await import("node:net");
+  const { getBrokerSocketPath } = await import("./broker/paths.ts");
+  const { cleanup } = await setupClients();
+  const sockets: ReturnType<typeof net.connect>[] = [];
+  const legitimate = new IntercomClient();
+
+  try {
+    for (let i = 0; i < 140; i += 1) {
+      const socket = net.connect(getBrokerSocketPath());
+      socket.on("error", () => undefined);
+      sockets.push(socket);
+      await Promise.race([
+        once(socket, "connect").catch(() => undefined),
+        once(socket, "close").catch(() => undefined),
+        new Promise((resolve) => setTimeout(resolve, 200)),
+      ]);
+    }
+
+    await legitimate.connect({
+      name: "legitimate-after-idle-flood",
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    });
+    assert.equal(legitimate.isConnected(), true);
+  } finally {
+    for (const socket of sockets) {
+      socket.destroy();
+    }
+    await legitimate.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("broker times out sockets that unregister and go idle", { concurrency: false }, async () => {
+  const { cleanup } = await setupClients();
+  const raws: Array<Awaited<ReturnType<typeof connectRawRegistered>>> = [];
+  const legitimate = new IntercomClient();
+
+  try {
+    for (let i = 0; i < 40; i += 1) {
+      const raw = await connectRawRegistered(`unregister-idle-${i}`, `unregister-idle-${i}`);
+      raw.socket.on("error", () => undefined);
+      raw.writeMessage(raw.socket, { type: "unregister" });
+      raws.push(raw);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+
+    await legitimate.connect({
+      name: "legitimate-after-unregister-idle-flood",
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    });
+    assert.equal(legitimate.isConnected(), true);
+  } finally {
+    for (const raw of raws) {
+      raw.socket.destroy();
+    }
+    await legitimate.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("broker coalesces no-op presence floods", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const worker = new IntercomClient();
+  const updates: SessionInfo[] = [];
+  planner.on("presence_update", (session: SessionInfo) => {
+    if (session.name === "presence-worker") {
+      updates.push(session);
+    }
+  });
+
+  try {
+    await worker.connect({
+      name: "presence-worker",
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    });
+    worker.updatePresence({ status: "idle" });
+    for (let i = 0; i < 20; i += 1) {
+      worker.updatePresence({ status: "idle" });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(updates.length, 1);
   } finally {
     await worker.disconnect().catch(() => undefined);
     await cleanup();

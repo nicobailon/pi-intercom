@@ -3,7 +3,7 @@ import net from "net";
 import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.ts";
 import { getBrokerConnectTarget, type BrokerConnectTarget } from "./paths.ts";
-import type { SessionInfo, Message, Attachment } from "../types.ts";
+import type { SessionInfo, Message, Attachment, SessionRegistration } from "../types.ts";
 
 interface SendOptions {
   text: string;
@@ -105,7 +105,15 @@ function isSessionInfo(value: unknown): value is SessionInfo {
     return false;
   }
 
-  return session.status === undefined || typeof session.status === "string";
+  if (session.status !== undefined && typeof session.status !== "string") {
+    return false;
+  }
+
+  if (session.peerUid !== undefined && typeof session.peerUid !== "number") {
+    return false;
+  }
+
+  return session.trustedLocal === undefined || typeof session.trustedLocal === "boolean";
 }
 
 export class IntercomClient extends EventEmitter {
@@ -153,7 +161,7 @@ export class IntercomClient extends EventEmitter {
     return socket;
   }
 
-  connect(session: Omit<SessionInfo, "id">, sessionId?: string): Promise<void> {
+  connect(session: SessionRegistration, sessionId?: string): Promise<void> {
     if (this.socket) {
       return Promise.reject(new Error("Already connected"));
     }
@@ -291,7 +299,7 @@ export class IntercomClient extends EventEmitter {
 
     const brokerMessage = msg as { type: string } & Record<string, unknown>;
 
-    if (this._sessionId === null && brokerMessage.type !== "registered") {
+    if (this._sessionId === null && brokerMessage.type !== "registered" && brokerMessage.type !== "error") {
       throw new Error(`Received ${brokerMessage.type} before registered`);
     }
 
@@ -403,6 +411,9 @@ export class IntercomClient extends EventEmitter {
           throw new Error("Invalid error message");
         }
 
+        if (this._sessionId === null) {
+          throw new Error(brokerMessage.error);
+        }
         this.emit("error", new Error(brokerMessage.error));
         break;
       }
