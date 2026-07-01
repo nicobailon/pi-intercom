@@ -236,6 +236,122 @@ async function connectRawRegistered(sessionId: string, name: string) {
   return { socket, writeMessage };
 }
 
+test("opt-in TCP broker requires endpoint state for health and registration", { concurrency: false }, async () => {
+  const net = await import("node:net");
+  const { readFileSync } = await import("node:fs");
+  const { createMessageReader, writeMessage } = await import("./broker/framing.ts");
+  const agentDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-tcp-agent-"));
+  const broker = spawn("npx", [
+    "--no-install",
+    "tsx",
+    "-e",
+    "Object.defineProperty(process, 'platform', { value: 'win32' }); import('./broker/broker.ts').catch((error) => { console.error(error); process.exit(1); });",
+  ], {
+    cwd: repoDir,
+    env: {
+      ...process.env,
+      HOME: agentDir,
+      USERPROFILE: agentDir,
+      PI_CODING_AGENT_DIR: agentDir,
+      PI_INTERCOM_TRANSPORT: "tcp",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  const exchange = async (message: unknown, waitForResponse: boolean): Promise<unknown[]> => {
+    const socket = net.connect({ host, port });
+    const messages: unknown[] = [];
+    return await new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeout);
+        socket.off("data", reader);
+        socket.off("close", finish);
+        socket.off("error", onSocketError);
+        socket.destroy();
+        resolve(messages);
+      };
+      const onSocketError = () => finish();
+      const reader = createMessageReader((received) => {
+        messages.push(received);
+        if (waitForResponse) {
+          finish();
+        }
+      }, reject);
+      const timeout = setTimeout(finish, 500);
+      socket.once("connect", () => writeMessage(socket, message));
+      socket.on("data", reader);
+      socket.once("close", finish);
+      socket.once("error", onSocketError);
+    });
+  };
+
+  let host = "";
+  let port = 0;
+  let stateId = "";
+  try {
+    await waitForBrokerReady(broker);
+    const endpoint: unknown = JSON.parse(readFileSync(path.join(agentDir, "intercom", "broker.port.json"), "utf-8"));
+    if (typeof endpoint !== "object" || endpoint === null || Array.isArray(endpoint)) {
+      throw new Error("Invalid TCP endpoint fixture");
+    }
+    const endpointRecord = endpoint as Record<string, unknown>;
+    if (endpointRecord.host !== "127.0.0.1" || typeof endpointRecord.port !== "number" || typeof endpointRecord.stateId !== "string") {
+      throw new Error(`Invalid TCP endpoint fixture: ${JSON.stringify(endpointRecord)}`);
+    }
+    host = endpointRecord.host;
+    port = endpointRecord.port;
+    stateId = endpointRecord.stateId;
+
+    assert.deepEqual(await exchange({ type: "health", requestId: "unauthorized-health" }, false), []);
+    assert.deepEqual(await exchange({
+      type: "register",
+      sessionId: "unauthorized-tcp-client",
+      session: {
+        name: "unauthorized",
+        cwd: repoDir,
+        model: "test-model",
+        pid: process.pid,
+        startedAt: Date.now(),
+        lastActivity: Date.now(),
+      },
+    }, false), []);
+
+    const healthMessages = await exchange({ type: "health", requestId: "authorized-health", stateId }, true);
+    assert.deepEqual(healthMessages, [{
+      type: "health_ok",
+      requestId: "authorized-health",
+      protocol: "pi-intercom",
+      version: 1,
+    }]);
+
+    const registerMessages = await exchange({
+      type: "register",
+      sessionId: "authorized-tcp-client",
+      stateId,
+      session: {
+        name: "authorized",
+        cwd: repoDir,
+        model: "test-model",
+        pid: process.pid,
+        startedAt: Date.now(),
+        lastActivity: Date.now(),
+      },
+    }, true);
+    assert.deepEqual(registerMessages, [{ type: "registered", sessionId: "authorized-tcp-client" }]);
+  } finally {
+    if (broker.exitCode === null && broker.signalCode === null) {
+      broker.kill("SIGTERM");
+      await once(broker, "exit").catch(() => undefined);
+    }
+    rmSync(agentDir, { recursive: true, force: true });
+  }
+});
+
 async function setupClients() {
   const broker = spawn("npx", ["--no-install", "tsx", path.join(repoDir, "broker", "broker.ts")], {
     cwd: repoDir,

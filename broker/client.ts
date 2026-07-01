@@ -2,10 +2,8 @@ import { EventEmitter } from "events";
 import net from "net";
 import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.ts";
-import { getBrokerSocketPath } from "./paths.ts";
+import { getBrokerConnectTarget, type BrokerConnectTarget } from "./paths.ts";
 import type { SessionInfo, Message, Attachment } from "../types.ts";
-
-const BROKER_SOCKET = getBrokerSocketPath();
 
 interface SendOptions {
   text: string;
@@ -23,6 +21,12 @@ interface SendResult {
 
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
+}
+
+function connectToBrokerTarget(target: BrokerConnectTarget): net.Socket {
+  return typeof target === "string"
+    ? net.connect(target)
+    : net.connect({ host: target.host, port: target.port });
 }
 
 function isAttachment(value: unknown): value is Attachment {
@@ -155,7 +159,15 @@ export class IntercomClient extends EventEmitter {
     }
 
     return new Promise((resolve, reject) => {
-      const socket = net.connect(BROKER_SOCKET);
+      let socket: net.Socket;
+      let target: BrokerConnectTarget;
+      try {
+        target = getBrokerConnectTarget();
+        socket = connectToBrokerTarget(target);
+      } catch (error) {
+        reject(toError(error));
+        return;
+      }
       this.socket = socket;
       this.disconnectError = null;
       let settled = false;
@@ -254,7 +266,12 @@ export class IntercomClient extends EventEmitter {
       this.once("_registered", onRegistered);
       
       try {
-        writeMessage(socket, { type: "register", session, ...(sessionId ? { sessionId } : {}) });
+        writeMessage(socket, {
+          type: "register",
+          session,
+          ...(sessionId ? { sessionId } : {}),
+          ...(typeof target === "string" ? {} : { stateId: target.stateId }),
+        });
       } catch (error) {
         cleanupConnectionAttempt();
         cleanupSocketListeners();

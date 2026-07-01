@@ -6,6 +6,7 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ### Changed
 - Updated Pi runtime peer metadata and tool schemas for the `@earendil-works` package scope and Pi-bundled `typebox`/`pi-ai` packages.
+- Centralized pi-intercom runtime and config paths under `PI_CODING_AGENT_DIR` when set, defaulting to `~/.pi/agent`.
 
 ### Fixed
 - Added an inbound broker frame size cap to reject oversized local IPC messages before buffering their payloads.
@@ -16,6 +17,7 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 - Aligned intercom overlay widths with their rendered modal boxes. Thanks to Cat for PR #43.
 - Marked failed `intercom` and `contact_supervisor` tool results through Pi's `tool_result` error flag path while preserving structured renderer details.
 - Limited the intercom overlay to TUI mode and unsubscribed subagent relay event handlers during session shutdown.
+- Added an opt-in Windows localhost TCP transport using a dynamic port, broker protocol health checks, and a local endpoint secret instead of a fixed-port default.
 
 ## [0.6.0] - 2026-05-03
 

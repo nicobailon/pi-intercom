@@ -50,7 +50,7 @@ Coordinate with other local pi sessions on related codebases. Use `/skill:pi-int
 
 A session becomes intercom-connected when all of these are true:
 - the `pi-intercom` extension is installed and loaded in that session
-- `enabled` is not set to `false` in `~/.pi/agent/intercom/config.json`
+- `enabled` is not set to `false` in the intercom config file, which defaults to `~/.pi/agent/intercom/config.json`
 - the session has started or reloaded after the extension was installed
 - the local broker is running or can be auto-started
 
@@ -392,6 +392,8 @@ For example, if you have Bun installed and want it to start the broker directly,
 
 Pi-intercom publishes live session status automatically. Sessions register as `idle`, switch to `thinking` while the agent is running, show `tool:<name>` during tool execution, and return to `idle` on agent completion. If `status` is set in config, it is appended as context instead of replacing the lifecycle status.
 
+By default, runtime state and config live under `~/.pi/agent/intercom`. If Pi is launched with `PI_CODING_AGENT_DIR`, pi-intercom uses `$PI_CODING_AGENT_DIR/intercom` instead, including `config.json`, broker PID/lock files, sockets, and launcher state.
+
 ## How It Works
 
 ```mermaid
@@ -424,15 +426,17 @@ Messages use length-prefixed JSON over a local socket/pipe transport (4-byte len
 
 Async extension work (startup, inbound flushes, reconnects, overlays, and relays) no-ops if the session shuts down or reloads before it settles.
 
-Runtime files live at `~/.pi/agent/intercom/`:
+Runtime files live at `~/.pi/agent/intercom/` by default, or `$PI_CODING_AGENT_DIR/intercom/` when `PI_CODING_AGENT_DIR` is set:
 - `broker.sock` — Unix domain socket for communication (macOS/Linux only; Windows uses a named pipe instead)
 - `broker-launch.vbs` — Windows helper script used to launch the broker without a console window
 - `broker.pid` — Broker process ID
+- `broker.spawn.lock` — Auto-spawn lock file
+- `broker.port.json` — Dynamic localhost TCP endpoint, only when Windows TCP transport is explicitly enabled
 - `config.json` — User configuration
 
 ## Design Decisions
 
-**Local IPC instead of TCP.** Same-machine only by design. `pi-intercom` uses Unix sockets on macOS/Linux and a named pipe on Windows, which keeps setup simple and avoids port management.
+**Local IPC instead of TCP.** Same-machine only by design. `pi-intercom` uses Unix sockets on macOS/Linux and a named pipe on Windows, which keeps setup simple and avoids port management. Windows TCP is available only as an explicit escape hatch with `PI_INTERCOM_TRANSPORT=tcp` (or `PI_INTERCOM_TCP=1`) for environments where named pipes are blocked. In that mode the broker binds a dynamic `127.0.0.1` port, records the endpoint plus a local secret under the intercom state dir, and requires that secret before health or registration succeeds. Health replies do not echo the secret, so a random localhost process cannot discover it through the broker protocol.
 
 **Auto-spawn with file lock.** The broker starts on first connection and exits after 5 seconds idle. There is no daemon to manage. A spawn lock file, keyed by PID and timestamp, prevents duplicate brokers when multiple sessions start at once.
 

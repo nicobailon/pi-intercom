@@ -5,17 +5,23 @@ import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.ts";
 import {
   ensureIntercomRuntimeDir,
-  getBrokerSocketPath,
+  getBrokerListenTarget,
+  getBrokerPortFilePath,
   getIntercomDirPath,
+  INTERCOM_PROTOCOL_NAME,
+  INTERCOM_PROTOCOL_VERSION,
   INTERCOM_RUNTIME_FILE_MODE,
   restrictIntercomRuntimeFile,
+  type BrokerConnectTarget,
 } from "./paths.ts";
 import { getAskTimeoutMs } from "../config.ts";
 import type { SessionInfo, Message, Attachment, BrokerMessage } from "../types.ts";
 
 const INTERCOM_DIR = getIntercomDirPath();
-const SOCKET_PATH = getBrokerSocketPath();
+const LISTEN_TARGET = getBrokerListenTarget();
 const PID_PATH = join(INTERCOM_DIR, "broker.pid");
+const PORT_PATH = getBrokerPortFilePath(INTERCOM_DIR);
+const BROKER_STATE_ID = randomUUID();
 
 interface ConnectedSession {
   socket: net.Socket;
@@ -119,9 +125,9 @@ class IntercomBroker {
 
   constructor() {
     ensureIntercomRuntimeDir(INTERCOM_DIR);
-    if (process.platform !== "win32") {
+    if (typeof LISTEN_TARGET === "string" && process.platform !== "win32") {
       try {
-        unlinkSync(SOCKET_PATH);
+        unlinkSync(LISTEN_TARGET);
       } catch {
         // A clean startup has no stale socket to remove.
       }
@@ -130,12 +136,33 @@ class IntercomBroker {
   }
 
   start(): void {
-    this.server.listen(SOCKET_PATH, () => {
-      restrictIntercomRuntimeFile(SOCKET_PATH);
+    const onListening = () => {
+      if (typeof LISTEN_TARGET === "string") {
+        restrictIntercomRuntimeFile(LISTEN_TARGET);
+      } else {
+        const address = this.server.address();
+        if (!address || typeof address === "string") {
+          throw new Error("Intercom TCP broker started without a TCP address");
+        }
+        const endpoint: BrokerConnectTarget = {
+          transport: "tcp",
+          host: LISTEN_TARGET.host,
+          port: address.port,
+          stateId: BROKER_STATE_ID,
+        };
+        writeFileSync(PORT_PATH, `${JSON.stringify(endpoint)}\n`, { mode: INTERCOM_RUNTIME_FILE_MODE });
+        restrictIntercomRuntimeFile(PORT_PATH);
+      }
       writeFileSync(PID_PATH, String(process.pid), { mode: INTERCOM_RUNTIME_FILE_MODE });
       restrictIntercomRuntimeFile(PID_PATH);
       console.log(`Intercom broker started (pid: ${process.pid})`);
-    });
+    };
+
+    if (typeof LISTEN_TARGET === "string") {
+      this.server.listen(LISTEN_TARGET, onListening);
+    } else {
+      this.server.listen({ host: LISTEN_TARGET.host, port: LISTEN_TARGET.port }, onListening);
+    }
     process.on("SIGTERM", () => this.shutdown());
     process.on("SIGINT", () => this.shutdown());
   }
@@ -193,6 +220,28 @@ class IntercomBroker {
     }
 
     const clientMessage = msg as { type: string } & Record<string, unknown>;
+    const requiresEndpointAuth = typeof LISTEN_TARGET !== "string";
+    const hasEndpointAuth = clientMessage.stateId === BROKER_STATE_ID;
+
+    if (clientMessage.type === "health") {
+      if (typeof clientMessage.requestId !== "string") {
+        throw new Error("Invalid health message");
+      }
+      if (requiresEndpointAuth && !hasEndpointAuth) {
+        throw new Error("Invalid intercom TCP endpoint credentials");
+      }
+      writeMessage(socket, {
+        type: "health_ok",
+        requestId: clientMessage.requestId,
+        protocol: INTERCOM_PROTOCOL_NAME,
+        version: INTERCOM_PROTOCOL_VERSION,
+      });
+      return;
+    }
+
+    if (requiresEndpointAuth && clientMessage.type === "register" && !hasEndpointAuth) {
+      throw new Error("Invalid intercom TCP endpoint credentials");
+    }
 
     if (currentId === null && clientMessage.type !== "register") {
       throw new Error(`Received ${clientMessage.type} before register`);
@@ -438,12 +487,17 @@ class IntercomBroker {
     }
     this.sessions.clear();
     this.askEdges.clear();
-    if (process.platform !== "win32") {
+    if (typeof LISTEN_TARGET === "string" && process.platform !== "win32") {
       try {
-        unlinkSync(SOCKET_PATH);
+        unlinkSync(LISTEN_TARGET);
       } catch {
         // The socket may already be gone if shutdown started after a disconnect.
       }
+    }
+    try {
+      unlinkSync(PORT_PATH);
+    } catch {
+      // The TCP endpoint file only exists when opt-in TCP transport is active.
     }
     try {
       unlinkSync(PID_PATH);

@@ -10,6 +10,7 @@ import {
   getWindowsHiddenLauncherScript,
   getWindowsBrokerCommandLine,
   getWindowsHiddenLauncherPath,
+  isBrokerHealthOkMessage,
 } from "./spawn.ts";
 
 test("getTsxCliPath resolves tsx cli via module resolution", () => {
@@ -115,4 +116,16 @@ test("getBrokerSpawnOptions keeps portable defaults on non-Windows platforms", (
   assert.equal(options.detached, true);
   assert.equal(options.stdio, "ignore");
   assert.equal(options.cwd, "/repo");
+});
+
+test("getBrokerSpawnOptions passes an absolute PI_CODING_AGENT_DIR to the broker", () => {
+  const options = getBrokerSpawnOptions("/repo", { PI_CODING_AGENT_DIR: "relative-agent" });
+  assert.equal(options.env.PI_CODING_AGENT_DIR, path.resolve("relative-agent"));
+});
+
+test("isBrokerHealthOkMessage requires the intercom protocol marker", () => {
+  assert.equal(isBrokerHealthOkMessage({ type: "health_ok", requestId: "req-1", protocol: "pi-intercom", version: 1 }, "req-1"), true);
+  assert.equal(isBrokerHealthOkMessage({ type: "health_ok", requestId: "req-1" }, "req-1"), false);
+  assert.equal(isBrokerHealthOkMessage({ type: "health_ok", requestId: "req-2", protocol: "pi-intercom", version: 1 }, "req-1"), false);
+  assert.equal(isBrokerHealthOkMessage("ok", "req-1"), false);
 });
