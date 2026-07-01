@@ -37,3 +37,43 @@ test("inline intercom messages render at the available terminal width", () => {
   assert.ok(lines.length > 0);
   for (const line of lines) assert.equal(visibleWidth(line), 120);
 });
+
+test("expanded inline intercom messages show the full body without collapse controls", () => {
+  const component = new InlineMessageComponent(from, message, theme as any, "intercom({ action: \"reply\", message: \"...\" })");
+
+  const rendered = component.render(100).join("\n");
+
+  assert.match(rendered, /available terminal width/);
+  assert.match(rendered, /narrow fixed/);
+  assert.match(rendered, /card/);
+  assert.match(rendered, /To reply: intercom/);
+  assert.doesNotMatch(rendered, /Ctrl\+O/);
+});
+
+test("collapsed inline intercom messages keep preview, reply hint, and expand key visible", () => {
+  const component = new InlineMessageComponent(
+    from,
+    {
+      ...message,
+      content: {
+        text: "Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu. This tail should only appear when expanded because the collapsed preview is intentionally brief.",
+        attachments: [{ type: "snippet", name: "note.txt", content: "important details" }],
+      },
+    },
+    theme as any,
+    "intercom({ action: \"reply\", message: \"...\" })",
+    undefined,
+    true,
+  );
+
+  const lines = component.render(120);
+  const rendered = lines.join("\n");
+
+  assert.equal(lines.length, 4);
+  for (const line of lines) assert.equal(visibleWidth(line), 120);
+  assert.match(rendered, /Alpha beta gamma/);
+  assert.doesNotMatch(rendered, /intentionally brief/);
+  assert.match(rendered, /To reply: intercom/);
+  assert.match(rendered, /Ctrl\+O/);
+  assert.match(rendered, /1 attachment/);
+});

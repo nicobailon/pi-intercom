@@ -9,13 +9,22 @@ export class InlineMessageComponent implements Component {
   private theme: Theme;
   private replyCommand?: string;
   private bodyText?: string;
+  private collapsed: boolean;
 
-  constructor(from: SessionInfo, message: Message, theme: Theme, replyCommand?: string, bodyText?: string) {
+  constructor(
+    from: SessionInfo,
+    message: Message,
+    theme: Theme,
+    replyCommand?: string,
+    bodyText?: string,
+    collapsed = false,
+  ) {
     this.from = from;
     this.message = message;
     this.theme = theme;
     this.replyCommand = replyCommand;
     this.bodyText = bodyText;
+    this.collapsed = collapsed;
   }
 
   invalidate(): void {}
@@ -23,16 +32,38 @@ export class InlineMessageComponent implements Component {
   render(width: number): string[] {
     const lines: string[] = [];
     const borderChar = "─";
+    const senderName = this.from.name || this.from.id.slice(0, 8);
     if (width < 3) {
-      return [truncateToWidth(`From ${this.from.name || this.from.id.slice(0, 8)}`, width)];
+      return [truncateToWidth(`From ${senderName}`, width)];
     }
     const bodyWidth = Math.max(1, width - 2);
 
-    const senderName = this.from.name || this.from.id.slice(0, 8);
     const header = ` 📨 From: ${senderName} (${this.from.cwd}) `;
-    const headerText = truncateToWidth(header, bodyWidth, "");
+    const headerText = truncateToWidth(this.collapsed ? `${header} Ctrl+O expands ` : header, bodyWidth, "");
     const headerPadding = Math.max(0, bodyWidth - visibleWidth(headerText));
     lines.push(this.theme.fg("accent", `╭${headerText}${borderChar.repeat(headerPadding)}╮`));
+
+    if (this.collapsed) {
+      const preview = (this.bodyText || this.message.content.text).replace(/\s+/g, " ").trim();
+      const previewText = truncateToWidth(preview, bodyWidth, "");
+      const previewPadding = Math.max(0, bodyWidth - visibleWidth(previewText));
+      lines.push(this.theme.fg("accent", `│${previewText}${" ".repeat(previewPadding)}│`));
+
+      const meta: string[] = [];
+      if (this.replyCommand) meta.push(`↩ To reply: ${this.replyCommand}`);
+      if (this.message.content.attachments?.length) {
+        const count = this.message.content.attachments.length;
+        meta.push(`📎 ${count} attachment${count === 1 ? "" : "s"}`);
+      }
+      if (this.message.replyTo && !this.message.expectsReply) meta.push(`↳ Reply to ${this.message.replyTo.slice(0, 8)}`);
+      meta.push("Ctrl+O to expand");
+
+      const metaText = truncateToWidth(this.theme.fg("dim", ` ${meta.join(" · ")}`), bodyWidth, "");
+      const metaPadding = Math.max(0, bodyWidth - visibleWidth(metaText));
+      lines.push(this.theme.fg("accent", `│${metaText}${" ".repeat(metaPadding)}│`));
+      lines.push(this.theme.fg("accent", `╰${borderChar.repeat(bodyWidth)}╯`));
+      return lines;
+    }
 
     const contentLines = wrapTextWithAnsi(this.bodyText || this.message.content.text, bodyWidth);
     for (const line of contentLines) {
