@@ -1,13 +1,18 @@
 import net from "net";
-import { writeFileSync, unlinkSync, mkdirSync } from "fs";
+import { writeFileSync, unlinkSync } from "fs";
 import { join } from "path";
-import { homedir } from "os";
 import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.ts";
-import { getBrokerSocketPath } from "./paths.ts";
+import {
+  ensureIntercomRuntimeDir,
+  getBrokerSocketPath,
+  getIntercomDirPath,
+  INTERCOM_RUNTIME_FILE_MODE,
+  restrictIntercomRuntimeFile,
+} from "./paths.ts";
 import type { SessionInfo, Message, Attachment, BrokerMessage } from "../types.ts";
 
-const INTERCOM_DIR = join(homedir(), ".pi/agent/intercom");
+const INTERCOM_DIR = getIntercomDirPath();
 const SOCKET_PATH = getBrokerSocketPath();
 const PID_PATH = join(INTERCOM_DIR, "broker.pid");
 
@@ -100,7 +105,7 @@ class IntercomBroker {
   private shutdownTimer: NodeJS.Timeout | null = null;
 
   constructor() {
-    mkdirSync(INTERCOM_DIR, { recursive: true });
+    ensureIntercomRuntimeDir(INTERCOM_DIR);
     if (process.platform !== "win32") {
       try {
         unlinkSync(SOCKET_PATH);
@@ -113,7 +118,9 @@ class IntercomBroker {
 
   start(): void {
     this.server.listen(SOCKET_PATH, () => {
-      writeFileSync(PID_PATH, String(process.pid));
+      restrictIntercomRuntimeFile(SOCKET_PATH);
+      writeFileSync(PID_PATH, String(process.pid), { mode: INTERCOM_RUNTIME_FILE_MODE });
+      restrictIntercomRuntimeFile(PID_PATH);
       console.log(`Intercom broker started (pid: ${process.pid})`);
     });
     process.on("SIGTERM", () => this.shutdown());

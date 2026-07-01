@@ -1,13 +1,18 @@
 import { spawn } from "child_process";
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
-import { homedir } from "os";
 import { createRequire } from "module";
 import net from "net";
-import { getBrokerSocketPath } from "./paths.ts";
+import {
+  ensureIntercomRuntimeDir,
+  getBrokerSocketPath,
+  getIntercomDirPath,
+  INTERCOM_RUNTIME_FILE_MODE,
+  restrictIntercomRuntimeFile,
+} from "./paths.ts";
 
-const INTERCOM_DIR = join(homedir(), ".pi/agent/intercom");
+const INTERCOM_DIR = getIntercomDirPath();
 const EXTENSION_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
 const BROKER_SOCKET = getBrokerSocketPath();
 const BROKER_PID = join(INTERCOM_DIR, "broker.pid");
@@ -88,8 +93,12 @@ function writeWindowsHiddenLauncher(
   commandLine: string,
   launcherPath: string = getWindowsHiddenLauncherPath(),
 ): string {
-  mkdirSync(dirname(launcherPath), { recursive: true });
-  writeFileSync(launcherPath, getWindowsHiddenLauncherScript(commandLine), "utf-8");
+  ensureIntercomRuntimeDir(dirname(launcherPath));
+  writeFileSync(launcherPath, getWindowsHiddenLauncherScript(commandLine), {
+    encoding: "utf-8",
+    mode: INTERCOM_RUNTIME_FILE_MODE,
+  });
+  restrictIntercomRuntimeFile(launcherPath);
   return launcherPath;
 }
 
@@ -141,7 +150,7 @@ function toError(error: unknown): Error {
 }
 
 export async function spawnBrokerIfNeeded(brokerCommand: string, brokerArgs: string[]): Promise<void> {
-  mkdirSync(INTERCOM_DIR, { recursive: true });
+  ensureIntercomRuntimeDir(INTERCOM_DIR);
 
   if (await isBrokerRunning()) {
     return;
@@ -252,7 +261,11 @@ function acquireSpawnLock(): boolean {
   const maxRetries = 5;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
-      writeFileSync(BROKER_SPAWN_LOCK, `${process.pid}\n${Date.now()}\n`, { flag: "wx" });
+      writeFileSync(BROKER_SPAWN_LOCK, `${process.pid}\n${Date.now()}\n`, {
+        flag: "wx",
+        mode: INTERCOM_RUNTIME_FILE_MODE,
+      });
+      restrictIntercomRuntimeFile(BROKER_SPAWN_LOCK);
       return true;
     } catch (error) {
       if (!(error instanceof Error) || (error as NodeJS.ErrnoException).code !== "EEXIST") {
