@@ -1862,3 +1862,33 @@ test("async ask can be replied to later from the single pending ask fallback", {
     await cleanup();
   }
 });
+
+test("presence carries context usage to peers, and an explicit null clears a stale value", { concurrency: false }, async () => {
+  // Peers should see each other's live context-window usage without a separate
+  // query, and a post-compaction null must CLEAR the value rather than leave a
+  // stale-high percentage frozen in the list.
+  const { planner, orchestrator, cleanup } = await setupClients();
+  try {
+    planner.updatePresence({ contextPct: 50, contextTokens: 100000, contextWindow: 200000 });
+    // Flush barrier: a round-trip on planner's OWN socket guarantees the broker
+    // processed the presence (FIFO per socket) before the peer probes.
+    await planner.send(orchestrator.sessionId!, { text: "flush" });
+    let sessions = await orchestrator.listSessions();
+    let p = sessions.find(s => s.id === planner.sessionId);
+    assert.equal(p?.contextPct, 50);
+    assert.equal(p?.contextTokens, 100000);
+    assert.equal(p?.contextWindow, 200000);
+
+    // Post-compaction: null contextPct/tokens must CLEAR (not freeze the old %).
+    planner.updatePresence({ contextPct: null, contextTokens: null });
+    await planner.send(orchestrator.sessionId!, { text: "flush" });
+    sessions = await orchestrator.listSessions();
+    p = sessions.find(s => s.id === planner.sessionId);
+    assert.equal(p?.contextPct, undefined, "null contextPct must CLEAR the field, not freeze the old value");
+    assert.equal(p?.contextTokens, undefined);
+    // contextWindow (the denominator, not nulled here) is retained.
+    assert.equal(p?.contextWindow, 200000);
+  } finally {
+    await cleanup();
+  }
+});

@@ -11,6 +11,7 @@ import { InlineMessageComponent } from "./ui/inline-message.ts";
 import { getAskTimeoutMs, loadConfig, type IntercomConfig } from "./config.ts";
 import type { SessionInfo, Message, Attachment } from "./types.ts";
 import { ReplyTracker } from "./reply-tracker.ts";
+import { formatContextUsage } from "./format-context.ts";
 
 const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
 const SUBAGENT_RESULT_INTERCOM_EVENT = "subagent:result-intercom";
@@ -402,7 +403,7 @@ function formatSessionListRow(session: SessionInfo, currentCwd: string, isSelf: 
   const tags = [isSelf ? "self" : session.cwd === currentCwd ? "same cwd" : undefined, session.status]
     .filter((tag): tag is string => Boolean(tag));
   const suffix = tags.length ? ` [${tags.join(", ")}]` : "";
-  return `• ${name} (${shortSessionId(session.id)}) — ${session.cwd} (${session.model})${suffix}`;
+  return `• ${name} (${shortSessionId(session.id)}) — ${session.cwd} (${session.model}${formatContextUsage(session)})${suffix}`;
 }
 function previewText(value: unknown, maxLength = 72): string | undefined {
   if (typeof value !== "string") {
@@ -581,13 +582,33 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       status: currentStatus(),
     };
   }
+  // Snapshot the live session's context-window usage for presence. getContextUsage()
+  // (stock SDK) reports { tokens, contextWindow, percent }, with tokens/percent null
+  // right after a compaction (before the next assistant response). We emit null in
+  // that case to CLEAR a peer's stale value rather than freeze the old percentage.
+  // Feature-detected so an older runtime without getContextUsage() just omits it.
+  function currentContextUsage(): { contextPct?: number | null; contextTokens?: number | null; contextWindow?: number } {
+    const usage = getLiveContext()?.getContextUsage?.();
+    if (!usage) {
+      return {};
+    }
+    const result: { contextPct?: number | null; contextTokens?: number | null; contextWindow?: number } = {
+      contextPct: typeof usage.percent === "number" && Number.isFinite(usage.percent) ? Math.round(usage.percent) : null,
+      contextTokens: typeof usage.tokens === "number" && Number.isFinite(usage.tokens) ? usage.tokens : null,
+    };
+    if (typeof usage.contextWindow === "number" && usage.contextWindow > 0) {
+      result.contextWindow = usage.contextWindow;
+    }
+    return result;
+  }
+
   function syncPresenceIdentity(sessionId: string): void {
     if (!client || !getLiveContext()) {
       return;
     }
     const identity = buildPresenceIdentity(pi, sessionId);
     lastPresenceName = identity.name;
-    client.updatePresence({ ...identity, status: currentStatus() });
+    client.updatePresence({ ...identity, status: currentStatus(), ...currentContextUsage() });
   }
   function startNamePoll(): void {
     clearNamePollTimer();
@@ -617,7 +638,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     if (!client || !currentSessionId || !getLiveContext()) {
       return;
     }
-    client.updatePresence({ status: currentStatus() });
+    // context% rides the status heartbeat so peers see live usage at turn boundaries.
+    client.updatePresence({ status: currentStatus(), ...currentContextUsage() });
   }
   function currentSessionTargetMatches(to: string, resolvedTo?: string | null, activeClient?: IntercomClient): boolean {
     const targets = new Set<string>();

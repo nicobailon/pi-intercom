@@ -113,6 +113,12 @@ function isSessionInfo(value: unknown): value is SessionInfo {
     return false;
   }
 
+  for (const key of ["contextPct", "contextTokens", "contextWindow"] as const) {
+    if (session[key] !== undefined && typeof session[key] !== "number") {
+      return false;
+    }
+  }
+
   return session.trustedLocal === undefined || typeof session.trustedLocal === "boolean";
 }
 
@@ -565,7 +571,7 @@ export class IntercomClient extends EventEmitter {
     }
   }
 
-  updatePresence(updates: { name?: string; status?: string; model?: string }): void {
+  updatePresence(updates: { name?: string; status?: string; model?: string; contextPct?: number | null; contextTokens?: number | null; contextWindow?: number | null }): void {
     if (this.disconnecting) {
       return;
     }

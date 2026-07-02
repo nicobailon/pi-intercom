@@ -547,6 +547,39 @@ class IntercomBroker {
               changed = true;
             }
           }
+          // Context-usage fields: a number updates, an explicit null CLEARS (the
+          // value is unknown right after a compaction — delete rather than carry
+          // the stale-high value forward), undefined leaves the field untouched.
+          if (clientMessage.contextPct !== undefined) {
+            if (clientMessage.contextPct === null) {
+              if (session.info.contextPct !== undefined) { delete session.info.contextPct; changed = true; }
+            } else if (typeof clientMessage.contextPct !== "number") {
+              throw new Error("Invalid presence contextPct");
+            } else if (session.info.contextPct !== clientMessage.contextPct) {
+              session.info.contextPct = clientMessage.contextPct;
+              changed = true;
+            }
+          }
+          if (clientMessage.contextTokens !== undefined) {
+            if (clientMessage.contextTokens === null) {
+              if (session.info.contextTokens !== undefined) { delete session.info.contextTokens; changed = true; }
+            } else if (typeof clientMessage.contextTokens !== "number") {
+              throw new Error("Invalid presence contextTokens");
+            } else if (session.info.contextTokens !== clientMessage.contextTokens) {
+              session.info.contextTokens = clientMessage.contextTokens;
+              changed = true;
+            }
+          }
+          if (clientMessage.contextWindow !== undefined) {
+            if (clientMessage.contextWindow === null) {
+              if (session.info.contextWindow !== undefined) { delete session.info.contextWindow; changed = true; }
+            } else if (typeof clientMessage.contextWindow !== "number") {
+              throw new Error("Invalid presence contextWindow");
+            } else if (session.info.contextWindow !== clientMessage.contextWindow) {
+              session.info.contextWindow = clientMessage.contextWindow;
+              changed = true;
+            }
+          }
           const now = Date.now();
           session.info.lastActivity = now;
           if (changed || now - session.lastPresenceBroadcastAt >= PRESENCE_HEARTBEAT_MS) {
