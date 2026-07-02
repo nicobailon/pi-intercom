@@ -11,6 +11,8 @@ import { InlineMessageComponent } from "./ui/inline-message.ts";
 import { getAskTimeoutMs, loadConfig, type IntercomConfig } from "./config.ts";
 import type { SessionInfo, Message, Attachment } from "./types.ts";
 import { ReplyTracker } from "./reply-tracker.ts";
+import { resolve as resolvePath } from "node:path";
+import { sameCwd } from "./cwd.ts";
 
 const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
 const SUBAGENT_RESULT_INTERCOM_EVENT = "subagent:result-intercom";
@@ -1430,6 +1432,8 @@ Use this to communicate findings, request help, or coordinate work with other se
 
 Usage:
   intercom({ action: "list" })                    → List active sessions
+  intercom({ action: "list-cwd" })                → List sessions in the current working directory
+  intercom({ action: "list-cwd", cwd: "/path" })  → List sessions in a specific directory
   intercom({ action: "send", to: "session-name", message: "..." })  → Send message
   intercom({ action: "ask", to: "session-name", message: "..." })   → Ask and wait for reply
   intercom({ action: "reply", message: "..." })                      → Reply to the active/single pending ask
@@ -1439,8 +1443,8 @@ Usage:
       "Use to coordinate with other local pi sessions: list peers, send updates, ask for help, or check intercom connectivity.",
 
     parameters: Type.Object({
-      action: StringEnum(["list", "send", "ask", "reply", "pending", "status"] as const, {
-        description: "Action: 'list', 'send', 'ask', 'reply', 'pending', or 'status'",
+      action: StringEnum(["list", "list-cwd", "send", "ask", "reply", "pending", "status"] as const, {
+        description: "Action: 'list', 'list-cwd', 'send', 'ask', 'reply', 'pending', or 'status'",
       }),
       to: Type.Optional(Type.String({
         description: "Target session name or ID (for 'send', 'ask', or disambiguating 'reply')",
@@ -1457,6 +1461,9 @@ Usage:
       replyTo: Type.Optional(Type.String({
         description: "Message ID to reply to (for threading or responding to an 'ask')",
       })),
+      cwd: Type.Optional(Type.String({
+        description: "Working directory filter for 'list-cwd' (absolute, or relative to the current session's cwd; '.' means the current cwd). Defaults to the current session's cwd.",
+      })),
     }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -1472,7 +1479,7 @@ Usage:
 
       syncPresenceIdentity(ctx.sessionManager.getSessionId());
 
-      const { action, to, message, attachments, replyTo } = params;
+      const { action, to, message, attachments, replyTo, cwd } = params;
 
       switch (action) {
         case "list": {
@@ -1493,6 +1500,59 @@ Usage:
             const otherSection = otherSessions.length === 0
               ? "**Other sessions:**\nNo other sessions connected."
               : `**Other sessions:**\n${otherSessions.map(s => formatSessionListRow(s, currentSession.cwd, false)).join("\n")}`;
+
+            return {
+              content: [{ type: "text", text: `${currentSection}\n\n${otherSection}` }],
+              details: {},
+            };
+          } catch (error) {
+            return {
+              content: [{ type: "text", text: `Failed to list sessions: ${getErrorMessage(error)}` }],
+              details: { error: true },
+            };
+          }
+        }
+
+        case "list-cwd": {
+          try {
+            const mySessionId = connectedClient.sessionId;
+            const sessions = await connectedClient.listSessions();
+            const currentSession = sessions.find(s => s.id === mySessionId);
+
+            if (!currentSession) {
+              return {
+                content: [{ type: "text", text: "Current session is missing from intercom session list." }],
+                details: { error: true },
+              };
+            }
+
+            // Default to the current session's cwd; an explicit `cwd` overrides
+            // (relative paths resolved against it, "." meaning the current cwd).
+            const filterCwd = cwd && cwd !== "."
+              ? resolvePath(currentSession.cwd, cwd)
+              : currentSession.cwd;
+
+            const otherSessions = sessions.filter(
+              s => s.id !== mySessionId && sameCwd(s.cwd, filterCwd),
+            );
+
+            // Fail loud: filtering by a directory with no peers while the
+            // session's OWN cwd has some otherwise reads as a misleading empty
+            // result (common when a caller passes a guessed parent cwd).
+            let emptyNote = "No other sessions in this directory.";
+            if (otherSessions.length === 0 && !sameCwd(filterCwd, currentSession.cwd)) {
+              const here = sessions.filter(
+                s => s.id !== mySessionId && sameCwd(s.cwd, currentSession.cwd),
+              ).length;
+              if (here > 0) {
+                emptyNote += ` Your session's cwd is ${currentSession.cwd} (${here} peer${here === 1 ? "" : "s"} there) — call list-cwd without a cwd argument to list them.`;
+              }
+            }
+
+            const currentSection = `**Current session:**\n${formatSessionListRow(currentSession, currentSession.cwd, true)}`;
+            const otherSection = otherSessions.length === 0
+              ? `**Other sessions (cwd: ${filterCwd}):**\n${emptyNote}`
+              : `**Other sessions (cwd: ${filterCwd}):**\n${otherSessions.map(s => formatSessionListRow(s, currentSession.cwd, false)).join("\n")}`;
 
             return {
               content: [{ type: "text", text: `${currentSection}\n\n${otherSection}` }],
