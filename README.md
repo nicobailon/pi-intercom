@@ -68,6 +68,8 @@ Press **Alt+M** or type `/intercom` to open the session list overlay:
 2. **Compose message** — Write your message in the compose overlay
 3. **Send** — Press Enter to send, Escape to cancel
 
+Press **Alt+I** or run `/intercom-id` to copy a short handoff snippet for the current session. The snippet includes the stable intercom session ID so another agent can message this session even when names are duplicated.
+
 ### From the Agent
 
 The agent can list sessions and send messages using the `intercom` tool. Tool calls and results render as compact transcript rows so send/ask/reply flows are easy to scan. For common patterns like planner-worker delegation, the bundled `pi-intercom` skill provides copy-paste ready examples:
@@ -353,6 +355,7 @@ Only registered in sessions where `pi-subagents` supplied the required child bri
 | Key | Action |
 |-----|--------|
 | Alt+M | Open session list overlay |
+| Alt+I | Copy this session's intercom contact target, falling back to editor insert |
 | ↑/↓ | Navigate session list |
 | Enter | Select session / Send message |
 | Escape | Cancel / Close overlay |

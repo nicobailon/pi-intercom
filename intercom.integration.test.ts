@@ -25,10 +25,24 @@ const previousUserProfile = process.env.USERPROFILE;
 process.env.HOME = sharedHomeDir;
 process.env.USERPROFILE = sharedHomeDir;
 const { IntercomClient } = await import("./broker/client.ts");
+const { chooseContactTarget, formatContactInstruction } = await import("./index.ts");
 process.on("exit", () => {
   process.env.HOME = previousHome;
   process.env.USERPROFILE = previousUserProfile;
   rmSync(sharedHomeDir, { recursive: true, force: true });
+});
+
+test("intercom contact id prefers unique session names and falls back to ids for duplicates", () => {
+  const current: SessionInfo = { id: "session-1", name: "main-dialog", cwd: "/tmp/project", model: "model", pid: 1, startedAt: 1, lastActivity: 2, status: "idle" };
+  const other: SessionInfo = { ...current, id: "session-2", name: "worker" };
+  assert.deepEqual(chooseContactTarget(current, [current, other]), { target: "main-dialog", name: "main-dialog", id: "session-1", duplicateName: false });
+
+  const duplicate = { ...other, name: "main-dialog" };
+  const fallback = chooseContactTarget(current, [current, duplicate]);
+  assert.equal(fallback.target, "session-1");
+  assert.equal(fallback.duplicateName, true);
+  assert.equal(formatContactInstruction(fallback), "Intercom send ID: session-1");
+  assert.equal(formatContactInstruction(chooseContactTarget(current, [current, other])), "Intercom send ID: session-1");
 });
 
 async function waitForBrokerReady(broker: ChildProcessWithoutNullStreams): Promise<void> {
