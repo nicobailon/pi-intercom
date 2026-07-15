@@ -26,6 +26,7 @@ const SUBAGENT_RUN_ID_ENV = "PI_SUBAGENT_RUN_ID";
 const SUBAGENT_CHILD_AGENT_ENV = "PI_SUBAGENT_CHILD_AGENT";
 const SUBAGENT_CHILD_INDEX_ENV = "PI_SUBAGENT_CHILD_INDEX";
 const SUBAGENT_INTERCOM_SESSION_NAME_ENV = "PI_SUBAGENT_INTERCOM_SESSION_NAME";
+const SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV = "PI_SUBAGENT_SUPERVISOR_CHANNEL_DIR";
 
 interface ChildOrchestratorMetadata {
   orchestratorTarget: string;
@@ -451,6 +452,11 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   const activeTools = new Map<string, string>();
   const replyTracker = new ReplyTracker();
   const pendingIdleMessages: InboundMessageEntry[] = [];
+  function dismissIncomingAsk(messageId: string): void {
+    replyTracker.dismissPendingAsk(messageId);
+    const queuedIndex = pendingIdleMessages.findIndex((entry) => entry.message.id === messageId);
+    if (queuedIndex >= 0) pendingIdleMessages.splice(queuedIndex, 1);
+  }
   let inboundFlushTimer: NodeJS.Timeout | null = null;
   let replyWaiter: {
     from: string;
@@ -746,7 +752,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
                 replyTo: message.id,
               });
               if (result.delivered && getLiveContext(liveContext, messageGeneration)) {
-                replyTracker.markReplied(message.id);
+                dismissIncomingAsk(message.id);
               }
             } catch {
               // Best-effort reply; keep the busy non-interactive session running either way.
@@ -1160,7 +1166,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   });
 
   const childOrchestratorMetadata = readChildOrchestratorMetadata();
-  if (childOrchestratorMetadata) {
+  const nativeSupervisorChannelAvailable = Boolean(process.env[SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV]?.trim());
+  if (childOrchestratorMetadata && !nativeSupervisorChannelAvailable) {
     pi.registerTool({
       name: "contact_supervisor",
       label: "Contact Supervisor",
@@ -1553,7 +1560,7 @@ Usage:
               timestamp: Date.now(),
             });
             if (replyTo) {
-              replyTracker.markReplied(replyTo);
+              dismissIncomingAsk(replyTo);
             }
             return {
               content: [{ type: "text", text: `Message sent to ${to}` }],
@@ -1696,14 +1703,14 @@ Usage:
             if (!result.delivered) {
               const errorText = result.reason ?? "Session may not exist or has disconnected.";
               if (result.reason === "Session not found") {
-                replyTracker.dismissPendingAsk(target.message.id);
+                dismissIncomingAsk(target.message.id);
               }
               return {
                 content: [{ type: "text", text: `Reply to "${target.from.name || target.from.id}" was not delivered: ${errorText}` }],
                 details: { messageId: result.id, delivered: false, reason: result.reason },
               };
             }
-            replyTracker.markReplied(target.message.id);
+            dismissIncomingAsk(target.message.id);
             pi.appendEntry("intercom_sent", {
               to: target.from.name || target.from.id,
               message: { text: message, replyTo: target.message.id },
