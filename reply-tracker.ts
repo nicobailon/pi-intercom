@@ -63,28 +63,25 @@ export class ReplyTracker {
       return target;
     }
 
-    if (this.currentTurnContext) {
-      return this.currentTurnContext;
-    }
-
     const pending = Array.from(this.pendingAsks.values());
-    if (pending.length === 1) {
-      return pending[0]!;
-    }
-
     if (options.to) {
       const matches = pending.filter((context) => matchesPendingSender(context, options.to!));
       if (matches.length === 1) {
         return matches[0]!;
       }
       if (matches.length > 1) {
-        throw new Error(`Multiple pending asks from \"${options.to}\" — use the sender session ID instead.`);
+        throw new Error(`Multiple pending asks from "${options.to}" — use the sender session ID instead.`);
       }
-      if (pending.length > 1) {
-        throw new Error(`No pending ask from \"${options.to}\"`);
-      }
+      throw new Error(`No pending ask from "${options.to}"`);
     }
 
+    if (this.currentTurnContext) {
+      return this.currentTurnContext;
+    }
+
+    if (pending.length === 1) {
+      return pending[0]!;
+    }
     if (pending.length === 0) {
       throw new Error("No active intercom context to reply to");
     }

@@ -27,9 +27,10 @@ test("getAgentDirPath honors PI_CODING_AGENT_DIR", () => {
 });
 
 test("getAgentDirPath resolves relative PI_CODING_AGENT_DIR values from the caller cwd", () => {
+  const cwd = join(tmpdir(), "workspace", "project");
   assert.equal(
-    getAgentDirPath({ PI_CODING_AGENT_DIR: "relative-agent" }, "/home/rcroh", "/workspace/project"),
-    join("/workspace/project", "relative-agent"),
+    getAgentDirPath({ PI_CODING_AGENT_DIR: "relative-agent" }, "/home/rcroh", cwd),
+    join(cwd, "relative-agent"),
   );
 });
 

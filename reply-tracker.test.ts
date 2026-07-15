@@ -54,6 +54,17 @@ test("reply with to resolves matching pending ask", () => {
   assert.equal(tracker.resolveReplyTarget({ to: "planner-id" }, 1002).message.id, "ask-1");
 });
 
+test("explicit to overrides the current turn context", () => {
+  const tracker = new ReplyTracker();
+  const current = tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "First"), 1000);
+  tracker.recordIncomingMessage(createSession("reviewer-id", "reviewer"), createMessage("ask-2", "Second"), 1001);
+  tracker.queueTurnContext(current);
+  tracker.beginTurn(1002);
+
+  assert.equal(tracker.resolveReplyTarget({ to: "reviewer" }, 1003).message.id, "ask-2");
+  assert.throws(() => tracker.resolveReplyTarget({ to: "missing" }, 1003), /No pending ask from/);
+});
+
 test("replyTo resolves the exact pending ask", () => {
   const tracker = new ReplyTracker();
   tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "First"), 1000);

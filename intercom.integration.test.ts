@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { EventEmitter, once } from "node:events";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { ReplyTracker } from "./reply-tracker.ts";
 import type { Message, SessionInfo } from "./types.ts";
 
@@ -18,6 +18,7 @@ const childEnvKeys = [
   "PI_SUBAGENT_CHILD_AGENT",
   "PI_SUBAGENT_CHILD_INDEX",
   "PI_SUBAGENT_INTERCOM_SESSION_NAME",
+  "PI_SUBAGENT_SUPERVISOR_CHANNEL_DIR",
 ] as const;
 const sharedHomeDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-home-"));
 const previousHome = process.env.HOME;
@@ -25,13 +26,17 @@ const previousUserProfile = process.env.USERPROFILE;
 process.env.HOME = sharedHomeDir;
 process.env.USERPROFILE = sharedHomeDir;
 const { IntercomClient } = await import("./broker/client.ts");
+const { getTsxCliPath } = await import("./broker/spawn.ts");
 process.on("exit", () => {
   process.env.HOME = previousHome;
   process.env.USERPROFILE = previousUserProfile;
   rmSync(sharedHomeDir, { recursive: true, force: true });
 });
 
-async function waitForBrokerReady(broker: ChildProcessWithoutNullStreams): Promise<void> {
+async function waitForBrokerReady(broker: ChildProcess): Promise<void> {
+  const stdout = broker.stdout;
+  if (!stdout) throw new Error("Broker stdout is unavailable");
+
   const ready = new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(() => {
       cleanup();
@@ -49,11 +54,11 @@ async function waitForBrokerReady(broker: ChildProcessWithoutNullStreams): Promi
     };
     const cleanup = () => {
       clearTimeout(timeout);
-      broker.stdout.off("data", onStdout);
+      stdout.off("data", onStdout);
       broker.off("exit", onExit);
     };
 
-    broker.stdout.on("data", onStdout);
+    stdout.on("data", onStdout);
     broker.once("exit", onExit);
   });
 
@@ -69,6 +74,7 @@ async function withChildOrchestratorEnv<T>(metadata: {
   agent?: string;
   index?: string;
   sessionName?: string;
+  supervisorChannelDir?: string;
 }, fn: () => T | Promise<T>): Promise<T> {
   const previous = new Map<string, string | undefined>();
   for (const key of childEnvKeys) {
@@ -83,6 +89,7 @@ async function withChildOrchestratorEnv<T>(metadata: {
   if (metadata.agent !== undefined) process.env.PI_SUBAGENT_CHILD_AGENT = metadata.agent;
   if (metadata.index !== undefined) process.env.PI_SUBAGENT_CHILD_INDEX = metadata.index;
   if (metadata.sessionName !== undefined) process.env.PI_SUBAGENT_INTERCOM_SESSION_NAME = metadata.sessionName;
+  if (metadata.supervisorChannelDir !== undefined) process.env.PI_SUBAGENT_SUPERVISOR_CHANNEL_DIR = metadata.supervisorChannelDir;
   try {
     return await fn();
   } finally {
@@ -194,7 +201,7 @@ function createExtensionHarness(sessionName: string | (() => string) = "child-wo
       }
     },
     async emitLifecycleResults(event: string, payload: unknown = {}, eventContext: unknown = ctx) {
-      const results = [];
+      const results: unknown[] = [];
       for (const handler of lifecycleHandlers.get(event) ?? []) {
         results.push(await handler(payload, eventContext));
       }
@@ -242,9 +249,8 @@ test("opt-in TCP broker requires endpoint state for health and registration", { 
   const { readFileSync } = await import("node:fs");
   const { createMessageReader, writeMessage } = await import("./broker/framing.ts");
   const agentDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-tcp-agent-"));
-  const broker = spawn("npx", [
-    "--no-install",
-    "tsx",
+  const broker = spawn(process.execPath, [
+    getTsxCliPath(),
     "-e",
     "Object.defineProperty(process, 'platform', { value: 'win32' }); import('./broker/broker.ts').catch((error) => { console.error(error); process.exit(1); });",
   ], {
@@ -354,7 +360,7 @@ test("opt-in TCP broker requires endpoint state for health and registration", { 
 });
 
 async function setupClients() {
-  const broker = spawn("npx", ["--no-install", "tsx", path.join(repoDir, "broker", "broker.ts")], {
+  const broker = spawn(process.execPath, [getTsxCliPath(), path.join(repoDir, "broker", "broker.ts")], {
     cwd: repoDir,
     env: { ...process.env, HOME: sharedHomeDir, USERPROFILE: sharedHomeDir },
     stdio: ["ignore", "pipe", "pipe"],
@@ -700,7 +706,7 @@ test("old stable-ID socket cannot mutate the replacement session", { concurrency
 });
 
 test("stable-ID replacement clears old ask edges and ignores stale cancels", { concurrency: false }, async () => {
-  const { planner, orchestrator, cleanup } = await setupClients();
+  const { orchestrator, cleanup } = await setupClients();
   const first = await connectRawRegistered("replaceable-asker-id", "replaceable-asker-old");
   const replacement = new IntercomClient();
 
@@ -1034,6 +1040,49 @@ test("busy interactive sessions idle-gate top-level asks without aborting", { co
   }
 });
 
+test("replied idle-gated asks are discarded before delivery", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+  let idle = false;
+  const harness = createExtensionHarness("reply-while-busy-worker", {
+    hasUI: true,
+    isIdle: () => idle,
+  });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const worker = await waitForSessionByName(planner, "reply-while-busy-worker");
+
+    const askId = "reply-while-busy-ask";
+    const replyReceived = waitForReply(planner, askId);
+    assert.equal((await planner.send(worker.id, {
+      messageId: askId,
+      text: "Can you answer before this turn ends?",
+      expectsReply: true,
+    })).delivered, true);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(harness.sentMessages.length, 0);
+
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const result = await intercomTool.execute("reply-while-busy", {
+      action: "reply",
+      message: "Answered during the current turn.",
+      replyTo: askId,
+    }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(result.details?.delivered, true);
+    assert.equal((await replyReceived).message.replyTo, askId);
+
+    idle = true;
+    await harness.emitLifecycle("agent_end");
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.equal(harness.sentMessages.length, 0);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
 test("deferred startup connect is cancelled on shutdown", { concurrency: false }, async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const { planner, cleanup } = await setupClients();
@@ -1188,6 +1237,18 @@ test("supervisor tool registers only when child metadata is present", async () =
     const supervisorTool = harness.tools.find((tool) => tool.name === "contact_supervisor");
     assert.match(JSON.stringify(supervisorTool?.parameters), /interview_request/);
     assert.match(JSON.stringify(supervisorTool?.parameters), /questions/);
+  });
+
+  await withChildOrchestratorEnv({
+    orchestratorTarget: "orchestrator",
+    runId: "78f659a3",
+    agent: "worker",
+    index: "0",
+    supervisorChannelDir: path.join(sharedHomeDir, "native-supervisor-channel"),
+  }, () => {
+    const harness = createExtensionHarness();
+    piIntercomExtension(harness.pi as never);
+    assert.deepEqual(harness.tools.map((tool) => tool.name), ["intercom"]);
   });
 });
 
