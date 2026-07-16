@@ -862,7 +862,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     const lowerName = nameOrId.toLowerCase();
     const byName = sessions.filter(s => s.name?.toLowerCase() === lowerName);
     if (byName.length > 1) {
-      throw new Error(`Multiple sessions named "${nameOrId}" are connected. Use the session ID instead.`);
+      const ids = byName.map(s => shortSessionId(s.id)).join(", ");
+      throw new Error(`Multiple sessions named "${nameOrId}" are connected. Address one by the id shown in parentheses by "list" (${ids}).`);
     }
     if (byName.length === 1) {
       return byName[0]!.id;
@@ -1428,10 +1429,14 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     description: `Send a message to another pi session running on this machine.
 Use this to communicate findings, request help, or coordinate work with other sessions.
 
+Target a session by name, full session ID, or the short id shown in parentheses
+by "list" (a leading prefix of the ID is enough). Prefer the short id when two
+sessions share a name.
+
 Usage:
   intercom({ action: "list" })                    → List active sessions
-  intercom({ action: "send", to: "session-name", message: "..." })  → Send message
-  intercom({ action: "ask", to: "session-name", message: "..." })   → Ask and wait for reply
+  intercom({ action: "send", to: "name-or-id", message: "..." })  → Send message
+  intercom({ action: "ask", to: "name-or-id", message: "..." })   → Ask and wait for reply
   intercom({ action: "reply", message: "..." })                      → Reply to the active/single pending ask
   intercom({ action: "pending" })                                      → List unresolved inbound asks
   intercom({ action: "status" })                  → Show connection status`,
@@ -1443,7 +1448,7 @@ Usage:
         description: "Action: 'list', 'send', 'ask', 'reply', 'pending', or 'status'",
       }),
       to: Type.Optional(Type.String({
-        description: "Target session name or ID (for 'send', 'ask', or disambiguating 'reply')",
+        description: "Target session: name, full session ID, or the short id shown in parentheses by 'list' (a leading ID prefix resolves). For 'send', 'ask', or disambiguating 'reply'.",
       })),
       message: Type.Optional(Type.String({
         description: "Message to send (for 'send', 'ask', or 'reply' action)",
