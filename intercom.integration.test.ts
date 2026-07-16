@@ -818,6 +818,35 @@ test("intercom tool prefers exact names over ID prefixes", { concurrency: false 
   }
 });
 
+test("intercom tool points at the short id when names collide", { concurrency: false }, async () => {
+  const { cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const twinA = new IntercomClient();
+  const twinB = new IntercomClient();
+  const harness = createExtensionHarness("collision-sender");
+
+  try {
+    await twinA.connect({ name: "twin", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, "aaaa1111-session");
+    await twinB.connect({ name: "twin", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, "bbbb2222-session");
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const result = await intercomTool.execute("send-twin", { action: "send", to: "twin", message: "which one?" }, new AbortController().signal, undefined, harness.ctx);
+
+    assert.equal(result.details?.error, true);
+    const text = result.content.map((part) => (part as { text?: string }).text ?? "").join("");
+    assert.match(text, /parentheses/);
+    assert.match(text, /aaaa1111/);
+    assert.match(text, /bbbb2222/);
+    await harness.emitLifecycle("session_shutdown");
+  } finally {
+    await twinA.disconnect().catch(() => undefined);
+    await twinB.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
 test("intercom tool renders compact call and result rows", async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const harness = createExtensionHarness();
