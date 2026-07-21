@@ -121,6 +121,15 @@ test("extension bus negotiates, routes, elects an owner, and persists state", { 
 
     const now = Date.now();
     await owner.connect(registration("owner", now - 1000, true), "owner-id");
+
+    const invalidReplacement = new IntercomClient();
+    await assert.rejects(invalidReplacement.connect({
+      ...registration("invalid-replacement", now),
+      extensions: [{ namespace: "Invalid Namespace", ownerEligible: true }],
+    }, "owner-id"));
+    assert.equal((await owner.listSessions()).some((session) => session.id === "owner-id"), true);
+    await invalidReplacement.disconnect().catch(() => undefined);
+
     await peer.connect(registration("peer", now, false), "peer-id");
     await legacy.connect(registration("legacy", now), "legacy-id");
     await late.connect(registration("late", now + 1), "late-id");

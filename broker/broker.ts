@@ -375,6 +375,19 @@ class IntercomBroker {
           }
           id = clientMessage.sessionId;
         }
+        const session = clientMessage.session;
+        const extensions = session.extensions;
+        if (extensions !== undefined) {
+          if (!Array.isArray(extensions) || extensions.length > MAX_EXTENSIONS_PER_SESSION) {
+            throw new Error(`Invalid extensions field (maximum ${MAX_EXTENSIONS_PER_SESSION})`);
+          }
+          for (const extension of extensions) {
+            if (!this.validateExtensionCapability(extension)) {
+              throw new Error(`Invalid extension capability: ${JSON.stringify(extension)}`);
+            }
+          }
+        }
+
         const previous = this.sessions.get(id);
         if (!previous && this.sessions.size >= MAX_SESSIONS) {
           writeMessage(socket, { type: "error", error: "Too many registered intercom sessions" });
@@ -386,7 +399,6 @@ class IntercomBroker {
           previous.socket.end();
         }
         setId(id);
-        const session = clientMessage.session;
         const info: SessionInfo = {
           id,
           ...(session.name !== undefined ? { name: session.name } : {}),
@@ -398,19 +410,6 @@ class IntercomBroker {
           ...(session.status !== undefined ? { status: session.status } : {}),
           trustedLocal: typeof LISTEN_TARGET === "string" && process.platform !== "win32",
         };
-
-        // Validate and store extension capabilities
-        const extensions = session.extensions;
-        if (extensions !== undefined) {
-          if (!Array.isArray(extensions) || extensions.length > MAX_EXTENSIONS_PER_SESSION) {
-            throw new Error(`Invalid extensions field (maximum ${MAX_EXTENSIONS_PER_SESSION})`);
-          }
-          for (const ext of extensions) {
-            if (!this.validateExtensionCapability(ext)) {
-              throw new Error(`Invalid extension capability: ${JSON.stringify(ext)}`);
-            }
-          }
-        }
 
         this.sessions.set(id, {
           socket,
