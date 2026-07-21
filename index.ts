@@ -9,7 +9,16 @@ import { SessionListOverlay } from "./ui/session-list.ts";
 import { ComposeOverlay, type ComposeResult } from "./ui/compose.ts";
 import { InlineMessageComponent } from "./ui/inline-message.ts";
 import { getAskTimeoutMs, loadConfig, type IntercomConfig } from "./config.ts";
-import type { SessionInfo, Message, Attachment } from "./types.ts";
+import { EXTENSION_BUS_FEATURE } from "./types.ts";
+import type { Attachment, BrokerMessage, Message, SessionInfo, SessionRegistration } from "./types.ts";
+import {
+  INTERCOM_EXTENSION_REGISTER_EVENT,
+  type IntercomExtensionChannel,
+  type IntercomExtensionEvent,
+  type IntercomExtensionOwner,
+  type IntercomExtensionRegistration,
+  type IntercomExtensionState,
+} from "./extension-api.ts";
 import { ReplyTracker } from "./reply-tracker.ts";
 
 const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
@@ -431,6 +440,12 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   let client: IntercomClient | null = null;
   const config: IntercomConfig = loadConfig();
   const askTimeoutMs = getAskTimeoutMs();
+  const localExtensions = new Map<string, {
+    registration: IntercomExtensionRegistration;
+    channel: IntercomExtensionChannel;
+    owner?: IntercomExtensionOwner;
+    state?: IntercomExtensionState;
+  }>();
   let runtimeContext: ExtensionContext | null = null;
   let currentSessionId: string | null = null;
   let currentModel = "unknown";
@@ -564,7 +579,75 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     const lifecycleStatus = activeToolName ? `tool:${activeToolName}` : agentRunning ? "thinking" : "idle";
     return config.status ? `${lifecycleStatus} · ${config.status}` : lifecycleStatus;
   }
-  function buildRegistration(): Omit<SessionInfo, "id"> {
+  function emitLocalExtensionEvent(namespace: string, event: IntercomExtensionEvent): void {
+    try {
+      localExtensions.get(namespace)?.registration.onEvent(event);
+    } catch {
+      // One local extension must not break intercom or other extension channels.
+    }
+  }
+  function createExtensionChannel(namespace: string): IntercomExtensionChannel {
+    return {
+      namespace,
+      snapshot() {
+        const extension = localExtensions.get(namespace);
+        return {
+          connected: Boolean(client?.isConnected()),
+          supported: Boolean(client?.supportsFeature(EXTENSION_BUS_FEATURE)),
+          ...(extension?.owner ? { owner: extension.owner } : {}),
+          ...(extension?.state ? { state: extension.state } : {}),
+        };
+      },
+      publish(payload, options = {}) {
+        const activeClient = client;
+        if (!activeClient?.isConnected()) throw new Error("Intercom is not connected");
+        const extension = localExtensions.get(namespace);
+        const ownerOnly = options.ownerOnly ?? false;
+        const ownerEpoch = ownerOnly ? extension?.owner?.epoch : undefined;
+        if (ownerOnly && !ownerEpoch) throw new Error(`No owner is available for ${namespace}`);
+        activeClient.sendExtensionMessage({
+          type: "extension_publish",
+          namespace,
+          audience: options.audience ?? "owner",
+          ...(ownerOnly ? { ownerOnly: true, ownerEpoch } : {}),
+          payload,
+        });
+      },
+      commitState(payload, expectedRevision) {
+        const activeClient = client;
+        if (!activeClient?.isConnected()) throw new Error("Intercom is not connected");
+        const extension = localExtensions.get(namespace);
+        const ownerEpoch = extension?.owner?.epoch;
+        if (!ownerEpoch || extension.owner?.sessionId !== activeClient.sessionId) {
+          throw new Error(`Current session is not the owner of ${namespace}`);
+        }
+        activeClient.sendExtensionMessage({
+          type: "extension_state_commit",
+          namespace,
+          ownerEpoch,
+          expectedRevision: expectedRevision ?? extension.state?.revision ?? 0,
+          payload,
+        });
+      },
+      async listSessions() {
+        const activeClient = client;
+        if (!activeClient?.isConnected()) throw new Error("Intercom is not connected");
+        return activeClient.listSessions();
+      },
+    };
+  }
+  function registerLocalExtension(registration: IntercomExtensionRegistration): void {
+    if (!/^[a-z0-9][a-z0-9._/-]{0,63}$/.test(registration.namespace)) {
+      throw new Error(`Invalid intercom extension namespace: ${registration.namespace}`);
+    }
+    if (localExtensions.has(registration.namespace)) {
+      throw new Error(`Intercom extension namespace already registered: ${registration.namespace}`);
+    }
+    const channel = createExtensionChannel(registration.namespace);
+    localExtensions.set(registration.namespace, { registration, channel });
+    registration.onReady(channel);
+  }
+  function buildRegistration(): SessionRegistration {
     const liveContext = getLiveContext();
     if (!liveContext || !currentSessionId || sessionStartedAt === null) {
       throw new Error("Intercom runtime not initialized");
@@ -579,6 +662,14 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       startedAt: sessionStartedAt,
       lastActivity: Date.now(),
       status: currentStatus(),
+      ...(localExtensions.size > 0
+        ? {
+            extensions: [...localExtensions.values()].map(({ registration }) => ({
+              namespace: registration.namespace,
+              ownerEligible: registration.ownerEligible,
+            })),
+          }
+        : {}),
     };
   }
   function syncPresenceIdentity(sessionId: string): void {
@@ -763,6 +854,68 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     })();
   }
   function attachClientHandlers(nextClient: IntercomClient): void {
+    nextClient.onBrokerMessage((message: BrokerMessage) => {
+      if (client !== nextClient) return;
+      switch (message.type) {
+        case "registered": {
+          const supported = message.features?.includes(EXTENSION_BUS_FEATURE) ?? false;
+          for (const namespace of localExtensions.keys()) {
+            emitLocalExtensionEvent(namespace, { type: "connection", connected: true, supported });
+          }
+          break;
+        }
+        case "extension_owner": {
+          const extension = localExtensions.get(message.namespace);
+          if (!extension) break;
+          extension.owner = message.ownerId && message.ownerEpoch
+            ? { sessionId: message.ownerId, epoch: message.ownerEpoch }
+            : undefined;
+          emitLocalExtensionEvent(message.namespace, { type: "owner", ...(extension.owner ? { owner: extension.owner } : {}) });
+          break;
+        }
+        case "extension_message": {
+          const extension = localExtensions.get(message.namespace);
+          if (!extension) break;
+          emitLocalExtensionEvent(message.namespace, {
+            type: "message",
+            fromSessionId: message.fromSessionId,
+            owner: { sessionId: message.ownerId, epoch: message.ownerEpoch },
+            payload: message.payload,
+          });
+          break;
+        }
+        case "extension_state": {
+          const extension = localExtensions.get(message.namespace);
+          if (!extension) break;
+          extension.state = { revision: message.revision, payload: message.payload };
+          emitLocalExtensionEvent(message.namespace, { type: "state", state: extension.state });
+          break;
+        }
+        case "extension_state_result":
+          emitLocalExtensionEvent(message.namespace, {
+            type: "state_result",
+            committed: message.committed,
+            revision: message.revision,
+            ...(message.reason ? { reason: message.reason } : {}),
+          });
+          break;
+        case "session_joined":
+          for (const namespace of localExtensions.keys()) {
+            emitLocalExtensionEvent(namespace, { type: "session_joined", session: message.session });
+          }
+          break;
+        case "session_left":
+          for (const namespace of localExtensions.keys()) {
+            emitLocalExtensionEvent(namespace, { type: "session_left", sessionId: message.sessionId });
+          }
+          break;
+        case "presence_update":
+          for (const namespace of localExtensions.keys()) {
+            emitLocalExtensionEvent(namespace, { type: "presence_update", session: message.session });
+          }
+          break;
+      }
+    });
     nextClient.on("message", (from, message) => {
       const liveContext = getLiveContext();
       if (client !== nextClient || !liveContext) {
@@ -775,6 +928,11 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         return;
       }
       rejectReplyWaiter(new Error(`Disconnected while waiting for reply: ${error.message}`, { cause: error }));
+      for (const [namespace, extension] of localExtensions) {
+        extension.owner = undefined;
+        emitLocalExtensionEvent(namespace, { type: "connection", connected: false, supported: false });
+        emitLocalExtensionEvent(namespace, { type: "owner" });
+      }
       client = null;
       if (!shuttingDown && !disposed) {
         clearReconnectTimer();
@@ -1025,6 +1183,19 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       }
     })();
   }
+  const unsubscribeExtensionRegister = pi.events.on(INTERCOM_EXTENSION_REGISTER_EVENT, (payload) => {
+    if (!payload || typeof payload !== "object") return;
+    const registration = payload as Partial<IntercomExtensionRegistration>;
+    if (
+      typeof registration.namespace !== "string"
+      || typeof registration.ownerEligible !== "boolean"
+      || typeof registration.onEvent !== "function"
+      || typeof registration.onReady !== "function"
+    ) {
+      return;
+    }
+    registerLocalExtension(registration as IntercomExtensionRegistration);
+  });
   const unsubscribeSubagentControlIntercom = pi.events.on(SUBAGENT_CONTROL_INTERCOM_EVENT, (payload) => {
     relaySubagentIntercomPayload(payload, {
       sender: "subagent-control",
@@ -1048,6 +1219,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   });
   
   pi.on("session_shutdown", async () => {
+    unsubscribeExtensionRegister();
     unsubscribeSubagentControlIntercom();
     unsubscribeSubagentResultIntercom();
     shuttingDown = true;

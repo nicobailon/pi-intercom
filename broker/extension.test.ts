@@ -1,0 +1,226 @@
+import assert from "node:assert/strict";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { once } from "node:events";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import test from "node:test";
+import type { BrokerMessage, SessionRegistration } from "../types.ts";
+import { IntercomClient } from "./client.ts";
+import { ExtensionStateManager } from "./extension-state.ts";
+
+const repoDir = process.cwd();
+
+function registration(name: string, startedAt: number, ownerEligible?: boolean): SessionRegistration {
+  return {
+    name,
+    cwd: "/test",
+    model: "test-model",
+    pid: process.pid,
+    startedAt,
+    lastActivity: Date.now(),
+    ...(ownerEligible === undefined
+      ? {}
+      : { extensions: [{ namespace: "test/v1", ownerEligible }] }),
+  };
+}
+
+async function waitFor(
+  messages: BrokerMessage[],
+  predicate: (message: BrokerMessage) => boolean,
+  timeoutMs = 3000,
+): Promise<BrokerMessage> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const message = messages.find(predicate);
+    if (message) return message;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("Timed out waiting for broker message");
+}
+
+async function startBroker(agentDir: string): Promise<ChildProcessWithoutNullStreams> {
+  const broker = spawn(
+    process.execPath,
+    [path.join(repoDir, "node_modules", "tsx", "dist", "cli.mjs"), path.join(repoDir, "broker", "broker.ts")],
+    {
+      cwd: repoDir,
+      env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
+  const ready = new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("Broker startup timed out")), 10_000);
+    broker.stdout.on("data", (chunk: Buffer) => {
+      if (chunk.toString().includes("Intercom broker started")) {
+        clearTimeout(timeout);
+        resolve();
+      }
+    });
+    broker.once("exit", (code, signal) => {
+      clearTimeout(timeout);
+      reject(new Error(`Broker exited before startup (${code ?? signal})`));
+    });
+  });
+  await ready;
+  return broker;
+}
+
+async function stopBroker(broker: ChildProcessWithoutNullStreams): Promise<void> {
+  if (broker.exitCode !== null) return;
+  broker.kill("SIGTERM");
+  await once(broker, "exit");
+}
+
+test("extension bus negotiates, routes, elects an owner, and persists state", { concurrency: false, timeout: 30_000 }, async () => {
+  const agentDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-extension-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  const broker = await startBroker(agentDir);
+  const clients: IntercomClient[] = [];
+
+  try {
+    const invalidNamespace = new IntercomClient();
+    await assert.rejects(
+      invalidNamespace.connect({
+        ...registration("invalid", Date.now()),
+        extensions: [{ namespace: "Invalid Namespace", ownerEligible: true }],
+      }),
+    );
+
+    const tooManyExtensions = new IntercomClient();
+    await assert.rejects(
+      tooManyExtensions.connect({
+        ...registration("too-many", Date.now()),
+        extensions: Array.from({ length: 33 }, (_, index) => ({
+          namespace: `test-${index}/v1`,
+          ownerEligible: true,
+        })),
+      }),
+    );
+
+    const owner = new IntercomClient();
+    const peer = new IntercomClient();
+    const legacy = new IntercomClient();
+    clients.push(owner, peer, legacy);
+
+    const ownerMessages: BrokerMessage[] = [];
+    const peerMessages: BrokerMessage[] = [];
+    const legacyMessages: BrokerMessage[] = [];
+    const ownerErrors: Error[] = [];
+    owner.onBrokerMessage((message) => ownerMessages.push(message));
+    peer.onBrokerMessage((message) => peerMessages.push(message));
+    legacy.onBrokerMessage((message) => legacyMessages.push(message));
+    owner.on("error", (error) => ownerErrors.push(error));
+    peer.on("error", () => {});
+    legacy.on("error", () => {});
+
+    const now = Date.now();
+    await owner.connect(registration("owner", now - 1000, true), "owner-id");
+    await peer.connect(registration("peer", now, false), "peer-id");
+    await legacy.connect(registration("legacy", now), "legacy-id");
+
+    assert.equal(owner.supportsFeature("extension-bus-v1"), true);
+    assert.equal(legacy.supportsFeature("extension-bus-v1"), true, "new broker advertises support even to clients without capabilities");
+
+    const ownerEvent = await waitFor(ownerMessages, (message) => message.type === "extension_owner");
+    assert.equal(ownerEvent.type, "extension_owner");
+    assert.equal(ownerEvent.ownerId, "owner-id");
+    assert.ok(ownerEvent.ownerEpoch);
+
+    owner.sendExtensionMessage({
+      type: "extension_publish",
+      namespace: "test/v1",
+      audience: "capable",
+      ownerOnly: true,
+      ownerEpoch: ownerEvent.ownerEpoch,
+      payload: { kind: "assignment" },
+    });
+    const received = await waitFor(peerMessages, (message) => message.type === "extension_message");
+    assert.equal(received.type, "extension_message");
+    assert.deepEqual(received.payload, { kind: "assignment" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(legacyMessages.some((message) => message.type === "extension_message"), false);
+
+    owner.sendExtensionMessage({
+      type: "extension_state_commit",
+      namespace: "test/v1",
+      ownerEpoch: ownerEvent.ownerEpoch!,
+      expectedRevision: 0,
+      payload: { groups: ["alpha"] },
+    });
+    const committed = await waitFor(ownerMessages, (message) => message.type === "extension_state_result");
+    assert.equal(committed.type, "extension_state_result");
+    assert.equal(committed.committed, true);
+    assert.equal(committed.revision, 1);
+    const state = await waitFor(peerMessages, (message) => message.type === "extension_state");
+    assert.equal(state.type, "extension_state");
+    assert.deepEqual(state.payload, { groups: ["alpha"] });
+
+    owner.sendExtensionMessage({
+      type: "extension_publish",
+      namespace: "test/v1",
+      audience: "capable",
+      ownerOnly: true,
+      ownerEpoch: "stale",
+      payload: {},
+    });
+    await waitFor(
+      ownerMessages,
+      (message) => message.type === "error" && message.error === "Owner validation failed",
+    ).catch(async () => {
+      const deadline = Date.now() + 3000;
+      while (Date.now() < deadline && ownerErrors.length === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.match(ownerErrors[0]?.message ?? "", /Owner validation failed/);
+      return { type: "error", error: ownerErrors[0]!.message } as BrokerMessage;
+    });
+
+    await owner.disconnect();
+    const noOwner = await waitFor(
+      peerMessages,
+      (message) => message.type === "extension_owner" && message.ownerId === undefined,
+    );
+    assert.equal(noOwner.type, "extension_owner");
+
+    const replacement = new IntercomClient();
+    clients.push(replacement);
+    const replacementMessages: BrokerMessage[] = [];
+    replacement.onBrokerMessage((message) => replacementMessages.push(message));
+    replacement.on("error", () => {});
+    await replacement.connect(registration("replacement", now + 1, true), "owner-id");
+    const replacementOwner = await waitFor(replacementMessages, (message) => message.type === "extension_owner");
+    assert.equal(replacementOwner.type, "extension_owner");
+    assert.notEqual(replacementOwner.ownerEpoch, ownerEvent.ownerEpoch);
+    const restored = await waitFor(replacementMessages, (message) => message.type === "extension_state");
+    assert.equal(restored.type, "extension_state");
+    assert.equal(restored.revision, 1);
+  } finally {
+    await Promise.all(clients.map((client) => client.disconnect().catch(() => undefined)));
+    await stopBroker(broker);
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    rmSync(agentDir, { recursive: true, force: true });
+  }
+});
+
+test("extension state falls back to a valid backup", () => {
+  const runtimeDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-state-"));
+  try {
+    const manager = new ExtensionStateManager(runtimeDir);
+    assert.equal(manager.commitState("test/v1", 0, { version: 1 }).committed, true);
+    assert.equal(manager.commitState("test/v1", 1, { version: 2 }).committed, true);
+
+    const stateDir = path.join(runtimeDir, "extension-state");
+    const files = readdirSync(stateDir);
+    const primary = files.find((file) => file.endsWith(".json"));
+    assert.ok(primary);
+    writeFileSync(path.join(stateDir, primary!), "corrupt", "utf8");
+
+    const recovered = new ExtensionStateManager(runtimeDir).loadState("test/v1");
+    assert.deepEqual(recovered, { revision: 1, payload: { version: 1 } });
+  } finally {
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+});

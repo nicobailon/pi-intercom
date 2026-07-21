@@ -3,7 +3,15 @@ import net from "net";
 import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.ts";
 import { getBrokerConnectTarget, type BrokerConnectTarget } from "./paths.ts";
-import type { SessionInfo, Message, Attachment, SessionRegistration } from "../types.ts";
+import { EXTENSION_BUS_FEATURE } from "../types.ts";
+import type {
+  Attachment,
+  BrokerMessage,
+  ClientMessage,
+  Message,
+  SessionInfo,
+  SessionRegistration,
+} from "../types.ts";
 
 interface SendOptions {
   text: string;
@@ -119,6 +127,7 @@ function isSessionInfo(value: unknown): value is SessionInfo {
 export class IntercomClient extends EventEmitter {
   private socket: net.Socket | null = null;
   private _sessionId: string | null = null;
+  private _features = new Set<string>();
   private pendingSends = new Map<string, { resolve: (r: SendResult) => void; reject: (e: Error) => void }>();
   private pendingLists = new Map<string, { resolve: (sessions: SessionInfo[]) => void; reject: (e: Error) => void }>();
   private disconnecting = false;
@@ -137,6 +146,10 @@ export class IntercomClient extends EventEmitter {
 
   get sessionId(): string | null {
     return this._sessionId;
+  }
+
+  supportsFeature(feature: string): boolean {
+    return this._features.has(feature);
   }
 
   isConnected(): boolean {
@@ -223,6 +236,7 @@ export class IntercomClient extends EventEmitter {
           this.socket = null;
         }
         this._sessionId = null;
+        this._features.clear();
         this.disconnectError = null;
         if (connectionEstablished && !wasDisconnecting) {
           this.emit("disconnected", disconnectError);
@@ -313,8 +327,22 @@ export class IntercomClient extends EventEmitter {
           throw new Error("Received duplicate registered message");
         }
 
+        if (
+          brokerMessage.features !== undefined
+          && (!Array.isArray(brokerMessage.features) || !brokerMessage.features.every((feature) => typeof feature === "string"))
+        ) {
+          throw new Error("Invalid registered features");
+        }
+
         this._sessionId = brokerMessage.sessionId;
-        this.emit("_registered", { type: "registered", sessionId: brokerMessage.sessionId });
+        this._features = new Set((brokerMessage.features as string[] | undefined) ?? []);
+        const registered: BrokerMessage = {
+          type: "registered",
+          sessionId: brokerMessage.sessionId,
+          ...(this._features.size > 0 ? { features: [...this._features] } : {}),
+        };
+        this.emit("broker_message", registered);
+        this.emit("_registered", registered);
         break;
       }
 
@@ -417,6 +445,26 @@ export class IntercomClient extends EventEmitter {
         this.emit("error", new Error(brokerMessage.error));
         break;
       }
+
+      case "extension_owner": {
+        if (
+          typeof brokerMessage.namespace !== "string"
+          || (brokerMessage.ownerId !== undefined && typeof brokerMessage.ownerId !== "string")
+          || (brokerMessage.ownerEpoch !== undefined && typeof brokerMessage.ownerEpoch !== "string")
+        ) {
+          throw new Error("Invalid extension_owner message");
+        }
+        this.emit("broker_message", brokerMessage as BrokerMessage);
+        this.emit("extension_owner", brokerMessage);
+        break;
+      }
+
+      case "extension_message":
+      case "extension_state":
+      case "extension_state_result":
+        this.emit("broker_message", brokerMessage as BrokerMessage);
+        this.emit(brokerMessage.type, brokerMessage);
+        break;
 
       default:
         throw new Error(`Unknown broker message type: ${brokerMessage.type}`);
@@ -576,5 +624,18 @@ export class IntercomClient extends EventEmitter {
     }
 
     writeMessage(socket, { type: "presence", ...updates });
+  }
+
+  sendExtensionMessage(message: Extract<ClientMessage, { type: "extension_publish" | "extension_state_commit" }>): void {
+    if (!this.supportsFeature(EXTENSION_BUS_FEATURE)) {
+      throw new Error(`Connected broker does not support ${EXTENSION_BUS_FEATURE}`);
+    }
+    const socket = this.requireActiveSocket();
+    writeMessage(socket, message);
+  }
+
+  onBrokerMessage(handler: (message: BrokerMessage) => void): () => void {
+    this.on("broker_message", handler);
+    return () => this.off("broker_message", handler);
   }
 }

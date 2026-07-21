@@ -7,6 +7,7 @@ import { EventEmitter, once } from "node:events";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { ReplyTracker } from "./reply-tracker.ts";
 import type { Message, SessionInfo } from "./types.ts";
+import { INTERCOM_EXTENSION_REGISTER_EVENT, type IntercomExtensionChannel } from "./extension-api.ts";
 
 const repoDir = process.cwd();
 const childEnvKeys = [
@@ -343,7 +344,11 @@ test("opt-in TCP broker requires endpoint state for health and registration", { 
         lastActivity: Date.now(),
       },
     }, true);
-    assert.deepEqual(registerMessages, [{ type: "registered", sessionId: "authorized-tcp-client" }]);
+    assert.deepEqual(registerMessages, [{
+      type: "registered",
+      sessionId: "authorized-tcp-client",
+      features: ["extension-bus-v1"],
+    }]);
   } finally {
     if (broker.exitCode === null && broker.signalCode === null) {
       broker.kill("SIGTERM");
@@ -816,6 +821,30 @@ test("intercom tool prefers exact names over ID prefixes", { concurrency: false 
     await evilPrefix.disconnect().catch(() => undefined);
     await cleanup();
   }
+});
+
+test("extension channels register locally without creating conversation messages", async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness();
+  let channel: IntercomExtensionChannel | undefined;
+  const extensionEvents: unknown[] = [];
+
+  piIntercomExtension(harness.pi as never);
+  harness.pi.events.emit(INTERCOM_EXTENSION_REGISTER_EVENT, {
+    namespace: "test-extension/v1",
+    ownerEligible: true,
+    onReady: (value: IntercomExtensionChannel) => { channel = value; },
+    onEvent: (event: unknown) => extensionEvents.push(event),
+  });
+
+  assert.equal(channel?.namespace, "test-extension/v1");
+  assert.deepEqual(channel?.snapshot(), {
+    connected: false,
+    supported: false,
+  });
+  assert.deepEqual(extensionEvents, []);
+  assert.deepEqual(harness.sentMessages, []);
+  assert.deepEqual(harness.entries, []);
 });
 
 test("intercom tool renders compact call and result rows", async () => {
