@@ -433,7 +433,7 @@ The broker:
 - rejects stale owner-only writes
 - stores at most 64 KiB of opaque, revisioned state per namespace
 
-`channel.publish()` accepts payloads up to 16 KiB. `channel.commitState()` uses compare-and-swap against the last observed revision. Clients connected to an older broker see the channel as unsupported and do not send extension operations.
+`channel.publish()` accepts payloads up to 16 KiB. `channel.commitState()` uses compare-and-swap against the last observed revision. Capabilities registered after the broker connection is established are synchronized without reconnecting. Clients connected to an older broker see the channel as unsupported and do not send extension operations.
 
 ## How It Works
 
