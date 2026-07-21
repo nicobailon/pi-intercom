@@ -514,6 +514,12 @@ export class IntercomClient extends EventEmitter {
     });
   }
 
+  updateExtensionCapabilities(extensions: SessionRegistration["extensions"]): void {
+    if (!this.supportsFeature(EXTENSION_BUS_FEATURE)) return;
+    const socket = this.requireActiveSocket();
+    writeMessage(socket, { type: "extension_capabilities_update", extensions: extensions ?? [] });
+  }
+
   listSessions(): Promise<SessionInfo[]> {
     let socket: net.Socket;
     try {

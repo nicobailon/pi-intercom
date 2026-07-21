@@ -102,23 +102,28 @@ test("extension bus negotiates, routes, elects an owner, and persists state", { 
     const owner = new IntercomClient();
     const peer = new IntercomClient();
     const legacy = new IntercomClient();
-    clients.push(owner, peer, legacy);
+    const late = new IntercomClient();
+    clients.push(owner, peer, legacy, late);
 
     const ownerMessages: BrokerMessage[] = [];
     const peerMessages: BrokerMessage[] = [];
     const legacyMessages: BrokerMessage[] = [];
+    const lateMessages: BrokerMessage[] = [];
     const ownerErrors: Error[] = [];
     owner.onBrokerMessage((message) => ownerMessages.push(message));
     peer.onBrokerMessage((message) => peerMessages.push(message));
     legacy.onBrokerMessage((message) => legacyMessages.push(message));
+    late.onBrokerMessage((message) => lateMessages.push(message));
     owner.on("error", (error) => ownerErrors.push(error));
     peer.on("error", () => {});
     legacy.on("error", () => {});
+    late.on("error", () => {});
 
     const now = Date.now();
     await owner.connect(registration("owner", now - 1000, true), "owner-id");
     await peer.connect(registration("peer", now, false), "peer-id");
     await legacy.connect(registration("legacy", now), "legacy-id");
+    await late.connect(registration("late", now + 1), "late-id");
 
     assert.equal(owner.supportsFeature("extension-bus-v1"), true);
     assert.equal(legacy.supportsFeature("extension-bus-v1"), true, "new broker advertises support even to clients without capabilities");
@@ -127,6 +132,14 @@ test("extension bus negotiates, routes, elects an owner, and persists state", { 
     assert.equal(ownerEvent.type, "extension_owner");
     assert.equal(ownerEvent.ownerId, "owner-id");
     assert.ok(ownerEvent.ownerEpoch);
+    const peerOwnerEvent = await waitFor(peerMessages, (message) => message.type === "extension_owner");
+    assert.equal(peerOwnerEvent.type, "extension_owner");
+    assert.equal(peerOwnerEvent.ownerId, "owner-id");
+
+    late.updateExtensionCapabilities([{ namespace: "test/v1", ownerEligible: false }]);
+    const lateOwnerEvent = await waitFor(lateMessages, (message) => message.type === "extension_owner");
+    assert.equal(lateOwnerEvent.type, "extension_owner");
+    assert.equal(lateOwnerEvent.ownerId, "owner-id");
 
     owner.sendExtensionMessage({
       type: "extension_publish",
@@ -139,6 +152,9 @@ test("extension bus negotiates, routes, elects an owner, and persists state", { 
     const received = await waitFor(peerMessages, (message) => message.type === "extension_message");
     assert.equal(received.type, "extension_message");
     assert.deepEqual(received.payload, { kind: "assignment" });
+    const lateReceived = await waitFor(lateMessages, (message) => message.type === "extension_message");
+    assert.equal(lateReceived.type, "extension_message");
+    assert.deepEqual(lateReceived.payload, { kind: "assignment" });
     await new Promise((resolve) => setTimeout(resolve, 50));
     assert.equal(legacyMessages.some((message) => message.type === "extension_message"), false);
 

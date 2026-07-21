@@ -13,6 +13,7 @@ import { EXTENSION_BUS_FEATURE } from "./types.ts";
 import type { Attachment, BrokerMessage, Message, SessionInfo, SessionRegistration } from "./types.ts";
 import {
   INTERCOM_EXTENSION_REGISTER_EVENT,
+  INTERCOM_EXTENSION_REGISTRY_READY_EVENT,
   type IntercomExtensionChannel,
   type IntercomExtensionEvent,
   type IntercomExtensionOwner,
@@ -646,6 +647,14 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     const channel = createExtensionChannel(registration.namespace);
     localExtensions.set(registration.namespace, { registration, channel });
     registration.onReady(channel);
+    if (client?.isConnected() && client.supportsFeature(EXTENSION_BUS_FEATURE)) {
+      client.updateExtensionCapabilities(
+        [...localExtensions.values()].map(({ registration: registered }) => ({
+          namespace: registered.namespace,
+          ownerEligible: registered.ownerEligible,
+        })),
+      );
+    }
   }
   function buildRegistration(): SessionRegistration {
     const liveContext = getLiveContext();
@@ -1196,6 +1205,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     registerLocalExtension(registration as IntercomExtensionRegistration);
   });
+  pi.events.emit(INTERCOM_EXTENSION_REGISTRY_READY_EVENT, { version: 1 });
   const unsubscribeSubagentControlIntercom = pi.events.on(SUBAGENT_CONTROL_INTERCOM_EVENT, (payload) => {
     relaySubagentIntercomPayload(payload, {
       sender: "subagent-control",

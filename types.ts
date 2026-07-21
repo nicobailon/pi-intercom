@@ -43,6 +43,7 @@ export type SessionRegistration = Omit<SessionInfo, "id" | "peerUid" | "trustedL
 export type ClientMessage =
   | { type: "register"; session: SessionRegistration; sessionId?: string; stateId?: string }
   | { type: "unregister" }
+  | { type: "extension_capabilities_update"; extensions: ExtensionCapability[] }
   | { type: "list"; requestId: string }
   | { type: "send"; to: string; message: Message }
   | { type: "cancel_ask"; messageId: string }

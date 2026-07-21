@@ -438,6 +438,12 @@ class IntercomBroker {
 
         if (extensions) {
           for (const ext of extensions) {
+            const owner = this.namespaceOwners.get(ext.namespace);
+            writeMessage(socket, {
+              type: "extension_owner",
+              namespace: ext.namespace,
+              ...(owner ? { ownerId: owner.sessionId, ownerEpoch: owner.epoch } : {}),
+            });
             const state = this.extensionStateManager.loadState(ext.namespace);
             if (state) {
               writeMessage(socket, {
@@ -465,6 +471,45 @@ class IntercomBroker {
           this.scheduleShutdownCheck();
         }
         setId(null);
+        break;
+      }
+
+      case "extension_capabilities_update": {
+        if (!currentId) {
+          throw new Error("Received extension_capabilities_update before register");
+        }
+        const session = this.sessions.get(currentId);
+        if (!session || session.socket !== socket) {
+          throw new Error("Extension capability session not found");
+        }
+        const extensions = clientMessage.extensions;
+        if (!Array.isArray(extensions) || extensions.length > MAX_EXTENSIONS_PER_SESSION) {
+          throw new Error(`Invalid extensions field (maximum ${MAX_EXTENSIONS_PER_SESSION})`);
+        }
+        for (const extension of extensions) {
+          if (!this.validateExtensionCapability(extension)) {
+            throw new Error(`Invalid extension capability: ${JSON.stringify(extension)}`);
+          }
+        }
+        session.extensions = extensions;
+        this.recomputeNamespaceOwners();
+        for (const extension of extensions) {
+          const owner = this.namespaceOwners.get(extension.namespace);
+          writeMessage(socket, {
+            type: "extension_owner",
+            namespace: extension.namespace,
+            ...(owner ? { ownerId: owner.sessionId, ownerEpoch: owner.epoch } : {}),
+          });
+          const state = this.extensionStateManager.loadState(extension.namespace);
+          if (state) {
+            writeMessage(socket, {
+              type: "extension_state",
+              namespace: extension.namespace,
+              revision: state.revision,
+              payload: state.payload,
+            });
+          }
+        }
         break;
       }
 

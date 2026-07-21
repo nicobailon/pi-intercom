@@ -1,6 +1,7 @@
 import type { SessionInfo } from "./types.ts";
 
 export const INTERCOM_EXTENSION_REGISTER_EVENT = "intercom:extension-register";
+export const INTERCOM_EXTENSION_REGISTRY_READY_EVENT = "intercom:extension-registry-ready";
 
 export interface IntercomExtensionOwner {
   sessionId: string;
