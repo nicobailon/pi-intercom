@@ -412,6 +412,8 @@ export class IntercomClient extends EventEmitter {
           throw new Error("Invalid session_joined message");
         }
 
+        const message: BrokerMessage = { type: "session_joined", session: brokerMessage.session };
+        this.emit("broker_message", message);
         this.emit("session_joined", brokerMessage.session);
         break;
       }
@@ -421,6 +423,8 @@ export class IntercomClient extends EventEmitter {
           throw new Error("Invalid session_left message");
         }
 
+        const message: BrokerMessage = { type: "session_left", sessionId: brokerMessage.sessionId };
+        this.emit("broker_message", message);
         this.emit("session_left", brokerMessage.sessionId);
         break;
       }
@@ -430,6 +434,8 @@ export class IntercomClient extends EventEmitter {
           throw new Error("Invalid presence_update message");
         }
 
+        const message: BrokerMessage = { type: "presence_update", session: brokerMessage.session };
+        this.emit("broker_message", message);
         this.emit("presence_update", brokerMessage.session);
         break;
       }
@@ -459,12 +465,47 @@ export class IntercomClient extends EventEmitter {
         break;
       }
 
-      case "extension_message":
-      case "extension_state":
-      case "extension_state_result":
+      case "extension_message": {
+        if (
+          typeof brokerMessage.namespace !== "string"
+          || typeof brokerMessage.fromSessionId !== "string"
+          || typeof brokerMessage.ownerId !== "string"
+          || typeof brokerMessage.ownerEpoch !== "string"
+        ) {
+          throw new Error("Invalid extension_message");
+        }
         this.emit("broker_message", brokerMessage as BrokerMessage);
-        this.emit(brokerMessage.type, brokerMessage);
+        this.emit("extension_message", brokerMessage);
         break;
+      }
+
+      case "extension_state": {
+        if (
+          typeof brokerMessage.namespace !== "string"
+          || !Number.isSafeInteger(brokerMessage.revision)
+          || Number(brokerMessage.revision) < 0
+        ) {
+          throw new Error("Invalid extension_state");
+        }
+        this.emit("broker_message", brokerMessage as BrokerMessage);
+        this.emit("extension_state", brokerMessage);
+        break;
+      }
+
+      case "extension_state_result": {
+        if (
+          typeof brokerMessage.namespace !== "string"
+          || typeof brokerMessage.committed !== "boolean"
+          || !Number.isSafeInteger(brokerMessage.revision)
+          || Number(brokerMessage.revision) < 0
+          || (brokerMessage.reason !== undefined && typeof brokerMessage.reason !== "string")
+        ) {
+          throw new Error("Invalid extension_state_result");
+        }
+        this.emit("broker_message", brokerMessage as BrokerMessage);
+        this.emit("extension_state_result", brokerMessage);
+        break;
+      }
 
       default:
         throw new Error(`Unknown broker message type: ${brokerMessage.type}`);
