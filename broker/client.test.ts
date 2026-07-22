@@ -40,6 +40,10 @@ test("malformed extension broker messages are rejected", () => {
   (client as any)._sessionId = "session-1";
 
   assert.throws(
+    () => (client as any).handleBrokerMessage({ type: "extension_owner", namespace: "test/v1", ownerId: "owner" }),
+    /Invalid extension_owner/,
+  );
+  assert.throws(
     () => (client as any).handleBrokerMessage({ type: "extension_message", namespace: "test/v1" }),
     /Invalid extension_message/,
   );

@@ -637,6 +637,12 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       },
     };
   }
+  function currentExtensionCapabilities() {
+    return [...localExtensions.values()].map(({ registration }) => ({
+      namespace: registration.namespace,
+      ownerEligible: registration.ownerEligible,
+    }));
+  }
   function registerLocalExtension(registration: IntercomExtensionRegistration): void {
     if (!/^[a-z0-9][a-z0-9._/-]{0,63}$/.test(registration.namespace)) {
       throw new Error(`Invalid intercom extension namespace: ${registration.namespace}`);
@@ -646,14 +652,17 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     const channel = createExtensionChannel(registration.namespace);
     localExtensions.set(registration.namespace, { registration, channel });
+    const activeClient = client;
+    const connected = Boolean(activeClient?.isConnected());
+    const supported = Boolean(activeClient?.supportsFeature(EXTENSION_BUS_FEATURE));
+    // Write the capability update before exposing a connected channel. Socket
+    // framing preserves this order if onReady publishes synchronously.
+    if (activeClient && connected && supported) {
+      activeClient.updateExtensionCapabilities(currentExtensionCapabilities());
+    }
     registration.onReady(channel);
-    if (client?.isConnected() && client.supportsFeature(EXTENSION_BUS_FEATURE)) {
-      client.updateExtensionCapabilities(
-        [...localExtensions.values()].map(({ registration: registered }) => ({
-          namespace: registered.namespace,
-          ownerEligible: registered.ownerEligible,
-        })),
-      );
+    if (connected) {
+      emitLocalExtensionEvent(registration.namespace, { type: "connection", connected: true, supported });
     }
   }
   function buildRegistration(): SessionRegistration {
@@ -673,10 +682,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       status: currentStatus(),
       ...(localExtensions.size > 0
         ? {
-            extensions: [...localExtensions.values()].map(({ registration }) => ({
-              namespace: registration.namespace,
-              ownerEligible: registration.ownerEligible,
-            })),
+            extensions: currentExtensionCapabilities(),
           }
         : {}),
     };
@@ -868,6 +874,9 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       switch (message.type) {
         case "registered": {
           const supported = message.features?.includes(EXTENSION_BUS_FEATURE) ?? false;
+          if (supported && localExtensions.size > 0) {
+            nextClient.updateExtensionCapabilities(currentExtensionCapabilities());
+          }
           for (const namespace of localExtensions.keys()) {
             emitLocalExtensionEvent(namespace, { type: "connection", connected: true, supported });
           }
@@ -1224,6 +1233,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     });
   });
   pi.on("session_start", (_event, ctx) => {
+    pi.events.emit(INTERCOM_EXTENSION_REGISTRY_READY_EVENT, { version: 1 });
     if (!config.enabled) {
       return;
     }

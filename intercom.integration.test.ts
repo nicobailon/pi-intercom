@@ -847,6 +847,68 @@ test("extension channels register locally without creating conversation messages
   assert.deepEqual(harness.entries, []);
 });
 
+test("late extension registration advertises before an onReady publish", { concurrency: false }, async () => {
+  const { cleanup } = await setupClients();
+  const observer = new IntercomClient();
+  const observerMessages: BrokerMessage[] = [];
+  const harness = createExtensionHarness("late-extension-worker");
+  const extensionEvents: unknown[] = [];
+
+  try {
+    observer.onBrokerMessage((message) => observerMessages.push(message));
+    observer.on("error", () => {});
+    await observer.connect({
+      name: "extension-observer",
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+      extensions: [{ namespace: "late-extension/v1", ownerEligible: false }],
+    });
+
+    const { default: piIntercomExtension } = await import("./index.ts");
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    await waitForSessionByName(observer, "late-extension-worker");
+
+    harness.pi.events.emit(INTERCOM_EXTENSION_REGISTER_EVENT, {
+      namespace: "late-extension/v1",
+      ownerEligible: true,
+      onReady: (channel: IntercomExtensionChannel) => {
+        channel.publish({ probe: "onReady" }, { audience: "capable" });
+      },
+      onEvent: (event: unknown) => extensionEvents.push(event),
+    });
+
+    const deadline = Date.now() + 3000;
+    while (
+      Date.now() < deadline
+      && !observerMessages.some((message) => message.type === "extension_message"
+        && (message.payload as { probe?: string }).probe === "onReady")
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(
+      observerMessages.some((message) => message.type === "extension_message"
+        && (message.payload as { probe?: string }).probe === "onReady"),
+      true,
+    );
+    assert.equal(
+      extensionEvents.some((event) => typeof event === "object" && event !== null
+        && (event as { type?: string }).type === "connection"
+        && (event as { connected?: boolean }).connected === true),
+      true,
+    );
+    assert.deepEqual(harness.sentMessages, []);
+    assert.deepEqual(harness.entries, []);
+    await harness.emitLifecycle("session_shutdown");
+  } finally {
+    await observer.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
 test("intercom tool renders compact call and result rows", async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const harness = createExtensionHarness();
