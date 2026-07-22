@@ -44,6 +44,10 @@ test("malformed extension broker messages are rejected", () => {
     /Invalid extension_owner/,
   );
   assert.throws(
+    () => (client as any).handleBrokerMessage({ type: "extension_owner", namespace: "test/v1", ownerEpoch: "epoch" }),
+    /Invalid extension_owner/,
+  );
+  assert.throws(
     () => (client as any).handleBrokerMessage({ type: "extension_message", namespace: "test/v1" }),
     /Invalid extension_message/,
   );

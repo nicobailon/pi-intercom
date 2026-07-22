@@ -1233,7 +1233,6 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     });
   });
   pi.on("session_start", (_event, ctx) => {
-    pi.events.emit(INTERCOM_EXTENSION_REGISTRY_READY_EVENT, { version: 1 });
     if (!config.enabled) {
       return;
     }

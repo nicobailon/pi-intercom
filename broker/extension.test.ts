@@ -166,6 +166,7 @@ test("extension bus negotiates, routes, elects an owner, and persists state", { 
     assert.equal(lateOwnerEvent.ownerId, "owner-id", "backdated client must not seize namespace ownership");
     late.updateExtensionCapabilities([{ namespace: "test/v1", ownerEligible: false }]);
 
+    legacy.updateExtensionCapabilities([{ namespace: "other/v1", ownerEligible: false }]);
     legacy.sendExtensionMessage({
       type: "extension_publish",
       namespace: "test/v1",
@@ -176,7 +177,7 @@ test("extension bus negotiates, routes, elects an owner, and persists state", { 
     while (Date.now() < unauthorizedDeadline && legacyErrors.length === 0) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    assert.match(legacyErrors[0]?.message ?? "", /has not advertised extension capability/);
+    assert.match(legacyErrors[0]?.message ?? "", /does not have capability for this namespace/);
     legacy.sendExtensionMessage({
       type: "extension_state_commit",
       namespace: "test/v1",
@@ -190,7 +191,7 @@ test("extension bus negotiates, routes, elects an owner, and persists state", { 
     );
     assert.equal(unauthorizedState.type, "extension_state_result");
     assert.equal(unauthorizedState.committed, false);
-    assert.match(unauthorizedState.reason ?? "", /has not advertised extension capability/);
+    assert.match(unauthorizedState.reason ?? "", /does not have capability for this namespace/);
 
     owner.sendExtensionMessage({
       type: "extension_publish",
