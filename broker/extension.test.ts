@@ -113,6 +113,7 @@ test("extension bus negotiates, routes, elects an owner, and persists state", { 
     const lateMessages: BrokerMessage[] = [];
     const peerOnlyBMessages: BrokerMessage[] = [];
     const ownerErrors: Error[] = [];
+    const legacyErrors: Error[] = [];
     owner.onBrokerMessage((message) => ownerMessages.push(message));
     peer.onBrokerMessage((message) => peerMessages.push(message));
     legacy.onBrokerMessage((message) => legacyMessages.push(message));
@@ -120,7 +121,7 @@ test("extension bus negotiates, routes, elects an owner, and persists state", { 
     peerOnlyB.onBrokerMessage((message) => peerOnlyBMessages.push(message));
     owner.on("error", (error) => ownerErrors.push(error));
     peer.on("error", () => {});
-    legacy.on("error", () => {});
+    legacy.on("error", (error) => legacyErrors.push(error));
     late.on("error", () => {});
     peerOnlyA.on("error", () => {});
     peerOnlyB.on("error", () => {});
@@ -164,6 +165,45 @@ test("extension bus negotiates, routes, elects an owner, and persists state", { 
     assert.equal(lateOwnerEvent.type, "extension_owner");
     assert.equal(lateOwnerEvent.ownerId, "owner-id", "backdated client must not seize namespace ownership");
     late.updateExtensionCapabilities([{ namespace: "test/v1", ownerEligible: false }]);
+
+    legacy.sendExtensionMessage({
+      type: "extension_publish",
+      namespace: "test/v1",
+      audience: "capable",
+      payload: { unauthorized: true },
+    });
+    const unauthorizedDeadline = Date.now() + 3000;
+    while (Date.now() < unauthorizedDeadline && legacyErrors.length === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.match(legacyErrors[0]?.message ?? "", /has not advertised extension capability/);
+    legacy.sendExtensionMessage({
+      type: "extension_state_commit",
+      namespace: "test/v1",
+      ownerEpoch: "unauthorized",
+      expectedRevision: 0,
+      payload: {},
+    });
+    const unauthorizedState = await waitFor(
+      legacyMessages,
+      (message) => message.type === "extension_state_result",
+    );
+    assert.equal(unauthorizedState.type, "extension_state_result");
+    assert.equal(unauthorizedState.committed, false);
+    assert.match(unauthorizedState.reason ?? "", /has not advertised extension capability/);
+
+    owner.sendExtensionMessage({
+      type: "extension_publish",
+      namespace: "test/v1",
+      audience: "capable",
+      payload: "x".repeat(16 * 1024),
+    });
+    const oversizedDeadline = Date.now() + 3000;
+    while (Date.now() < oversizedDeadline && !ownerErrors.some((error) => /16 KiB/.test(error.message))) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(ownerErrors.some((error) => /16 KiB/.test(error.message)), true);
+    ownerErrors.length = 0;
 
     peerOnlyA.sendExtensionMessage({
       type: "extension_publish",
@@ -307,6 +347,18 @@ test("extension state compare-and-swap rejects stale and invalid revisions", () 
       reason: "Invalid expected revision",
     });
     assert.deepEqual(manager.commitState("test/v1", 1, { version: 2 }), { committed: true, revision: 2 });
+    assert.deepEqual(manager.commitState("test/v1", 2, "x".repeat(64 * 1024)), {
+      committed: false,
+      revision: 2,
+      reason: "Invalid extension state or payload exceeds 64 KiB limit",
+    });
+    const circular: { self?: unknown } = {};
+    circular.self = circular;
+    assert.deepEqual(manager.commitState("test/v1", 2, circular), {
+      committed: false,
+      revision: 2,
+      reason: "Invalid extension state or payload exceeds 64 KiB limit",
+    });
   } finally {
     rmSync(runtimeDir, { recursive: true, force: true });
   }
