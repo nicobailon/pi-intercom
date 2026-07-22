@@ -15,7 +15,9 @@ import {
   type BrokerConnectTarget,
 } from "./paths.ts";
 import { getAskTimeoutMs } from "../config.ts";
-import type { SessionInfo, Message, Attachment, BrokerMessage, SessionRegistration } from "../types.ts";
+import { EXTENSION_BUS_FEATURE } from "../types.ts";
+import type { SessionInfo, Message, Attachment, BrokerMessage, SessionRegistration, ExtensionCapability } from "../types.ts";
+import { ExtensionStateManager } from "./extension-state.ts";
 
 const INTERCOM_DIR = getIntercomDirPath();
 const LISTEN_TARGET = getBrokerListenTarget();
@@ -28,11 +30,31 @@ const REGISTRATION_TIMEOUT_MS = 1000;
 const RATE_LIMIT_CAPACITY = 240;
 const RATE_LIMIT_REFILL_PER_SECOND = 120;
 const PRESENCE_HEARTBEAT_MS = 1000;
+const MAX_EXTENSIONS_PER_SESSION = 32;
+const MAX_EXTENSION_MESSAGE_BYTES = 16 * 1024;
+const MAX_EXTENSION_STATE_BYTES = 64 * 1024;
+
+function serializedPayloadSize(payload: unknown): number | null {
+  try {
+    const json = JSON.stringify(payload);
+    return json === undefined ? null : Buffer.byteLength(json, "utf8");
+  } catch {
+    return null;
+  }
+}
 
 interface ConnectedSession {
   socket: net.Socket;
   info: SessionInfo;
   lastPresenceBroadcastAt: number;
+  ownerOrder: number;
+  extensions?: ExtensionCapability[];
+}
+
+interface NamespaceOwner {
+  sessionId: string;
+  socket: net.Socket;
+  epoch: string;
 }
 
 interface ConnectionState {
@@ -137,9 +159,13 @@ class IntercomBroker {
   private server: net.Server;
   private shutdownTimer: NodeJS.Timeout | null = null;
   private readonly askTimeoutMs = getAskTimeoutMs();
+  private namespaceOwners = new Map<string, NamespaceOwner>();
+  private nextOwnerOrder = 1;
+  private extensionStateManager: ExtensionStateManager;
 
   constructor() {
     ensureIntercomRuntimeDir(INTERCOM_DIR);
+    this.extensionStateManager = new ExtensionStateManager(INTERCOM_DIR);
     if (typeof LISTEN_TARGET === "string" && process.platform !== "win32") {
       try {
         unlinkSync(LISTEN_TARGET);
@@ -243,6 +269,7 @@ class IntercomBroker {
           this.sessions.delete(sessionId);
           this.clearAskEdgesForSession(sessionId);
           this.broadcast({ type: "session_left", sessionId }, sessionId);
+          this.recomputeNamespaceOwners();
           this.scheduleShutdownCheck();
         }
       }
@@ -350,6 +377,19 @@ class IntercomBroker {
           }
           id = clientMessage.sessionId;
         }
+        const session = clientMessage.session;
+        const extensions = session.extensions;
+        if (extensions !== undefined) {
+          if (!Array.isArray(extensions) || extensions.length > MAX_EXTENSIONS_PER_SESSION) {
+            throw new Error(`Invalid extensions field (maximum ${MAX_EXTENSIONS_PER_SESSION})`);
+          }
+          for (const extension of extensions) {
+            if (!this.validateExtensionCapability(extension)) {
+              throw new Error(`Invalid extension capability: ${JSON.stringify(extension)}`);
+            }
+          }
+        }
+
         const previous = this.sessions.get(id);
         if (!previous && this.sessions.size >= MAX_SESSIONS) {
           writeMessage(socket, { type: "error", error: "Too many registered intercom sessions" });
@@ -361,7 +401,6 @@ class IntercomBroker {
           previous.socket.end();
         }
         setId(id);
-        const session = clientMessage.session;
         const info: SessionInfo = {
           id,
           ...(session.name !== undefined ? { name: session.name } : {}),
@@ -373,15 +412,51 @@ class IntercomBroker {
           ...(session.status !== undefined ? { status: session.status } : {}),
           trustedLocal: typeof LISTEN_TARGET === "string" && process.platform !== "win32",
         };
-        this.sessions.set(id, { socket, info, lastPresenceBroadcastAt: Date.now() });
+
+        this.sessions.set(id, {
+          socket,
+          info,
+          lastPresenceBroadcastAt: Date.now(),
+          ownerOrder: previous?.ownerOrder ?? this.nextOwnerOrder++,
+          extensions,
+        });
         
         if (this.shutdownTimer) {
           clearTimeout(this.shutdownTimer);
           this.shutdownTimer = null;
         }
 
-        writeMessage(socket, { type: "registered", sessionId: id });
+        // This must be the first broker message. Older clients ignore the
+        // additive features field; newer clients use it to avoid sending
+        // extension operations to an older broker.
+        writeMessage(socket, {
+          type: "registered",
+          sessionId: id,
+          features: [EXTENSION_BUS_FEATURE],
+        });
         this.broadcast({ type: "session_joined", session: info }, id);
+
+        this.recomputeNamespaceOwners();
+
+        if (extensions) {
+          for (const ext of extensions) {
+            const owner = this.namespaceOwners.get(ext.namespace);
+            writeMessage(socket, {
+              type: "extension_owner",
+              namespace: ext.namespace,
+              ...(owner ? { ownerId: owner.sessionId, ownerEpoch: owner.epoch } : {}),
+            });
+            const state = this.extensionStateManager.loadState(ext.namespace);
+            if (state) {
+              writeMessage(socket, {
+                type: "extension_state",
+                namespace: ext.namespace,
+                revision: state.revision,
+                payload: state.payload,
+              });
+            }
+          }
+        }
         break;
       }
 
@@ -394,9 +469,49 @@ class IntercomBroker {
           this.sessions.delete(currentId);
           this.clearAskEdgesForSession(currentId);
           this.broadcast({ type: "session_left", sessionId: currentId }, currentId);
+          this.recomputeNamespaceOwners();
           this.scheduleShutdownCheck();
         }
         setId(null);
+        break;
+      }
+
+      case "extension_capabilities_update": {
+        if (!currentId) {
+          throw new Error("Received extension_capabilities_update before register");
+        }
+        const session = this.sessions.get(currentId);
+        if (!session || session.socket !== socket) {
+          throw new Error("Extension capability session not found");
+        }
+        const extensions = clientMessage.extensions;
+        if (!Array.isArray(extensions) || extensions.length > MAX_EXTENSIONS_PER_SESSION) {
+          throw new Error(`Invalid extensions field (maximum ${MAX_EXTENSIONS_PER_SESSION})`);
+        }
+        for (const extension of extensions) {
+          if (!this.validateExtensionCapability(extension)) {
+            throw new Error(`Invalid extension capability: ${JSON.stringify(extension)}`);
+          }
+        }
+        session.extensions = extensions;
+        this.recomputeNamespaceOwners();
+        for (const extension of extensions) {
+          const owner = this.namespaceOwners.get(extension.namespace);
+          writeMessage(socket, {
+            type: "extension_owner",
+            namespace: extension.namespace,
+            ...(owner ? { ownerId: owner.sessionId, ownerEpoch: owner.epoch } : {}),
+          });
+          const state = this.extensionStateManager.loadState(extension.namespace);
+          if (state) {
+            writeMessage(socket, {
+              type: "extension_state",
+              namespace: extension.namespace,
+              revision: state.revision,
+              payload: state.payload,
+            });
+          }
+        }
         break;
       }
 
@@ -557,6 +672,16 @@ class IntercomBroker {
         break;
       }
 
+      case "extension_publish": {
+        this.handleExtensionPublish(socket, currentId, clientMessage);
+        break;
+      }
+
+      case "extension_state_commit": {
+        this.handleExtensionStateCommit(socket, currentId, clientMessage);
+        break;
+      }
+
       default:
         throw new Error(`Unknown client message type: ${clientMessage.type}`);
     }
@@ -599,6 +724,355 @@ class IntercomBroker {
     for (const [id, session] of this.sessions) {
       if (id !== exclude) {
         writeMessage(session.socket, msg);
+      }
+    }
+  }
+
+  private validateExtensionCapability(cap: unknown): cap is ExtensionCapability {
+    if (typeof cap !== "object" || cap === null) {
+      return false;
+    }
+    const c = cap as Record<string, unknown>;
+    if (typeof c.namespace !== "string" || typeof c.ownerEligible !== "boolean") {
+      return false;
+    }
+    return this.validateNamespace(c.namespace);
+  }
+
+  private validateNamespace(ns: string): boolean {
+    // ^[a-z0-9][a-z0-9._/-]{0,63}$
+    if (ns.length === 0 || ns.length > 64) {
+      return false;
+    }
+    if (!/^[a-z0-9]/.test(ns)) {
+      return false;
+    }
+    if (!/^[a-z0-9][a-z0-9._/-]*$/.test(ns)) {
+      return false;
+    }
+    return true;
+  }
+
+  private recomputeNamespaceOwners(): void {
+    const namespaces = new Set(this.namespaceOwners.keys());
+    for (const session of this.sessions.values()) {
+      for (const extension of session.extensions ?? []) {
+        namespaces.add(extension.namespace);
+      }
+    }
+
+    // For each namespace, elect owner by (startedAt, sessionId).
+    for (const namespace of namespaces) {
+      const candidates: Array<{ sessionId: string; session: ConnectedSession }> = [];
+      for (const [sessionId, session] of this.sessions) {
+        if (session.extensions) {
+          const hasNamespace = session.extensions.some(
+            (ext) => ext.namespace === namespace && ext.ownerEligible
+          );
+          if (hasNamespace) {
+            candidates.push({ sessionId, session });
+          }
+        }
+      }
+
+      if (candidates.length === 0) {
+        if (this.namespaceOwners.delete(namespace)) {
+          for (const session of this.sessions.values()) {
+            const isCapable = session.extensions?.some((extension) => extension.namespace === namespace);
+            if (isCapable) {
+              writeMessage(session.socket, { type: "extension_owner", namespace });
+            }
+          }
+        }
+        continue;
+      }
+
+      // Use broker-owned registration order so clients cannot seize authority
+      // by backdating their advertised session start time. Stable-ID socket
+      // replacements preserve the original order.
+      candidates.sort((a, b) => {
+        if (a.session.ownerOrder !== b.session.ownerOrder) {
+          return a.session.ownerOrder - b.session.ownerOrder;
+        }
+        return a.sessionId.localeCompare(b.sessionId);
+      });
+
+      const winner = candidates[0];
+      const existing = this.namespaceOwners.get(namespace);
+
+      // Check if owner changed or socket changed
+      const ownerChanged = !existing || existing.sessionId !== winner.sessionId;
+      const socketChanged = existing && existing.socket !== winner.session.socket;
+
+      if (ownerChanged || socketChanged) {
+        // Generate new epoch
+        const epoch = randomUUID();
+        this.namespaceOwners.set(namespace, {
+          sessionId: winner.sessionId,
+          socket: winner.session.socket,
+          epoch,
+        });
+
+        // Broadcast owner change to all capable sessions
+        for (const session of this.sessions.values()) {
+          if (session.extensions?.length) {
+            const isCapable = session.extensions.some((ext) => ext.namespace === namespace);
+            if (isCapable) {
+              writeMessage(session.socket, {
+                type: "extension_owner",
+                namespace,
+                ownerId: winner.sessionId,
+                ownerEpoch: epoch,
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  private handleExtensionPublish(
+    socket: net.Socket,
+    currentId: string | null,
+    msg: Record<string, unknown>
+  ): void {
+    if (!currentId) {
+      throw new Error("Received extension_publish before register");
+    }
+
+    const session = this.sessions.get(currentId);
+    if (!session || session.socket !== socket) {
+      writeMessage(socket, { type: "error", error: "Session not found" });
+      return;
+    }
+
+    if (!session.extensions?.length) {
+      writeMessage(socket, { type: "error", error: "Session has not advertised extension capability" });
+      return;
+    }
+
+    const namespace = msg.namespace;
+    const audience = msg.audience;
+    const ownerOnly = msg.ownerOnly === true;
+    const ownerEpoch = msg.ownerEpoch;
+    const payload = msg.payload;
+
+    if (typeof namespace !== "string" || !this.validateNamespace(namespace)) {
+      writeMessage(socket, { type: "error", error: "Invalid namespace" });
+      return;
+    }
+
+    if (audience !== "owner" && audience !== "capable") {
+      writeMessage(socket, { type: "error", error: "Invalid audience" });
+      return;
+    }
+
+    const payloadSize = serializedPayloadSize(payload);
+    if (payloadSize === null || payloadSize > MAX_EXTENSION_MESSAGE_BYTES) {
+      writeMessage(socket, { type: "error", error: "Invalid extension payload or payload exceeds 16 KiB limit" });
+      return;
+    }
+
+    // Verify sender has capability for this namespace
+    const hasCapability = session.extensions?.some((ext) => ext.namespace === namespace);
+    if (!hasCapability) {
+      writeMessage(socket, { type: "error", error: "Sender does not have capability for this namespace" });
+      return;
+    }
+
+    const owner = this.namespaceOwners.get(namespace);
+    if ((audience === "owner" || ownerOnly) && !owner) {
+      writeMessage(socket, { type: "error", error: "No owner for this namespace" });
+      return;
+    }
+
+    // For owner-only messages, validate exact socket and epoch
+    if (ownerOnly && owner) {
+      if (typeof ownerEpoch !== "string") {
+        writeMessage(socket, { type: "error", error: "ownerEpoch required for owner-only messages" });
+        return;
+      }
+      if (currentId !== owner.sessionId || socket !== owner.socket || ownerEpoch !== owner.epoch) {
+        writeMessage(socket, { type: "error", error: "Owner validation failed" });
+        return;
+      }
+    }
+
+    // Route message to appropriate audience
+    for (const [recipientId, recipientSession] of this.sessions) {
+      if (!recipientSession.extensions?.length) {
+        continue;
+      }
+
+      const isCapable = recipientSession.extensions.some((ext) => ext.namespace === namespace);
+      if (!isCapable) {
+        continue;
+      }
+
+      const shouldReceive =
+        audience === "capable" ||
+        (audience === "owner" && owner !== undefined &&
+          recipientId === owner.sessionId &&
+          recipientSession.socket === owner.socket);
+
+      if (shouldReceive) {
+        writeMessage(recipientSession.socket, {
+          type: "extension_message",
+          namespace,
+          fromSessionId: currentId,
+          ...(owner ? { ownerId: owner.sessionId, ownerEpoch: owner.epoch } : {}),
+          payload,
+        });
+      }
+    }
+  }
+
+  private handleExtensionStateCommit(
+    socket: net.Socket,
+    currentId: string | null,
+    msg: Record<string, unknown>
+  ): void {
+    if (!currentId) {
+      throw new Error("Received extension_state_commit before register");
+    }
+
+    const session = this.sessions.get(currentId);
+    if (!session || session.socket !== socket) {
+      writeMessage(socket, {
+        type: "extension_state_result",
+        namespace: String(msg.namespace || ""),
+        committed: false,
+        revision: 0,
+        reason: "Session not found",
+      });
+      return;
+    }
+
+    if (!session.extensions?.length) {
+      writeMessage(socket, {
+        type: "extension_state_result",
+        namespace: String(msg.namespace || ""),
+        committed: false,
+        revision: 0,
+        reason: "Session has not advertised extension capability",
+      });
+      return;
+    }
+
+    const namespace = msg.namespace;
+    const ownerEpoch = msg.ownerEpoch;
+    const expectedRevision = msg.expectedRevision;
+    const payload = msg.payload;
+
+    if (typeof namespace !== "string" || !this.validateNamespace(namespace)) {
+      writeMessage(socket, {
+        type: "extension_state_result",
+        namespace: String(namespace),
+        committed: false,
+        revision: 0,
+        reason: "Invalid namespace",
+      });
+      return;
+    }
+
+    if (typeof ownerEpoch !== "string") {
+      writeMessage(socket, {
+        type: "extension_state_result",
+        namespace,
+        committed: false,
+        revision: this.extensionStateManager.getCurrentRevision(namespace),
+        reason: "Invalid ownerEpoch",
+      });
+      return;
+    }
+
+    if (typeof expectedRevision !== "number" || !Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+      writeMessage(socket, {
+        type: "extension_state_result",
+        namespace,
+        committed: false,
+        revision: this.extensionStateManager.getCurrentRevision(namespace),
+        reason: "Invalid expectedRevision",
+      });
+      return;
+    }
+
+    const payloadSize = serializedPayloadSize(payload);
+    if (payloadSize === null || payloadSize > MAX_EXTENSION_STATE_BYTES) {
+      writeMessage(socket, {
+        type: "extension_state_result",
+        namespace,
+        committed: false,
+        revision: this.extensionStateManager.getCurrentRevision(namespace),
+        reason: "Invalid extension state or payload exceeds 64 KiB limit",
+      });
+      return;
+    }
+
+    // Verify sender has capability for this namespace
+    const hasCapability = session.extensions?.some((ext) => ext.namespace === namespace);
+    if (!hasCapability) {
+      writeMessage(socket, {
+        type: "extension_state_result",
+        namespace,
+        committed: false,
+        revision: this.extensionStateManager.getCurrentRevision(namespace),
+        reason: "Sender does not have capability for this namespace",
+      });
+      return;
+    }
+
+    const owner = this.namespaceOwners.get(namespace);
+    if (!owner) {
+      writeMessage(socket, {
+        type: "extension_state_result",
+        namespace,
+        committed: false,
+        revision: this.extensionStateManager.getCurrentRevision(namespace),
+        reason: "No owner for this namespace",
+      });
+      return;
+    }
+
+    // Validate owner, socket, and epoch
+    if (currentId !== owner.sessionId || socket !== owner.socket || ownerEpoch !== owner.epoch) {
+      writeMessage(socket, {
+        type: "extension_state_result",
+        namespace,
+        committed: false,
+        revision: this.extensionStateManager.getCurrentRevision(namespace),
+        reason: "Owner validation failed",
+      });
+      return;
+    }
+
+    const result = this.extensionStateManager.commitState(namespace, expectedRevision, payload);
+
+    // Send result to committer
+    writeMessage(socket, {
+      type: "extension_state_result",
+      namespace,
+      committed: result.committed,
+      revision: result.revision,
+      reason: result.reason,
+    });
+
+    // If committed, broadcast new state to all capable sessions
+    if (result.committed) {
+      for (const recipientSession of this.sessions.values()) {
+        if (!recipientSession.extensions?.length) {
+          continue;
+        }
+
+        const isCapable = recipientSession.extensions.some((ext) => ext.namespace === namespace);
+        if (isCapable) {
+          writeMessage(recipientSession.socket, {
+            type: "extension_state",
+            namespace,
+            revision: result.revision,
+            payload,
+          });
+        }
       }
     }
   }

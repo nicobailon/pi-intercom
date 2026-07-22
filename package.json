@@ -8,13 +8,14 @@
     "index.ts",
     "types.ts",
     "config.ts",
+    "extension-api.ts",
     "reply-tracker.ts",
     "broker/**/*.ts",
     "ui/**/*.ts",
     "skills/**/*"
   ],
   "scripts": {
-    "test": "tsx --test broker/client.test.ts broker/framing.test.ts broker/paths.test.ts broker/spawn.test.ts config.test.ts reply-tracker.test.ts intercom.integration.test.ts test/inline-message.test.ts test/overlay-width.test.ts"
+    "test": "tsx --test broker/client.test.ts broker/extension.test.ts broker/framing.test.ts broker/paths.test.ts broker/spawn.test.ts config.test.ts reply-tracker.test.ts intercom.integration.test.ts test/inline-message.test.ts test/overlay-width.test.ts"
   },
   "keywords": [
     "pi-package"

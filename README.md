@@ -398,6 +398,43 @@ Pi-intercom publishes live session status automatically. Sessions register as `i
 
 By default, runtime state and config live under `~/.pi/agent/intercom`. If Pi is launched with `PI_CODING_AGENT_DIR`, pi-intercom uses `$PI_CODING_AGENT_DIR/intercom` instead, including `config.json`, broker PID/lock files, sockets, and launcher state.
 
+## Extension channels
+
+Other Pi extensions can use intercom's broker for bounded, non-conversational coordination. Extension-channel traffic never calls `pi.sendMessage()`, never enters a session transcript, and never starts an agent turn.
+
+Register during `session_start` so intercom includes the capability in its deferred broker registration:
+
+```typescript
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+  INTERCOM_EXTENSION_REGISTER_EVENT,
+  type IntercomExtensionChannel,
+} from "pi-intercom/extension-api.ts";
+
+export default function (pi: ExtensionAPI) {
+  let channel: IntercomExtensionChannel | undefined;
+
+  pi.on("session_start", () => {
+    pi.events.emit(INTERCOM_EXTENSION_REGISTER_EVENT, {
+      namespace: "example/v1",
+      ownerEligible: true,
+      onReady: (value: IntercomExtensionChannel) => { channel = value; },
+      onEvent: (event: unknown) => { /* owner, state, peer, or payload event */ },
+    });
+  });
+}
+```
+
+The broker:
+
+- advertises `extension-bus-v1` through feature negotiation
+- routes payloads only to sessions advertising the same namespace
+- elects one owner per namespace and changes its epoch after socket replacement
+- rejects stale owner-only writes
+- stores at most 64 KiB of opaque, revisioned state per namespace
+
+`channel.publish()` accepts payloads up to 16 KiB. A `capable` broadcast includes the sender, so consumers must not blindly republish messages they receive. `channel.commitState()` uses compare-and-swap against the last observed revision. Capabilities registered after the broker connection is established are synchronized without reconnecting. Clients connected to an older broker see the channel as unsupported and do not send extension operations.
+
 ## How It Works
 
 ```mermaid

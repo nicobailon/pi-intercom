@@ -3,7 +3,15 @@ import net from "net";
 import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.ts";
 import { getBrokerConnectTarget, type BrokerConnectTarget } from "./paths.ts";
-import type { SessionInfo, Message, Attachment, SessionRegistration } from "../types.ts";
+import { EXTENSION_BUS_FEATURE } from "../types.ts";
+import type {
+  Attachment,
+  BrokerMessage,
+  ClientMessage,
+  Message,
+  SessionInfo,
+  SessionRegistration,
+} from "../types.ts";
 
 interface SendOptions {
   text: string;
@@ -119,6 +127,7 @@ function isSessionInfo(value: unknown): value is SessionInfo {
 export class IntercomClient extends EventEmitter {
   private socket: net.Socket | null = null;
   private _sessionId: string | null = null;
+  private _features = new Set<string>();
   private pendingSends = new Map<string, { resolve: (r: SendResult) => void; reject: (e: Error) => void }>();
   private pendingLists = new Map<string, { resolve: (sessions: SessionInfo[]) => void; reject: (e: Error) => void }>();
   private disconnecting = false;
@@ -137,6 +146,10 @@ export class IntercomClient extends EventEmitter {
 
   get sessionId(): string | null {
     return this._sessionId;
+  }
+
+  supportsFeature(feature: string): boolean {
+    return this._features.has(feature);
   }
 
   isConnected(): boolean {
@@ -223,6 +236,7 @@ export class IntercomClient extends EventEmitter {
           this.socket = null;
         }
         this._sessionId = null;
+        this._features.clear();
         this.disconnectError = null;
         if (connectionEstablished && !wasDisconnecting) {
           this.emit("disconnected", disconnectError);
@@ -313,8 +327,22 @@ export class IntercomClient extends EventEmitter {
           throw new Error("Received duplicate registered message");
         }
 
+        if (
+          brokerMessage.features !== undefined
+          && (!Array.isArray(brokerMessage.features) || !brokerMessage.features.every((feature) => typeof feature === "string"))
+        ) {
+          throw new Error("Invalid registered features");
+        }
+
         this._sessionId = brokerMessage.sessionId;
-        this.emit("_registered", { type: "registered", sessionId: brokerMessage.sessionId });
+        this._features = new Set((brokerMessage.features as string[] | undefined) ?? []);
+        const registered: BrokerMessage = {
+          type: "registered",
+          sessionId: brokerMessage.sessionId,
+          ...(this._features.size > 0 ? { features: [...this._features] } : {}),
+        };
+        this.emit("broker_message", registered);
+        this.emit("_registered", registered);
         break;
       }
 
@@ -384,6 +412,8 @@ export class IntercomClient extends EventEmitter {
           throw new Error("Invalid session_joined message");
         }
 
+        const message: BrokerMessage = { type: "session_joined", session: brokerMessage.session };
+        this.emit("broker_message", message);
         this.emit("session_joined", brokerMessage.session);
         break;
       }
@@ -393,6 +423,8 @@ export class IntercomClient extends EventEmitter {
           throw new Error("Invalid session_left message");
         }
 
+        const message: BrokerMessage = { type: "session_left", sessionId: brokerMessage.sessionId };
+        this.emit("broker_message", message);
         this.emit("session_left", brokerMessage.sessionId);
         break;
       }
@@ -402,6 +434,8 @@ export class IntercomClient extends EventEmitter {
           throw new Error("Invalid presence_update message");
         }
 
+        const message: BrokerMessage = { type: "presence_update", session: brokerMessage.session };
+        this.emit("broker_message", message);
         this.emit("presence_update", brokerMessage.session);
         break;
       }
@@ -415,6 +449,67 @@ export class IntercomClient extends EventEmitter {
           throw new Error(brokerMessage.error);
         }
         this.emit("error", new Error(brokerMessage.error));
+        break;
+      }
+
+      case "extension_owner": {
+        const hasOwnerId = typeof brokerMessage.ownerId === "string";
+        const hasOwnerEpoch = typeof brokerMessage.ownerEpoch === "string";
+        if (
+          typeof brokerMessage.namespace !== "string"
+          || hasOwnerId !== hasOwnerEpoch
+          || (brokerMessage.ownerId !== undefined && !hasOwnerId)
+          || (brokerMessage.ownerEpoch !== undefined && !hasOwnerEpoch)
+        ) {
+          throw new Error("Invalid extension_owner message");
+        }
+        this.emit("broker_message", brokerMessage as BrokerMessage);
+        this.emit("extension_owner", brokerMessage);
+        break;
+      }
+
+      case "extension_message": {
+        const hasOwnerId = typeof brokerMessage.ownerId === "string";
+        const hasOwnerEpoch = typeof brokerMessage.ownerEpoch === "string";
+        if (
+          typeof brokerMessage.namespace !== "string"
+          || typeof brokerMessage.fromSessionId !== "string"
+          || hasOwnerId !== hasOwnerEpoch
+          || (brokerMessage.ownerId !== undefined && !hasOwnerId)
+          || (brokerMessage.ownerEpoch !== undefined && !hasOwnerEpoch)
+        ) {
+          throw new Error("Invalid extension_message");
+        }
+        this.emit("broker_message", brokerMessage as BrokerMessage);
+        this.emit("extension_message", brokerMessage);
+        break;
+      }
+
+      case "extension_state": {
+        if (
+          typeof brokerMessage.namespace !== "string"
+          || !Number.isSafeInteger(brokerMessage.revision)
+          || Number(brokerMessage.revision) < 0
+        ) {
+          throw new Error("Invalid extension_state");
+        }
+        this.emit("broker_message", brokerMessage as BrokerMessage);
+        this.emit("extension_state", brokerMessage);
+        break;
+      }
+
+      case "extension_state_result": {
+        if (
+          typeof brokerMessage.namespace !== "string"
+          || typeof brokerMessage.committed !== "boolean"
+          || !Number.isSafeInteger(brokerMessage.revision)
+          || Number(brokerMessage.revision) < 0
+          || (brokerMessage.reason !== undefined && typeof brokerMessage.reason !== "string")
+        ) {
+          throw new Error("Invalid extension_state_result");
+        }
+        this.emit("broker_message", brokerMessage as BrokerMessage);
+        this.emit("extension_state_result", brokerMessage);
         break;
       }
 
@@ -464,6 +559,12 @@ export class IntercomClient extends EventEmitter {
         socket.destroy();
       }
     });
+  }
+
+  updateExtensionCapabilities(extensions: SessionRegistration["extensions"]): void {
+    if (!this.supportsFeature(EXTENSION_BUS_FEATURE)) return;
+    const socket = this.requireActiveSocket();
+    writeMessage(socket, { type: "extension_capabilities_update", extensions: extensions ?? [] });
   }
 
   listSessions(): Promise<SessionInfo[]> {
@@ -576,5 +677,18 @@ export class IntercomClient extends EventEmitter {
     }
 
     writeMessage(socket, { type: "presence", ...updates });
+  }
+
+  sendExtensionMessage(message: Extract<ClientMessage, { type: "extension_publish" | "extension_state_commit" }>): void {
+    if (!this.supportsFeature(EXTENSION_BUS_FEATURE)) {
+      throw new Error(`Connected broker does not support ${EXTENSION_BUS_FEATURE}`);
+    }
+    const socket = this.requireActiveSocket();
+    writeMessage(socket, message);
+  }
+
+  onBrokerMessage(handler: (message: BrokerMessage) => void): () => void {
+    this.on("broker_message", handler);
+    return () => this.off("broker_message", handler);
   }
 }
