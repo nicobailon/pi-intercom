@@ -888,7 +888,9 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
           emitLocalExtensionEvent(message.namespace, {
             type: "message",
             fromSessionId: message.fromSessionId,
-            owner: { sessionId: message.ownerId, epoch: message.ownerEpoch },
+            ...(message.ownerId && message.ownerEpoch
+              ? { owner: { sessionId: message.ownerId, epoch: message.ownerEpoch } }
+              : {}),
             payload: message.payload,
           });
           break;

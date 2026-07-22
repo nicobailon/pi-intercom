@@ -466,11 +466,14 @@ export class IntercomClient extends EventEmitter {
       }
 
       case "extension_message": {
+        const hasOwnerId = typeof brokerMessage.ownerId === "string";
+        const hasOwnerEpoch = typeof brokerMessage.ownerEpoch === "string";
         if (
           typeof brokerMessage.namespace !== "string"
           || typeof brokerMessage.fromSessionId !== "string"
-          || typeof brokerMessage.ownerId !== "string"
-          || typeof brokerMessage.ownerEpoch !== "string"
+          || hasOwnerId !== hasOwnerEpoch
+          || (brokerMessage.ownerId !== undefined && !hasOwnerId)
+          || (brokerMessage.ownerEpoch !== undefined && !hasOwnerEpoch)
         ) {
           throw new Error("Invalid extension_message");
         }

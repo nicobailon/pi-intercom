@@ -43,6 +43,12 @@ test("malformed extension broker messages are rejected", () => {
     () => (client as any).handleBrokerMessage({ type: "extension_state_result", namespace: "test/v1", committed: "yes", revision: 1 }),
     /Invalid extension_state_result/,
   );
+  assert.doesNotThrow(() => (client as any).handleBrokerMessage({
+    type: "extension_message",
+    namespace: "test/v1",
+    fromSessionId: "session-2",
+    payload: { peerOnly: true },
+  }));
 });
 
 test("cancelAsk ignores synchronous socket write failures", () => {

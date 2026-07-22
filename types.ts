@@ -79,8 +79,8 @@ export type BrokerMessage =
       type: "extension_message";
       namespace: string;
       fromSessionId: string;
-      ownerId: string;
-      ownerEpoch: string;
+      ownerId?: string;
+      ownerEpoch?: string;
       payload: unknown;
     }
   | {

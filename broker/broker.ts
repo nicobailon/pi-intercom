@@ -876,13 +876,13 @@ class IntercomBroker {
     }
 
     const owner = this.namespaceOwners.get(namespace);
-    if (!owner) {
+    if ((audience === "owner" || ownerOnly) && !owner) {
       writeMessage(socket, { type: "error", error: "No owner for this namespace" });
       return;
     }
 
     // For owner-only messages, validate exact socket and epoch
-    if (ownerOnly) {
+    if (ownerOnly && owner) {
       if (typeof ownerEpoch !== "string") {
         writeMessage(socket, { type: "error", error: "ownerEpoch required for owner-only messages" });
         return;
@@ -906,7 +906,7 @@ class IntercomBroker {
 
       const shouldReceive =
         audience === "capable" ||
-        (audience === "owner" &&
+        (audience === "owner" && owner !== undefined &&
           recipientId === owner.sessionId &&
           recipientSession.socket === owner.socket);
 
@@ -915,8 +915,7 @@ class IntercomBroker {
           type: "extension_message",
           namespace,
           fromSessionId: currentId,
-          ownerId: owner.sessionId,
-          ownerEpoch: owner.epoch,
+          ...(owner ? { ownerId: owner.sessionId, ownerEpoch: owner.epoch } : {}),
           payload,
         });
       }

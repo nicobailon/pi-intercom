@@ -103,21 +103,27 @@ test("extension bus negotiates, routes, elects an owner, and persists state", { 
     const peer = new IntercomClient();
     const legacy = new IntercomClient();
     const late = new IntercomClient();
-    clients.push(owner, peer, legacy, late);
+    const peerOnlyA = new IntercomClient();
+    const peerOnlyB = new IntercomClient();
+    clients.push(owner, peer, legacy, late, peerOnlyA, peerOnlyB);
 
     const ownerMessages: BrokerMessage[] = [];
     const peerMessages: BrokerMessage[] = [];
     const legacyMessages: BrokerMessage[] = [];
     const lateMessages: BrokerMessage[] = [];
+    const peerOnlyBMessages: BrokerMessage[] = [];
     const ownerErrors: Error[] = [];
     owner.onBrokerMessage((message) => ownerMessages.push(message));
     peer.onBrokerMessage((message) => peerMessages.push(message));
     legacy.onBrokerMessage((message) => legacyMessages.push(message));
     late.onBrokerMessage((message) => lateMessages.push(message));
+    peerOnlyB.onBrokerMessage((message) => peerOnlyBMessages.push(message));
     owner.on("error", (error) => ownerErrors.push(error));
     peer.on("error", () => {});
     legacy.on("error", () => {});
     late.on("error", () => {});
+    peerOnlyA.on("error", () => {});
+    peerOnlyB.on("error", () => {});
 
     const now = Date.now();
     await owner.connect(registration("owner", now - 1000, true), "owner-id");
@@ -133,6 +139,14 @@ test("extension bus negotiates, routes, elects an owner, and persists state", { 
     await peer.connect(registration("peer", now, false), "peer-id");
     await legacy.connect(registration("legacy", now), "legacy-id");
     await late.connect(registration("late", now + 1), "late-id");
+    await peerOnlyA.connect({
+      ...registration("peer-only-a", now + 2),
+      extensions: [{ namespace: "peer-only/v1", ownerEligible: false }],
+    }, "peer-only-a-id");
+    await peerOnlyB.connect({
+      ...registration("peer-only-b", now + 3),
+      extensions: [{ namespace: "peer-only/v1", ownerEligible: false }],
+    }, "peer-only-b-id");
 
     assert.equal(owner.supportsFeature("extension-bus-v1"), true);
     assert.equal(legacy.supportsFeature("extension-bus-v1"), true, "new broker advertises support even to clients without capabilities");
@@ -149,6 +163,18 @@ test("extension bus negotiates, routes, elects an owner, and persists state", { 
     const lateOwnerEvent = await waitFor(lateMessages, (message) => message.type === "extension_owner");
     assert.equal(lateOwnerEvent.type, "extension_owner");
     assert.equal(lateOwnerEvent.ownerId, "owner-id");
+
+    peerOnlyA.sendExtensionMessage({
+      type: "extension_publish",
+      namespace: "peer-only/v1",
+      audience: "capable",
+      payload: { kind: "peer-broadcast" },
+    });
+    const peerBroadcast = await waitFor(peerOnlyBMessages, (message) => message.type === "extension_message");
+    assert.equal(peerBroadcast.type, "extension_message");
+    assert.equal(peerBroadcast.ownerId, undefined);
+    assert.equal(peerBroadcast.ownerEpoch, undefined);
+    assert.deepEqual(peerBroadcast.payload, { kind: "peer-broadcast" });
 
     owner.sendExtensionMessage({
       type: "extension_publish",
