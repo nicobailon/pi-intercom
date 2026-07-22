@@ -27,6 +27,14 @@ test("validated session lifecycle messages reach broker-message subscribers", ()
   ]);
 });
 
+test("registered feature negotiation rejects non-string feature entries", () => {
+  const client = new IntercomClient();
+  assert.throws(
+    () => (client as any).handleBrokerMessage({ type: "registered", sessionId: "session-1", features: ["valid", 123] }),
+    /Invalid registered features/,
+  );
+});
+
 test("malformed extension broker messages are rejected", () => {
   const client = new IntercomClient();
   (client as any)._sessionId = "session-1";

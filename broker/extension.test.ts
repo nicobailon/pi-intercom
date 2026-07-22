@@ -177,6 +177,25 @@ test("extension bus negotiates, routes, elects an owner, and persists state", { 
     assert.equal(peerBroadcast.ownerEpoch, undefined);
     assert.deepEqual(peerBroadcast.payload, { kind: "peer-broadcast" });
 
+    peer.sendExtensionMessage({
+      type: "extension_publish",
+      namespace: "test/v1",
+      audience: "owner",
+      payload: { kind: "owner-target" },
+    });
+    const ownerTarget = await waitFor(
+      ownerMessages,
+      (message) => message.type === "extension_message"
+        && (message.payload as { kind?: string }).kind === "owner-target",
+    );
+    assert.equal(ownerTarget.type, "extension_message");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(
+      peerMessages.some((message) => message.type === "extension_message"
+        && (message.payload as { kind?: string }).kind === "owner-target"),
+      false,
+    );
+
     owner.sendExtensionMessage({
       type: "extension_publish",
       namespace: "test/v1",
@@ -208,6 +227,20 @@ test("extension bus negotiates, routes, elects an owner, and persists state", { 
     const state = await waitFor(peerMessages, (message) => message.type === "extension_state");
     assert.equal(state.type, "extension_state");
     assert.deepEqual(state.payload, { groups: ["alpha"] });
+
+    owner.sendExtensionMessage({
+      type: "extension_publish",
+      namespace: "test/v1",
+      audience: "capable",
+      ownerOnly: true,
+      payload: {},
+    });
+    const missingEpochDeadline = Date.now() + 3000;
+    while (Date.now() < missingEpochDeadline && !ownerErrors.some((error) => /ownerEpoch required/.test(error.message))) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(ownerErrors.some((error) => /ownerEpoch required/.test(error.message)), true);
+    ownerErrors.length = 0;
 
     owner.sendExtensionMessage({
       type: "extension_publish",
@@ -254,6 +287,28 @@ test("extension bus negotiates, routes, elects an owner, and persists state", { 
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
     rmSync(agentDir, { recursive: true, force: true });
+  }
+});
+
+test("extension state compare-and-swap rejects stale and invalid revisions", () => {
+  const runtimeDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-state-cas-"));
+  try {
+    const manager = new ExtensionStateManager(runtimeDir);
+    assert.deepEqual(manager.commitState("test/v1", 0, { version: 1 }), { committed: true, revision: 1 });
+    assert.deepEqual(manager.commitState("test/v1", 0, { version: 2 }), {
+      committed: false,
+      revision: 1,
+      reason: "Revision mismatch",
+      payload: { version: 1 },
+    });
+    assert.deepEqual(manager.commitState("test/v1", -1, { version: 2 }), {
+      committed: false,
+      revision: 1,
+      reason: "Invalid expected revision",
+    });
+    assert.deepEqual(manager.commitState("test/v1", 1, { version: 2 }), { committed: true, revision: 2 });
+  } finally {
+    rmSync(runtimeDir, { recursive: true, force: true });
   }
 });
 
