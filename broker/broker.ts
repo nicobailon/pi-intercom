@@ -47,6 +47,7 @@ interface ConnectedSession {
   socket: net.Socket;
   info: SessionInfo;
   lastPresenceBroadcastAt: number;
+  ownerOrder: number;
   extensions?: ExtensionCapability[];
 }
 
@@ -159,6 +160,7 @@ class IntercomBroker {
   private shutdownTimer: NodeJS.Timeout | null = null;
   private readonly askTimeoutMs = getAskTimeoutMs();
   private namespaceOwners = new Map<string, NamespaceOwner>();
+  private nextOwnerOrder = 1;
   private extensionStateManager: ExtensionStateManager;
 
   constructor() {
@@ -415,6 +417,7 @@ class IntercomBroker {
           socket,
           info,
           lastPresenceBroadcastAt: Date.now(),
+          ownerOrder: previous?.ownerOrder ?? this.nextOwnerOrder++,
           extensions,
         });
         
@@ -784,10 +787,12 @@ class IntercomBroker {
         continue;
       }
 
-      // Sort by startedAt, then sessionId
+      // Use broker-owned registration order so clients cannot seize authority
+      // by backdating their advertised session start time. Stable-ID socket
+      // replacements preserve the original order.
       candidates.sort((a, b) => {
-        if (a.session.info.startedAt !== b.session.info.startedAt) {
-          return a.session.info.startedAt - b.session.info.startedAt;
+        if (a.session.ownerOrder !== b.session.ownerOrder) {
+          return a.session.ownerOrder - b.session.ownerOrder;
         }
         return a.sessionId.localeCompare(b.sessionId);
       });

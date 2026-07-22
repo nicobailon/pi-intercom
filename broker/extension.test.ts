@@ -138,7 +138,7 @@ test("extension bus negotiates, routes, elects an owner, and persists state", { 
 
     await peer.connect(registration("peer", now, false), "peer-id");
     await legacy.connect(registration("legacy", now), "legacy-id");
-    await late.connect(registration("late", now + 1), "late-id");
+    await late.connect(registration("late", 0), "late-id");
     await peerOnlyA.connect({
       ...registration("peer-only-a", now + 2),
       extensions: [{ namespace: "peer-only/v1", ownerEligible: false }],
@@ -159,10 +159,11 @@ test("extension bus negotiates, routes, elects an owner, and persists state", { 
     assert.equal(peerOwnerEvent.type, "extension_owner");
     assert.equal(peerOwnerEvent.ownerId, "owner-id");
 
-    late.updateExtensionCapabilities([{ namespace: "test/v1", ownerEligible: false }]);
+    late.updateExtensionCapabilities([{ namespace: "test/v1", ownerEligible: true }]);
     const lateOwnerEvent = await waitFor(lateMessages, (message) => message.type === "extension_owner");
     assert.equal(lateOwnerEvent.type, "extension_owner");
-    assert.equal(lateOwnerEvent.ownerId, "owner-id");
+    assert.equal(lateOwnerEvent.ownerId, "owner-id", "backdated client must not seize namespace ownership");
+    late.updateExtensionCapabilities([{ namespace: "test/v1", ownerEligible: false }]);
 
     peerOnlyA.sendExtensionMessage({
       type: "extension_publish",
