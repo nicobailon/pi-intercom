@@ -18,6 +18,7 @@ import { getAskTimeoutMs } from "../config.ts";
 import { EXTENSION_BUS_FEATURE } from "../types.ts";
 import type { SessionInfo, Message, Attachment, BrokerMessage, SessionRegistration, ExtensionCapability } from "../types.ts";
 import { ExtensionStateManager } from "./extension-state.ts";
+import { assertNoLiveBroker } from "./runtime-claim.ts";
 
 const INTERCOM_DIR = getIntercomDirPath();
 const LISTEN_TARGET = getBrokerListenTarget();
@@ -165,6 +166,7 @@ class IntercomBroker {
 
   constructor() {
     ensureIntercomRuntimeDir(INTERCOM_DIR);
+    assertNoLiveBroker(PID_PATH);
     this.extensionStateManager = new ExtensionStateManager(INTERCOM_DIR);
     if (typeof LISTEN_TARGET === "string" && process.platform !== "win32") {
       try {
