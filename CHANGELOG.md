@@ -5,6 +5,7 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 ## [Unreleased]
 
 ### Changed
+- Documented `PI_INTERCOM_ASK_TIMEOUT_MS` for configurable ask/supervisor timeouts. Thanks to wiansapu for issue #14.
 - Updated Pi runtime peer metadata and tool schemas for the `@earendil-works` package scope and Pi-bundled `typebox`/`pi-ai` packages.
 - Centralized pi-intercom runtime and config paths under `PI_CODING_AGENT_DIR` when set, defaulting to `~/.pi/agent`.
 - Hardened default broker auto-spawn to launch the resolved bundled `tsx` CLI through the current Node executable instead of resolving `npx` through `PATH`; custom `brokerCommand`/`brokerArgs` remain available as advanced trusted config.
