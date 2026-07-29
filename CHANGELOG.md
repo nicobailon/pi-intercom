@@ -7,6 +7,8 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 ### Added
 - Added opt-in restart-stable intercom session IDs via `PI_INTERCOM_STABLE_ID` or `stableId` in `config.json`. Thanks to iRonin for issue #39.
 - Added `/intercom-id` to insert a stable handoff snippet for the current session into the editor. Thanks to dataforxyz for PR #60.
+- Added `intercom({ action: "list-cwd" })` to list peers scoped to the same working directory. Thanks to iRonin for PR #58.
+- Added live context-window usage to session presence and list output. Thanks to iRonin for PR #59.
 
 ## [0.7.0] - 2026-07-29
 
