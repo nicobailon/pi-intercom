@@ -9,6 +9,7 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 - Added `/intercom-id` to insert a stable handoff snippet for the current session into the editor. Thanks to dataforxyz for PR #60.
 - Added `intercom({ action: "list-cwd" })` to list peers scoped to the same working directory. Thanks to iRonin for PR #58.
 - Added live context-window usage to session presence and list output. Thanks to iRonin for PR #59.
+- Added a silent namespaced extension bus for non-conversational extension coordination. Thanks to Kieran Bond for PR #69.
 
 ## [0.7.0] - 2026-07-29
 

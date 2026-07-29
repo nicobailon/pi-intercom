@@ -1,3 +1,5 @@
+export const EXTENSION_BUS_FEATURE = "extension-bus-v1";
+
 export interface SessionInfo {
   id: string;
   name?: string;
@@ -37,23 +39,41 @@ export interface Attachment {
   language?: string;
 }
 
-export type SessionRegistration = Omit<SessionInfo, "id" | "peerUid" | "trustedLocal">;
+export interface ExtensionCapability {
+  namespace: string;
+  ownerEligible: boolean;
+}
+
+export type SessionRegistration = Omit<SessionInfo, "id" | "peerUid" | "trustedLocal"> & {
+  extensions?: ExtensionCapability[];
+};
 
 export type ClientMessage =
   | { type: "register"; session: SessionRegistration; sessionId?: string; stateId?: string }
   | { type: "unregister" }
+  | { type: "extension_capabilities_update"; extensions: ExtensionCapability[] }
   | { type: "list"; requestId: string }
   | { type: "send"; to: string; message: Message }
   | { type: "cancel_ask"; messageId: string }
-  // presence carries optional context-usage fields so peers see each session's
-  // live context% without a separate query. contextPct/contextTokens/contextWindow
-  // accept null as an explicit CLEAR signal (post-compaction the value is unknown
-  // until the next assistant response); the broker deletes the field rather than
-  // carrying the stale value forward.
-  | { type: "presence"; name?: string; status?: string; model?: string; contextPct?: number | null; contextTokens?: number | null; contextWindow?: number | null };
+  | { type: "presence"; name?: string; status?: string; model?: string; contextPct?: number | null; contextTokens?: number | null; contextWindow?: number | null }
+  | {
+      type: "extension_publish";
+      namespace: string;
+      audience: "owner" | "capable";
+      ownerEpoch?: string;
+      ownerOnly?: boolean;
+      payload: unknown;
+    }
+  | {
+      type: "extension_state_commit";
+      namespace: string;
+      ownerEpoch: string;
+      expectedRevision: number;
+      payload: unknown;
+    };
 
 export type BrokerMessage =
-  | { type: "registered"; sessionId: string }
+  | { type: "registered"; sessionId: string; features?: string[] }
   | { type: "sessions"; requestId: string; sessions: SessionInfo[] }
   | { type: "message"; from: SessionInfo; message: Message }
   | { type: "presence_update"; session: SessionInfo }
@@ -61,4 +81,26 @@ export type BrokerMessage =
   | { type: "session_left"; sessionId: string }
   | { type: "error"; error: string }
   | { type: "delivered"; messageId: string }
-  | { type: "delivery_failed"; messageId: string; reason: string };
+  | { type: "delivery_failed"; messageId: string; reason: string }
+  | { type: "extension_owner"; namespace: string; ownerId?: string; ownerEpoch?: string }
+  | {
+      type: "extension_message";
+      namespace: string;
+      fromSessionId: string;
+      ownerId?: string;
+      ownerEpoch?: string;
+      payload: unknown;
+    }
+  | {
+      type: "extension_state";
+      namespace: string;
+      revision: number;
+      payload: unknown;
+    }
+  | {
+      type: "extension_state_result";
+      namespace: string;
+      committed: boolean;
+      revision: number;
+      reason?: string;
+    };
