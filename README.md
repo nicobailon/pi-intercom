@@ -70,7 +70,7 @@ Press **Alt+M** or type `/intercom` to open the session list overlay:
 
 ### From the Agent
 
-The agent can list sessions and send messages using the `intercom` tool. Tool calls and results render as compact transcript rows so send/ask/reply flows are easy to scan. For common patterns like planner-worker delegation, the bundled `pi-intercom` skill provides copy-paste ready examples:
+The agent can list sessions and send messages using the `intercom` tool. Tool calls and results render as compact transcript rows so send/ask/reply flows are easy to scan. Use `/intercom-id` to insert a handoff snippet for the current session's stable intercom target into the editor. For common patterns like planner-worker delegation, the bundled `pi-intercom` skill provides copy-paste ready examples:
 
 ```typescript
 // List active sessions
@@ -428,7 +428,7 @@ The broker is a standalone TypeScript process that manages session registration 
 
 Messages use length-prefixed JSON over a local socket/pipe transport (4-byte length + JSON payload) to handle fragmentation properly. The protocol includes request correlation for session listing, explicit delivery failures, validation for malformed or out-of-order messages, a frame-size cap, per-connection local rate limiting, and no-op presence coalescing.
 
-Session IDs are the trusted addressing key. Duplicate names remain allowed for same-user workflows, but sends to ambiguous names fail and users should target the stable session ID shown by `list`/`status` in trust-sensitive flows. The broker owns local trust metadata such as `trustedLocal`; `peerUid` is reserved for runtimes that can expose real peer credentials and is left unset otherwise. Client-supplied cwd/model/pid/status are display metadata, not authentication.
+Session IDs are the trusted addressing key. Duplicate names remain allowed for same-user workflows, but sends to ambiguous names fail and users should target the stable session ID shown by `list`/`status` in trust-sensitive flows. Set `PI_INTERCOM_STABLE_ID` or `stableId` in `config.json` to pin a session's intercom ID across full process relaunches. The broker owns local trust metadata such as `trustedLocal`; `peerUid` is reserved for runtimes that can expose real peer credentials and is left unset otherwise. Client-supplied cwd/model/pid/status are display metadata, not authentication.
 
 Async extension work (startup, inbound flushes, reconnects, overlays, and relays) no-ops if the session shuts down or reloads before it settles.
 
@@ -439,6 +439,8 @@ Runtime files live at `~/.pi/agent/intercom/` by default, or `$PI_CODING_AGENT_D
 - `broker.spawn.lock` — Auto-spawn lock file
 - `broker.port.json` — Dynamic localhost TCP endpoint, only when Windows TCP transport is explicitly enabled
 - `config.json` — User configuration
+
+Supported `config.json` keys include `stableId` for restart-stable addressing, `status` for a custom status suffix, `inboundTrigger` (`always`, `replies`, or `never`), `replyHint`, `confirmSend`, and advanced broker launch overrides.
 
 ## Design Decisions
 

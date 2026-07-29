@@ -34,6 +34,9 @@ export interface IntercomConfig {
 
   /** Optional custom status suffix shown after automatic lifecycle status */
   status?: string;
+
+  /** Optional stable intercom session ID for restart-stable addressing */
+  stableId?: string;
   
   /** Enable/disable intercom (default: true) */
   enabled: boolean;
@@ -133,6 +136,17 @@ export function loadConfig(): IntercomConfig {
         throw new Error(`"status" must be a string`);
       }
       config.status = parsedConfig.status;
+    }
+
+    if (Object.hasOwn(parsedConfig, "stableId")) {
+      if (typeof parsedConfig.stableId !== "string") {
+        throw new Error(`"stableId" must be a string`);
+      }
+      const stableId = parsedConfig.stableId.trim();
+      if (!stableId) {
+        throw new Error(`"stableId" must not be empty`);
+      }
+      config.stableId = stableId;
     }
 
     return config;

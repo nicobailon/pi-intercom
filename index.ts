@@ -21,6 +21,7 @@ const DEFAULT_UNNAMED_SESSION_ALIAS_PREFIX = "subagent-chat";
 const SUBAGENT_ORCHESTRATOR_TARGET_ENV = "PI_SUBAGENT_ORCHESTRATOR_TARGET";
 const SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV = "PI_SUBAGENT_ORCHESTRATOR_SESSION_ID";
 const INTERCOM_SESSION_ID_ENV = "PI_INTERCOM_SESSION_ID";
+const STABLE_INTERCOM_SESSION_ID_ENV = "PI_INTERCOM_STABLE_ID";
 const NAME_POLL_MS_ENV = "PI_INTERCOM_NAME_POLL_MS";
 const SUBAGENT_RUN_ID_ENV = "PI_SUBAGENT_RUN_ID";
 const SUBAGENT_CHILD_AGENT_ENV = "PI_SUBAGENT_CHILD_AGENT";
@@ -390,6 +391,12 @@ function buildPresenceIdentity(pi: ExtensionAPI, sessionId: string): { name: str
     name: resolveIntercomPresenceName(pi.getSessionName(), sessionId),
   };
 }
+function resolveConfiguredIntercomSessionId(piSessionId: string, config: IntercomConfig): string {
+  return process.env[STABLE_INTERCOM_SESSION_ID_ENV]?.trim() || config.stableId || piSessionId;
+}
+function formatIntercomContactSnippet(sessionId: string): string {
+  return `Use pi-intercom: intercom({ action: "send", to: "${sessionId}", message: "..." })`;
+}
 function formatSessionLabel(session: SessionInfo, duplicates: Set<string>): string {
   if (!session.name) {
     return session.id;
@@ -434,6 +441,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   const askTimeoutMs = getAskTimeoutMs();
   let runtimeContext: ExtensionContext | null = null;
   let currentSessionId: string | null = null;
+  let currentIntercomSessionId: string | null = null;
   let currentModel = "unknown";
   let sessionStartedAt: number | null = null;
   let reconnectTimer: NodeJS.Timeout | null = null;
@@ -576,7 +584,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       throw new Error("Intercom runtime not initialized");
     }
 
-    const identity = buildPresenceIdentity(pi, currentSessionId);
+    const identity = buildPresenceIdentity(pi, currentIntercomSessionId ?? currentSessionId);
     return {
       name: identity.name,
       cwd: liveContext.cwd,
@@ -591,18 +599,18 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     if (!client || !getLiveContext()) {
       return;
     }
-    const identity = buildPresenceIdentity(pi, sessionId);
+    const identity = buildPresenceIdentity(pi, currentIntercomSessionId ?? sessionId);
     lastPresenceName = identity.name;
     client.updatePresence({ ...identity, status: currentStatus() });
   }
   function startNamePoll(): void {
     clearNamePollTimer();
-    lastPresenceName = currentSessionId ? buildPresenceIdentity(pi, currentSessionId).name : null;
+    lastPresenceName = currentSessionId ? buildPresenceIdentity(pi, currentIntercomSessionId ?? currentSessionId).name : null;
     namePollTimer = setInterval(() => {
       if (!currentSessionId || !getLiveContext()) {
         return;
       }
-      const identity = buildPresenceIdentity(pi, currentSessionId);
+      const identity = buildPresenceIdentity(pi, currentIntercomSessionId ?? currentSessionId);
       if (identity.name !== lastPresenceName) {
         syncPresenceIdentity(currentSessionId);
       }
@@ -632,9 +640,10 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       if (trimmed) targets.add(trimmed.toLowerCase());
     };
     addTarget(currentSessionId);
+    addTarget(currentIntercomSessionId);
     addTarget(activeClient?.sessionId);
     addTarget(pi.getSessionName());
-    if (currentSessionId) addTarget(buildPresenceIdentity(pi, currentSessionId).name);
+    if (currentSessionId) addTarget(buildPresenceIdentity(pi, currentIntercomSessionId ?? currentSessionId).name);
     return Boolean(resolvedTo && activeClient?.sessionId && resolvedTo === activeClient.sessionId)
       || targets.has(to.trim().toLowerCase());
   }
@@ -832,7 +841,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       attachClientHandlers(nextClient);
       try {
         await spawnBrokerIfNeeded(config.brokerCommand, config.brokerArgs);
-        await nextClient.connect(buildRegistration(), currentSessionId);
+        await nextClient.connect(buildRegistration(), currentIntercomSessionId ?? currentSessionId);
         if (!getLiveContext(contextAtStart, generationAtStart)) {
           await nextClient.disconnect();
           throw new Error("Intercom runtime no longer active");
@@ -943,10 +952,11 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     pendingIdleMessages.length = 0;
     runtimeContext = ctx;
     currentSessionId = ctx.sessionManager.getSessionId();
-    publishIntercomSessionId(currentSessionId);
+    currentIntercomSessionId = resolveConfiguredIntercomSessionId(currentSessionId, config);
+    publishIntercomSessionId(currentIntercomSessionId);
     currentModel = ctx.model?.id ?? "unknown";
     sessionStartedAt = Date.now();
-    lastPresenceName = buildPresenceIdentity(pi, currentSessionId).name;
+    lastPresenceName = buildPresenceIdentity(pi, currentIntercomSessionId).name;
     agentRunning = false;
     activeTools.clear();
     startNamePoll();
@@ -1076,6 +1086,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     runtimeContext = null;
     currentSessionId = null;
+    currentIntercomSessionId = null;
     sessionStartedAt = null;
   });
   pi.on("turn_end", () => {
@@ -1139,7 +1150,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     currentModel = event.model.id;
     if (client) {
       client.updatePresence({
-        ...buildPresenceIdentity(pi, ctx.sessionManager.getSessionId()),
+        ...buildPresenceIdentity(pi, currentIntercomSessionId ?? ctx.sessionManager.getSessionId()),
         model: event.model.id,
         status: currentStatus(),
       });
@@ -1817,6 +1828,36 @@ Usage:
     },
   } as any);
 
+  function insertIntoEditor(ctx: ExtensionContext, text: string): boolean {
+    if (!ctx.hasUI) return false;
+    const ui = ctx.ui as { getEditorText?: () => string; setEditorText?: (text: string) => void };
+    if (typeof ui.setEditorText !== "function") return false;
+    const existing = typeof ui.getEditorText === "function" ? ui.getEditorText() : "";
+    ui.setEditorText(existing.trim() ? `${existing.trimEnd()}\n\n${text}` : text);
+    return true;
+  }
+
+  async function insertIntercomId(ctx: ExtensionContext): Promise<void> {
+    const commandGeneration = runtimeGeneration;
+    const liveContext = getLiveContext(ctx, commandGeneration);
+    if (!liveContext) return;
+    let contactClient: IntercomClient;
+    try {
+      contactClient = await ensureConnected("tool");
+    } catch (error) {
+      notifyIfLive(ctx, `Intercom unavailable: ${getErrorMessage(error)}`, "error", commandGeneration);
+      return;
+    }
+    const sessionId = contactClient.sessionId;
+    if (!sessionId || !getLiveContext(liveContext, commandGeneration)) return;
+    const snippet = formatIntercomContactSnippet(sessionId);
+    if (insertIntoEditor(liveContext, snippet)) {
+      notifyIfLive(liveContext, `Inserted intercom contact target: ${sessionId}`, "info", commandGeneration);
+      return;
+    }
+    notifyIfLive(liveContext, `Intercom contact target: ${sessionId}`, "info", commandGeneration);
+  }
+
   async function openIntercomOverlay(ctx: ExtensionContext): Promise<void> {
     const overlayGeneration = runtimeGeneration;
     const liveContext = getLiveContext(ctx, overlayGeneration);
@@ -1889,6 +1930,11 @@ Usage:
   pi.registerCommand("intercom", {
     description: "Open session intercom overlay",
     handler: async (_args, ctx) => openIntercomOverlay(ctx),
+  });
+
+  pi.registerCommand("intercom-id", {
+    description: "Insert a stable pi-intercom handoff snippet for this session into the editor",
+    handler: async (_args, ctx) => insertIntercomId(ctx),
   });
 
   pi.registerShortcut("alt+m", {

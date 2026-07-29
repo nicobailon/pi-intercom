@@ -824,6 +824,56 @@ test("intercom tool prefers exact names over ID prefixes", { concurrency: false 
   }
 });
 
+test("extension can pin a restart-stable intercom session id", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const previousStableId = process.env.PI_INTERCOM_STABLE_ID;
+  const previousPublishedId = process.env.PI_INTERCOM_SESSION_ID;
+  process.env.PI_INTERCOM_STABLE_ID = "pinned-worker-session";
+  const harness = createExtensionHarness("pinned-worker", { sessionId: "transient-pi-session" });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const session = await waitForSessionId(planner, "pinned-worker-session");
+    assert.equal(session.name, "pinned-worker");
+    assert.equal(process.env.PI_INTERCOM_SESSION_ID, "pinned-worker-session");
+    await harness.emitLifecycle("session_shutdown");
+  } finally {
+    if (previousStableId === undefined) delete process.env.PI_INTERCOM_STABLE_ID;
+    else process.env.PI_INTERCOM_STABLE_ID = previousStableId;
+    if (previousPublishedId === undefined) delete process.env.PI_INTERCOM_SESSION_ID;
+    else process.env.PI_INTERCOM_SESSION_ID = previousPublishedId;
+    await cleanup();
+  }
+});
+
+test("intercom-id inserts a stable handoff snippet into the editor", { concurrency: false }, async () => {
+  const { cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  let editorText = "Existing note";
+  const notifications: string[] = [];
+  const harness = createExtensionHarness("handoff-worker", {
+    hasUI: true,
+    ui: {
+      getEditorText: () => editorText,
+      setEditorText: (text: string) => { editorText = text; },
+      notify: (message: string) => { notifications.push(message); },
+    },
+  });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    await harness.commands.get("intercom-id")!("", harness.ctx);
+    assert.match(editorText, /Existing note\n\nUse pi-intercom: intercom\(\{ action: "send", to: "session-child-test", message: "\.\.\." \}\)/);
+    assert.match(notifications.at(-1) ?? "", /Inserted intercom contact target: session-child-test/);
+    await harness.emitLifecycle("session_shutdown");
+  } finally {
+    await cleanup();
+  }
+});
+
 test("intercom tool points at the short id when names collide", { concurrency: false }, async () => {
   const { cleanup } = await setupClients();
   const { default: piIntercomExtension } = await import("./index.ts");

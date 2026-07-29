@@ -4,6 +4,10 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+### Added
+- Added opt-in restart-stable intercom session IDs via `PI_INTERCOM_STABLE_ID` or `stableId` in `config.json`. Thanks to iRonin for issue #39.
+- Added `/intercom-id` to insert a stable handoff snippet for the current session into the editor. Thanks to dataforxyz for PR #60.
+
 ## [0.7.0] - 2026-07-29
 
 ### Changed
