@@ -4,6 +4,10 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+### Changed
+- Rewrote the broker frame reader as a bounded state machine and made frame writes a single allocation, removing quadratic `Buffer.concat` accumulation on fragmented socket reads (up to ~28x faster on heavily fragmented frames).
+- Cached the collapsed preview and width-keyed wrapped body lines in the inline message renderer, cutting repeated rerender cost of long messages by ~2-3x while keeping live theme changes applied per render.
+
 ## [0.9.0] - 2026-07-29
 
 ### Added

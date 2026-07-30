@@ -10,6 +10,10 @@ export class InlineMessageComponent implements Component {
   private replyCommand?: string;
   private bodyText?: string;
   private collapsed: boolean;
+  // Caches assume message/bodyText never mutate after construction; theme
+  // styling stays outside the caches so live theme changes apply per render.
+  private collapsedPreview?: string;
+  private wrappedBody?: { width: number; lines: string[] };
 
   constructor(
     from: SessionInfo,
@@ -54,8 +58,8 @@ export class InlineMessageComponent implements Component {
     };
 
     if (this.collapsed) {
-      const preview = (this.bodyText || this.message.content.text).replace(/\s+/g, " ").trim();
-      lines.push(frameLine(this.theme.fg("text", preview)));
+      this.collapsedPreview ??= (this.bodyText || this.message.content.text).replace(/\s+/g, " ").trim();
+      lines.push(frameLine(this.theme.fg("text", this.collapsedPreview)));
 
       const meta: string[] = [];
       if (this.replyCommand) meta.push(`↩ To reply: ${this.replyCommand}`);
@@ -71,8 +75,13 @@ export class InlineMessageComponent implements Component {
       return lines;
     }
 
-    const contentLines = wrapTextWithAnsi(this.bodyText || this.message.content.text, bodyWidth);
-    for (const line of contentLines) {
+    if (this.wrappedBody?.width !== bodyWidth) {
+      this.wrappedBody = {
+        width: bodyWidth,
+        lines: wrapTextWithAnsi(this.bodyText || this.message.content.text, bodyWidth),
+      };
+    }
+    for (const line of this.wrappedBody.lines) {
       lines.push(frameLine(this.theme.fg("text", line)));
     }
 

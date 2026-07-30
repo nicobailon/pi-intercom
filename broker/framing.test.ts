@@ -28,6 +28,26 @@ test("createMessageReader handles normal fragmented frames", () => {
   assert.deepEqual(errors, []);
 });
 
+test("createMessageReader reassembles a fragmented frame after a header-boundary fast-path frame", () => {
+  const messages: unknown[] = [];
+  const errors: Error[] = [];
+  const reader = createMessageReader(
+    (message) => messages.push(message),
+    (error) => errors.push(error),
+    64,
+  );
+  const frameA = framePayload(Buffer.from(JSON.stringify({ a: 1 }), "utf-8"));
+  const frameB = framePayload(Buffer.from(JSON.stringify({ bb: "1234567890" }), "utf-8"));
+
+  reader(frameA.subarray(0, 4)); // chunk ends exactly at the end of frame A's header
+  reader(frameA.subarray(4)); // frame A's payload arrives whole (zero-copy fast path)
+  reader(frameB.subarray(0, 6)); // frame B header + partial payload (buffered path)
+  reader(frameB.subarray(6));
+
+  assert.deepEqual(messages, [{ a: 1 }, { bb: "1234567890" }]);
+  assert.deepEqual(errors, []);
+});
+
 test("createMessageReader rejects an oversized declared frame", () => {
   const messages: unknown[] = [];
   const errors: Error[] = [];
