@@ -2354,6 +2354,43 @@ test("broker keeps queued mail away from a same-name session in another cwd", { 
   }
 });
 
+test("broker delivers queued mail to a relaunch reporting the same cwd differently", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const replacement = new IntercomClient();
+
+  try {
+    const originalPlannerId = planner.sessionId!;
+    const receivedAsk = once(orchestrator, "message") as Promise<[SessionInfo, Message]>;
+    assert.equal((await planner.send(orchestrator.sessionId!, { messageId: "cwd-variant-ask", text: "Answer later?", expectsReply: true })).delivered, true);
+    await receivedAsk;
+    await planner.disconnect();
+
+    assert.equal((await orchestrator.send(originalPlannerId, {
+      messageId: "cwd-variant-answer",
+      text: "Answer for the same project.",
+      replyTo: "cwd-variant-ask",
+    })).delivered, true);
+
+    const queuedReply = once(replacement, "message") as Promise<[SessionInfo, Message]>;
+    await replacement.connect({
+      name: "planner",
+      // Same directory as setupClients(), spelled with a trailing slash and a ".." segment.
+      cwd: path.join(repoDir, "ui", "..") + path.sep,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    });
+
+    const [, message] = await queuedReply;
+    assert.equal(message.id, "cwd-variant-answer");
+    assert.equal(message.content.text, "Answer for the same project.");
+  } finally {
+    await replacement.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
 test("broker does not reroute an id-addressed message to a same-name session in another cwd", { concurrency: false }, async () => {
   const { planner, orchestrator, cleanup } = await setupClients();
   const otherProject = new IntercomClient();

@@ -15,6 +15,7 @@ import {
   type BrokerConnectTarget,
 } from "./paths.ts";
 import { getAskTimeoutMs } from "../config.ts";
+import { sameCwd } from "../cwd.ts";
 import { EXTENSION_BUS_FEATURE } from "../types.ts";
 import type { SessionInfo, Message, Attachment, BrokerMessage, SessionRegistration, ExtensionCapability, MessageControl, MessageReceipt, MessageReceiptStatus } from "../types.ts";
 import { ExtensionStateManager } from "./extension-state.ts";
@@ -1028,7 +1029,7 @@ class IntercomBroker {
         uniqueMailboxIdentity
         && sessionName
         && entry.target.name?.toLowerCase() === sessionName
-        && entry.target.cwd === session.info.cwd,
+        && sameCwd(entry.target.cwd, session.info.cwd),
       );
       if (!matchesId && !matchesUniqueName) {
         index += 1;
@@ -1130,9 +1131,12 @@ class IntercomBroker {
   }
 
   /**
-   * Mailbox identity is name plus cwd, never name alone. A name on its own is
-   * display metadata that unrelated projects reuse, so matching on it would
+   * Mailbox identity is name plus directory, never name alone. A name on its own
+   * is display metadata that unrelated projects reuse, so matching on it would
    * hand one project's queued mail to a same-named session in another project.
+   * Directories compare through sameCwd so a relaunch that reports the same
+   * directory differently (trailing slash, "."/"..", or a symlink such as macOS
+   * /tmp vs /private/tmp) still matches.
    */
   private findLiveSessionsSharingMailboxIdentity(info: SessionInfo): ConnectedSession[] {
     const lowerName = info.name?.toLowerCase();
@@ -1140,7 +1144,7 @@ class IntercomBroker {
       return [];
     }
     return Array.from(this.sessions.values()).filter(session =>
-      session.info.name?.toLowerCase() === lowerName && session.info.cwd === info.cwd
+      session.info.name?.toLowerCase() === lowerName && sameCwd(session.info.cwd, info.cwd)
     );
   }
 
