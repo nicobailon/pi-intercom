@@ -2374,8 +2374,10 @@ test("broker delivers queued mail to a relaunch reporting the same cwd different
     const queuedReply = once(replacement, "message") as Promise<[SessionInfo, Message]>;
     await replacement.connect({
       name: "planner",
-      // Same directory as setupClients(), spelled with a trailing slash and a ".." segment.
-      cwd: path.join(repoDir, "ui", "..") + path.sep,
+      // Same directory as setupClients(), spelled with a ".." segment and a
+      // trailing separator. Built by concatenation because path.join would
+      // collapse the ".." before the broker ever sees it.
+      cwd: `${repoDir}${path.sep}ui${path.sep}..${path.sep}`,
       model: "test-model",
       pid: process.pid,
       startedAt: Date.now(),
