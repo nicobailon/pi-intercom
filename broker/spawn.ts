@@ -71,6 +71,13 @@ function usesDefaultBrokerCommand(brokerCommand: string, brokerArgs: string[]): 
     && brokerArgs[1] === "tsx";
 }
 
+function getNodeCommand(nodePath: string): string {
+  const executableName = nodePath.split(/[\\/]/).pop();
+  return executableName && /^node(?:js)?(?:\.exe)?$/i.test(executableName)
+    ? nodePath
+    : "node";
+}
+
 export function getWindowsBrokerCommandLine(
   brokerPath: string,
   extensionDir: string = EXTENSION_DIR,
@@ -79,7 +86,7 @@ export function getWindowsBrokerCommandLine(
   brokerArgs: string[] = ["--no-install", "tsx"],
 ): string {
   if (usesDefaultBrokerCommand(brokerCommand, brokerArgs)) {
-    return [quoteWindowsArg(nodePath), quoteWindowsArg(getTsxCliPath(extensionDir)), quoteWindowsArg(brokerPath)].join(" ");
+    return [quoteWindowsArg(getNodeCommand(nodePath)), quoteWindowsArg(getTsxCliPath(extensionDir)), quoteWindowsArg(brokerPath)].join(" ");
   }
 
   return [quoteWindowsArg(brokerCommand), ...brokerArgs.map(quoteWindowsArg), quoteWindowsArg(brokerPath)].join(" ");
@@ -141,7 +148,7 @@ export function getBrokerLaunchSpec(
   if (usesDefaultBrokerCommand(brokerCommand, brokerArgs)) {
     return {
       kind: "direct",
-      command: nodePath,
+      command: getNodeCommand(nodePath),
       args: [getTsxCliPath(extensionDir), brokerPath],
     };
   }

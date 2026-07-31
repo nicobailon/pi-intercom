@@ -71,6 +71,26 @@ test("getBrokerLaunchSpec uses wscript launcher on Windows without writing files
   }
 });
 
+test("getBrokerLaunchSpec falls back to PATH node for a standalone Pi executable on Windows", () => {
+  const intercomDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-"));
+
+  try {
+    const spec = getBrokerLaunchSpec(
+      "C:/repo/broker.ts",
+      "npx",
+      ["--no-install", "tsx"],
+      "C:/repo",
+      "win32",
+      intercomDir,
+      "C:/Program Files/Pi/pi.exe",
+    );
+    assert.equal(spec.kind, "windows-launcher");
+    assert.equal(spec.launcherCommandLine, `"node" "${getTsxCliPath("C:/repo")}" "C:/repo/broker.ts"`);
+  } finally {
+    rmSync(intercomDir, { recursive: true, force: true });
+  }
+});
+
 test("getBrokerLaunchSpec uses custom broker command on Windows", () => {
   const intercomDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-"));
 
@@ -90,6 +110,24 @@ test("getBrokerLaunchSpec uses node + resolved tsx for the default non-Windows l
   assert.deepEqual(spec.args, [
     getTsxCliPath("C:/repo"),
     "C:/repo/broker.ts",
+  ]);
+  assert.equal(spec.kind, "direct");
+});
+
+test("getBrokerLaunchSpec falls back to PATH node for a standalone Pi executable on non-Windows", () => {
+  const spec = getBrokerLaunchSpec(
+    "/repo/broker.ts",
+    "npx",
+    ["--no-install", "tsx"],
+    "/repo",
+    "darwin",
+    "/tmp/intercom",
+    "/Applications/Pi.app/Contents/MacOS/pi",
+  );
+  assert.equal(spec.command, "node");
+  assert.deepEqual(spec.args, [
+    getTsxCliPath("/repo"),
+    "/repo/broker.ts",
   ]);
   assert.equal(spec.kind, "direct");
 });
