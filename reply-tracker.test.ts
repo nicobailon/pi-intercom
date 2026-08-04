@@ -160,3 +160,53 @@ test("dismissing a pending ask removes queued turn context", () => {
 
   assert.throws(() => tracker.resolveReplyTarget({}, 1002), /No active intercom context to reply to/);
 });
+
+test("findUniquePendingAskFrom returns the sole match by exact sender ID", () => {
+  const tracker = new ReplyTracker();
+  tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "Need a decision"), 1000);
+
+  const context = tracker.findUniquePendingAskFrom("planner-id", 1001);
+
+  assert.equal(context?.message.id, "ask-1");
+});
+
+test("findUniquePendingAskFrom returns the sole match by case-insensitive name", () => {
+  const tracker = new ReplyTracker();
+  tracker.recordIncomingMessage(createSession("planner-id", "Planner"), createMessage("ask-1", "Need a decision"), 1000);
+
+  const context = tracker.findUniquePendingAskFrom("PLANNER", 1001);
+
+  assert.equal(context?.message.id, "ask-1");
+});
+
+test("findUniquePendingAskFrom returns null when there is no match", () => {
+  const tracker = new ReplyTracker();
+  tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "Need a decision"), 1000);
+
+  assert.equal(tracker.findUniquePendingAskFrom("reviewer-id", 1001), null);
+});
+
+test("findUniquePendingAskFrom returns null when the sole match has expired", () => {
+  const tracker = new ReplyTracker();
+  tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "Need a decision"), 1000);
+
+  const expiredAt = 1000 + getAskTimeoutMs() + 1;
+  assert.equal(tracker.findUniquePendingAskFrom("planner-id", expiredAt), null);
+});
+
+test("findUniquePendingAskFrom returns null when multiple asks match", () => {
+  const tracker = new ReplyTracker();
+  tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "First"), 1000);
+  tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-2", "Second"), 1001);
+
+  assert.equal(tracker.findUniquePendingAskFrom("planner-id", 1002), null);
+});
+
+test("findUniquePendingAskFrom does not mutate tracker state", () => {
+  const tracker = new ReplyTracker();
+  tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "Need a decision"), 1000);
+
+  tracker.findUniquePendingAskFrom("planner-id", 1001);
+
+  assert.deepEqual(tracker.listPending(1002).map((context) => context.message.id), ["ask-1"]);
+});

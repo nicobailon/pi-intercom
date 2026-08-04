@@ -196,7 +196,7 @@ it as a `contact_supervisor` escalation.
 
 | Action | Behavior | Use When |
 |--------|----------|----------|
-| `send` | Fire-and-forget | You don't need a response |
+| `send` | Fire-and-forget; infers the sole pending ask as its reply | You don't need a response |
 | `ask` | Blocks until reply (10 min default, configurable with `PI_INTERCOM_ASK_TIMEOUT_MS`) | You need an answer to continue |
 | `reply` | Responds to the active or pending inbound ask | You were asked something and need to answer naturally |
 | `pending` | Lists unresolved inbound asks | You need to see who is waiting before replying |
@@ -316,8 +316,10 @@ if (result.isError && result.content[0].text.includes("Already waiting")) {
 ### `send` Behavior
 
 - **No timeout**: Message is delivered or fails immediately
-- **Confirmation dialogs**: If `confirmSend: true` in config, interactive sessions show a confirmation dialog
-- **Replies skip confirmation**: Messages with `replyTo` never show confirmation dialogs
+- **Sole pending ask inference**: If the destination has exactly one pending inbound ask, `send` attaches its `replyTo` and reports `Reply sent to <target> (inferred from pending ask)`
+- **Ambiguity stays unthreaded**: Zero or multiple matching asks leave the send as an ordinary message
+- **Confirmation dialogs**: If `confirmSend: true` in config, interactive sessions confirm ordinary and inferred sends
+- **Explicit replies skip confirmation**: A caller-supplied `replyTo` skips the dialog
 
 ## Best Practices
 

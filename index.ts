@@ -1890,6 +1890,8 @@ Usage:
                 details: { error: true },
               };
             }
+            const inferredAsk = replyTo ? null : replyTracker.findUniquePendingAskFrom(sendTo);
+            const effectiveReplyTo = replyTo ?? inferredAsk?.message.id;
             if (!replyTo && config.confirmSend && ctx.hasUI) {
               const attachmentText = attachments?.length ? formatAttachments(attachments) : "";
               const confirmed = await ctx.ui.confirm(
@@ -1906,7 +1908,7 @@ Usage:
             const result = await connectedClient.send(sendTo, {
               text: message,
               attachments,
-              replyTo,
+              replyTo: effectiveReplyTo,
               supersedes,
               retryOf,
             });
@@ -1919,16 +1921,22 @@ Usage:
             }
             pi.appendEntry("intercom_sent", {
               to,
-              message: { text: message, attachments, replyTo, supersedes, retryOf },
+              message: { text: message, attachments, replyTo: effectiveReplyTo, supersedes, retryOf },
               messageId: result.id,
               timestamp: Date.now(),
             });
-            if (replyTo) {
-              dismissIncomingAsk(replyTo);
+            if (effectiveReplyTo) {
+              dismissIncomingAsk(effectiveReplyTo);
+            }
+            if (inferredAsk) {
+              return {
+                content: [{ type: "text", text: `Reply sent to ${to} (inferred from pending ask)` }],
+                details: { messageId: result.id, delivered: true, replyTo: effectiveReplyTo },
+              };
             }
             return {
               content: [{ type: "text", text: `Message sent to ${to}` }],
-              details: { messageId: result.id, delivered: true },
+              details: { messageId: result.id, delivered: true, replyTo: effectiveReplyTo },
             };
           } catch (error) {
             return {
