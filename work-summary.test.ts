@@ -9,6 +9,7 @@ import {
   WORK_SUMMARY_MAX_COLUMNS,
   findManagedWorkSummary,
   isValidWorkSummary,
+  localJobsPath,
   normalizeWorkSummary,
   readManagedWorkSummary,
   watchManagedWorkSummary,
@@ -91,6 +92,27 @@ test("findManagedWorkSummary omits malformed, unowned, and terminal jobs", () =>
     "```yaml\ntitle: Missing owner\nstatus: active\nowner: null\n```",
   ].join("\n\n");
   assert.equal(findManagedWorkSummary({ markdown, piSessionId: "pi-target" }), undefined);
+});
+
+test("localJobsPath uses the default centralized Pi agent root", () => {
+  assert.equal(
+    localJobsPath({}, "/home/example", "/workspace/project"),
+    join("/home/example", ".pi", "agent", "LOCAL_JOBS.md"),
+  );
+});
+
+test("localJobsPath honors an absolute PI_CODING_AGENT_DIR", () => {
+  assert.equal(
+    localJobsPath({ PI_CODING_AGENT_DIR: "/custom/pi-agent" }, "/home/example", "/workspace/project"),
+    join("/custom/pi-agent", "LOCAL_JOBS.md"),
+  );
+});
+
+test("localJobsPath resolves a relative PI_CODING_AGENT_DIR from cwd", () => {
+  assert.equal(
+    localJobsPath({ PI_CODING_AGENT_DIR: "relative-agent" }, "/home/example", "/workspace/project"),
+    join("/workspace/project", "relative-agent", "LOCAL_JOBS.md"),
+  );
 });
 
 test("readManagedWorkSummary fails closed for missing files and parses quoted titles", () => {

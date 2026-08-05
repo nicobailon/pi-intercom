@@ -2,6 +2,7 @@ import { existsSync, readFileSync, watch, type FSWatcher } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { getAgentDirPath } from "./broker/paths.ts";
 
 export const WORK_SUMMARY_MAX_COLUMNS = 96;
 export const WORK_SUMMARY_MAX_BYTES = 192;
@@ -28,8 +29,12 @@ export type WorkSummarySubscription = {
   stop: () => void;
 };
 
-export function localJobsPath(): string {
-  return join(homedir(), ".pi", "agent", "LOCAL_JOBS.md");
+export function localJobsPath(
+  env: NodeJS.ProcessEnv = process.env,
+  homeDir: string = homedir(),
+  cwd: string = process.cwd(),
+): string {
+  return join(getAgentDirPath(env, homeDir, cwd), "LOCAL_JOBS.md");
 }
 
 function isWithinBounds(value: string): boolean {
