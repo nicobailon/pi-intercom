@@ -9,6 +9,8 @@ export interface SessionInfo {
   startedAt: number;
   lastActivity: number;
   status?: string;
+  /** Short, privacy-safe description of current work. Local presence only. */
+  workSummary?: string;
   peerUid?: number;
   trustedLocal?: boolean;
   /** Live context-window usage, pushed via presence from the source session's
@@ -83,7 +85,7 @@ export type ClientMessage =
   | { type: "message_receipt"; receipt: MessageReceipt }
   | { type: "cancel_message"; messageId: string }
   | { type: "cancel_ask"; messageId: string }
-  | { type: "presence"; name?: string; status?: string; model?: string; contextPct?: number | null; contextTokens?: number | null; contextWindow?: number | null }
+  | { type: "presence"; name?: string; status?: string; model?: string; workSummary?: string | null; contextPct?: number | null; contextTokens?: number | null; contextWindow?: number | null }
   | {
       type: "extension_publish";
       namespace: string;

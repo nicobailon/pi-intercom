@@ -121,6 +121,9 @@ export class SessionListOverlay implements Component {
     lines.push(row());
     lines.push(row(`  ${this.theme.fg("dim", sessionTitle(this.currentSession, { self: true }))}`));
     lines.push(row(`  ${this.theme.fg("dim", `${middleTruncate(this.currentSession.cwd, Math.max(8, contentWidth - 4))} • ${this.currentSession.model}`)}`));
+    if (this.currentSession.workSummary) {
+      lines.push(row(`  ${this.theme.fg("muted", `Working on: ${this.currentSession.workSummary}`)}`));
+    }
     lines.push(row());
     lines.push(border(`├${"─".repeat(contentWidth)}┤`));
     lines.push(row(this.theme.bold(" Other Sessions")));
@@ -145,6 +148,9 @@ export class SessionListOverlay implements Component {
 
         lines.push(row(`${prefix}${isSelected ? this.theme.fg("accent", title) : title}`));
         lines.push(row(`  ${this.theme.fg("dim", pathText)}`));
+        if (session.workSummary) {
+          lines.push(row(`  ${this.theme.fg("muted", `Working on: ${session.workSummary}`)}`));
+        }
         if (index < endIndex - 1) {
           lines.push(row());
         }

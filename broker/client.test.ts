@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { IntercomClient } from "./client.ts";
 
-test("validated session lifecycle messages reach broker-message subscribers", () => {
+test("new clients accept legacy session lifecycle messages without work summaries", () => {
   const client = new IntercomClient();
   (client as any)._sessionId = "session-1";
   const received: unknown[] = [];
@@ -25,6 +25,43 @@ test("validated session lifecycle messages reach broker-message subscribers", ()
     { type: "presence_update", session },
     { type: "session_left", sessionId: "session-2" },
   ]);
+});
+
+test("session validation accepts bounded work summaries and rejects unsafe values", () => {
+  const validClient = new IntercomClient();
+  (validClient as any)._sessionId = "session-1";
+  const summaries: string[] = [];
+  validClient.onBrokerMessage((message) => {
+    if (message.type === "session_joined" && message.session.workSummary) summaries.push(message.session.workSummary);
+  });
+  assert.doesNotThrow(() => (validClient as any).handleBrokerMessage({
+    type: "session_joined",
+    session: {
+      id: "session-2",
+      cwd: "/test",
+      model: "test",
+      pid: 2,
+      startedAt: 1,
+      lastActivity: 1,
+      workSummary: "Review the session presence protocol",
+    },
+  }));
+  assert.deepEqual(summaries, ["Review the session presence protocol"]);
+
+  const invalidClient = new IntercomClient();
+  (invalidClient as any)._sessionId = "session-1";
+  assert.throws(() => (invalidClient as any).handleBrokerMessage({
+    type: "session_joined",
+    session: {
+      id: "session-2",
+      cwd: "/test",
+      model: "test",
+      pid: 2,
+      startedAt: 1,
+      lastActivity: 1,
+      workSummary: "unsafe\nsummary",
+    },
+  }), /Invalid session_joined/);
 });
 
 test("registered feature negotiation rejects non-string feature entries", () => {

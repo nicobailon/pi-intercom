@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { EventEmitter, once } from "node:events";
@@ -467,6 +467,17 @@ async function waitForSessionModel(client: InstanceType<typeof IntercomClient>, 
   throw new Error(`Timed out waiting for ${name} model ${model}; saw ${JSON.stringify(sessions.map((session) => ({ name: session.name, model: session.model })))}`);
 }
 
+async function waitForSessionWorkSummary(client: InstanceType<typeof IntercomClient>, name: string, workSummary: string | undefined): Promise<SessionInfo> {
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline) {
+    const session = (await client.listSessions()).find((candidate) => candidate.name === name);
+    if (session && session.workSummary === workSummary) return session;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  const sessions = await client.listSessions();
+  throw new Error(`Timed out waiting for ${name} work summary; saw ${JSON.stringify(sessions.map((session) => ({ name: session.name, workSummary: session.workSummary })))}`);
+}
+
 async function waitForSessionId(client: InstanceType<typeof IntercomClient>, sessionId: string): Promise<SessionInfo> {
   const deadline = Date.now() + 2000;
   while (Date.now() < deadline) {
@@ -490,6 +501,48 @@ async function waitForNoSessionId(client: InstanceType<typeof IntercomClient>, s
   }
   throw new Error(`Timed out waiting for ${sessionId} to leave`);
 }
+
+test("broker carries optional work summaries and clears them through presence", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const worker = new IntercomClient();
+  try {
+    await worker.connect({
+      name: "summary-worker",
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+      workSummary: "Add safe local work summaries",
+    });
+    assert.equal((await waitForSessionWorkSummary(planner, "summary-worker", "Add safe local work summaries")).workSummary, "Add safe local work summaries");
+
+    worker.updatePresence({ workSummary: "Update summary presence" });
+    assert.equal((await waitForSessionWorkSummary(planner, "summary-worker", "Update summary presence")).workSummary, "Update summary presence");
+
+    worker.updatePresence({ workSummary: null });
+    assert.equal((await waitForSessionWorkSummary(planner, "summary-worker", undefined)).workSummary, undefined);
+    assert.equal((await planner.listSessions()).find((session) => session.name === "planner")?.workSummary, undefined);
+  } finally {
+    await worker.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("broker rejects unsafe work-summary presence updates", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const raw = await connectRawRegistered("unsafe-summary-id", "unsafe-summary-worker");
+  try {
+    await waitForSessionByName(planner, "unsafe-summary-worker");
+    const closed = once(raw.socket, "close");
+    raw.writeMessage(raw.socket, { type: "presence", workSummary: "unsafe\nsummary" });
+    await closed;
+    await waitForNoSessionId(planner, "unsafe-summary-id");
+  } finally {
+    raw.socket.destroy();
+    await cleanup();
+  }
+});
 
 test("broker accepts caller supplied stable IDs across reconnect", { concurrency: false }, async () => {
   const { planner, cleanup } = await setupClients();
@@ -825,6 +878,64 @@ test("intercom tool prefers exact names over ID prefixes", { concurrency: false 
     await harness.emitLifecycle("session_shutdown");
   } finally {
     await evilPrefix.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("intercom list tool renders another session's work summary", { concurrency: false }, async () => {
+  const { cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const worker = new IntercomClient();
+  const harness = createExtensionHarness("summary-list-requester");
+
+  try {
+    await worker.connect({
+      name: "summary-list-worker",
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+      workSummary: "Implement local presence summaries",
+    });
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    await waitForSessionByName(worker, "summary-list-requester");
+
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const result = await intercomTool.execute("list-with-summary", { action: "list" }, new AbortController().signal, undefined, harness.ctx);
+    const text = result.content.map((part) => part.text ?? "").join("");
+    assert.match(text, /summary-list-worker/);
+    assert.match(text, /Working on: Implement local presence summaries/);
+  } finally {
+    await harness.emitLifecycle("session_shutdown").catch(() => undefined);
+    await worker.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("extension publishes and refreshes a managed work summary from LOCAL_JOBS", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const piSessionId = "managed-summary-pi-session";
+  const ledgerPath = path.join(sharedHomeDir, ".pi", "agent", "LOCAL_JOBS.md");
+  const harness = createExtensionHarness("managed-summary-worker", { sessionId: piSessionId });
+  const ledger = (title: string) => `# Jobs\n\n\`\`\`yaml\nid: LJ-006\ntitle: ${title}\nstatus: active\nowner:\n  pi_session_id: ${piSessionId}\n  name: managed-summary-worker\nhandoff: private message body that must not be published\n\`\`\`\n`;
+
+  mkdirSync(path.dirname(ledgerPath), { recursive: true });
+  writeFileSync(ledgerPath, ledger("Initial managed mission"));
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    assert.equal((await waitForSessionWorkSummary(planner, "managed-summary-worker", "Initial managed mission")).workSummary, "Initial managed mission");
+
+    writeFileSync(ledgerPath, ledger("Refreshed managed mission"));
+    assert.equal((await waitForSessionWorkSummary(planner, "managed-summary-worker", "Refreshed managed mission")).workSummary, "Refreshed managed mission");
+    const listed = await planner.listSessions();
+    assert.doesNotMatch(JSON.stringify(listed.find((session) => session.name === "managed-summary-worker")), /private message body/u);
+  } finally {
+    await harness.emitLifecycle("session_shutdown").catch(() => undefined);
+    rmSync(ledgerPath, { force: true });
     await cleanup();
   }
 });

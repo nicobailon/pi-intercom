@@ -4,6 +4,9 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+### Added
+- Added optional, local-only work summaries to session presence, `intercom list`, and the Alt+M overlay. Managed summaries come only from the title of the active `LOCAL_JOBS.md` entry whose owner exactly matches the immutable Pi session ID; they are sanitized, bounded, event-refreshed, and omitted for untracked sessions.
+
 ## [0.9.2] - 2026-08-03
 
 ### Fixed

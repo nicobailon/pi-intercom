@@ -4,6 +4,7 @@ import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.ts";
 import { getBrokerConnectTarget, type BrokerConnectTarget } from "./paths.ts";
 import { EXTENSION_BUS_FEATURE } from "../types.ts";
+import { isValidWorkSummary } from "../work-summary.ts";
 import type {
   Attachment,
   BrokerMessage,
@@ -172,6 +173,10 @@ function isSessionInfo(value: unknown): value is SessionInfo {
   }
 
   if (session.status !== undefined && typeof session.status !== "string") {
+    return false;
+  }
+
+  if (session.workSummary !== undefined && !isValidWorkSummary(session.workSummary)) {
     return false;
   }
 
@@ -800,7 +805,7 @@ export class IntercomClient extends EventEmitter {
     }
   }
 
-  updatePresence(updates: { name?: string; status?: string; model?: string; contextPct?: number | null; contextTokens?: number | null; contextWindow?: number | null }): void {
+  updatePresence(updates: { name?: string; status?: string; model?: string; workSummary?: string | null; contextPct?: number | null; contextTokens?: number | null; contextWindow?: number | null }): void {
     if (this.disconnecting) {
       return;
     }

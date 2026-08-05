@@ -16,7 +16,7 @@ Sometimes you're running multiple pi sessions — one researching, one executing
 
 - **User-driven orchestration** — Send context or findings from your research session to your execution session
 - **Agent collaboration** — An agent can reach out to another session when it needs help or wants to share results
-- **Session awareness** — See what other pi sessions are running and their current status
+- **Session awareness** — See what other pi sessions are running, their current status, and an optional managed-work summary
 
 Unlike pi-messenger (a shared chat room for multi-agent swarms), pi-intercom is for targeted 1:1 communication where you pick the recipient.
 
@@ -79,6 +79,7 @@ intercom({ action: "list" })
 // → • executor (20d43841) — ~/projects/api (claude-sonnet-4 · 42% ctx) [self, idle]
 // → **Other sessions:**
 // → • research (6332faab) — ~/projects/api (claude-sonnet-4) [same cwd, thinking]
+// →   Working on: Check API validation edge cases
 
 // List only peers in the same working directory
 intercom({ action: "list-cwd" })
@@ -348,7 +349,7 @@ Only registered in sessions where `pi-subagents` supplied the required child bri
 
 ### intercom actions
 
-**`list`** — Returns the current session plus other active intercom-connected sessions with name, short ID, working directory, model, and live status. Status is derived automatically from Pi lifecycle events: `idle`, `thinking`, or `tool:<name>`.
+**`list`** — Returns the current session plus other active intercom-connected sessions with name, short ID, working directory, model, live status, and an optional brief work summary. Status is derived automatically from Pi lifecycle events: `idle`, `thinking`, or `tool:<name>`.
 
 **`send`** — Sends a message to the specified session. By default it sends immediately, including in interactive sessions. Set `confirmSend: true` in config if you want a confirmation dialog for non-reply sends. Replies that include `replyTo` skip confirmation. Returns delivery confirmation.
 
@@ -409,6 +410,12 @@ Custom broker commands are trusted local configuration: anyone who can edit this
 ```
 
 Pi-intercom publishes live session status automatically. Sessions register as `idle`, switch to `thinking` while the agent is running, show `tool:<name>` during tool execution, and return to `idle` on agent completion. If `status` is set in config, it is appended as context instead of replacing the lifecycle status.
+
+### Local work summaries
+
+When `~/.pi/agent/LOCAL_JOBS.md` exists, each session looks up its owned managed job in `claimed`, `active`, `blocked`, or `review` by the immutable Pi session ID in `owner.pi_session_id`. It publishes only that job's `title` as the optional `workSummary` presence field. Sessions absent from the ledger omit the field; pi-intercom never guesses from prompts, transcripts, message bodies, handoffs, or an LLM. The title is normalized to one line, stripped of control and bidi-formatting characters, rejected if it has an obvious secret or full-path shape, and capped at 96 terminal columns and 192 UTF-8 bytes. An event-driven file watcher refreshes presence only when the ledger changes and is closed on session shutdown.
+
+`workSummary` is local routing metadata. Any integration that exports `SessionInfo` outside the local intercom broker must explicitly allowlist its remote fields and omit `workSummary`; adding this field is not consent to export it over Tailnet or another transport. Older clients and brokers remain compatible because the registration and presence fields are optional: older brokers ignore/drop them, and newer clients accept sessions without them.
 
 By default, runtime state and config live under `~/.pi/agent/intercom`. If Pi is launched with `PI_CODING_AGENT_DIR`, pi-intercom uses `$PI_CODING_AGENT_DIR/intercom` instead, including `config.json`, broker PID/lock files, sockets, and launcher state.
 

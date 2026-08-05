@@ -17,6 +17,7 @@ import {
 import { getAskTimeoutMs } from "../config.ts";
 import { sameCwd } from "../cwd.ts";
 import { EXTENSION_BUS_FEATURE } from "../types.ts";
+import { isValidWorkSummary } from "../work-summary.ts";
 import type { SessionInfo, Message, Attachment, BrokerMessage, SessionRegistration, ExtensionCapability, MessageControl, MessageReceipt, MessageReceiptStatus } from "../types.ts";
 import { ExtensionStateManager } from "./extension-state.ts";
 import { assertNoLiveBroker } from "./runtime-claim.ts";
@@ -207,8 +208,10 @@ function isSessionRegistration(value: unknown): value is SessionRegistration {
   if (session.name !== undefined && typeof session.name !== "string") {
     return false;
   }
-
-  return session.status === undefined || typeof session.status === "string";
+  if (session.status !== undefined && typeof session.status !== "string") {
+    return false;
+  }
+  return session.workSummary === undefined || isValidWorkSummary(session.workSummary);
 }
 
 class IntercomBroker {
@@ -478,6 +481,7 @@ class IntercomBroker {
           startedAt: session.startedAt,
           lastActivity: session.lastActivity,
           ...(session.status !== undefined ? { status: session.status } : {}),
+          ...(session.workSummary !== undefined ? { workSummary: session.workSummary } : {}),
           trustedLocal: typeof LISTEN_TARGET === "string" && process.platform !== "win32",
         };
 
@@ -912,6 +916,19 @@ class IntercomBroker {
             }
             if (session.info.model !== clientMessage.model) {
               session.info.model = clientMessage.model;
+              changed = true;
+            }
+          }
+          if (clientMessage.workSummary !== undefined) {
+            if (clientMessage.workSummary === null) {
+              if (session.info.workSummary !== undefined) {
+                delete session.info.workSummary;
+                changed = true;
+              }
+            } else if (!isValidWorkSummary(clientMessage.workSummary)) {
+              throw new Error("Invalid presence workSummary");
+            } else if (session.info.workSummary !== clientMessage.workSummary) {
+              session.info.workSummary = clientMessage.workSummary;
               changed = true;
             }
           }

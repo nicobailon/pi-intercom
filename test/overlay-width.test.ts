@@ -32,6 +32,7 @@ const session: SessionInfo = {
   pid: 1,
   startedAt: 0,
   lastActivity: 0,
+  workSummary: "Add safe local work summaries",
 };
 
 function assertLineWidths(label: string, lines: string[], expectedWidth: number): void {
@@ -57,10 +58,17 @@ test("compose overlay renders lines at the declared overlay width", () => {
   }
 });
 
-test("session list overlay renders lines at the declared overlay width", () => {
+test("session list overlay renders work summaries at the declared overlay width", () => {
   const overlay = new SessionListOverlay(theme as any, keybindings as any, session, [session], () => {});
 
   for (const width of [1, 2, 20, 50, 88]) {
     assertLineWidths("session list overlay", overlay.render(width), width);
   }
+  assert.match(overlay.render(88).join("\n"), /Working on: Add safe local work summaries/);
+});
+
+test("session list overlay omits work-summary rows for older sessions", () => {
+  const oldSession = { ...session, id: "old-session", workSummary: undefined };
+  const overlay = new SessionListOverlay(theme as any, keybindings as any, oldSession, [], () => {});
+  assert.doesNotMatch(overlay.render(88).join("\n"), /Working on:/);
 });

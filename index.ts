@@ -24,6 +24,7 @@ import { ReplyTracker } from "./reply-tracker.ts";
 import { resolve as resolvePath } from "node:path";
 import { sameCwd } from "./cwd.ts";
 import { formatContextUsage } from "./format-context.ts";
+import { watchManagedWorkSummary } from "./work-summary.ts";
 
 const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
 const SUBAGENT_RESULT_INTERCOM_EVENT = "subagent:result-intercom";
@@ -425,7 +426,8 @@ function formatSessionListRow(session: SessionInfo, currentCwd: string, isSelf: 
   const tags = [isSelf ? "self" : session.cwd === currentCwd ? "same cwd" : undefined, session.status]
     .filter((tag): tag is string => Boolean(tag));
   const suffix = tags.length ? ` [${tags.join(", ")}]` : "";
-  return `• ${name} (${shortSessionId(session.id)}) — ${session.cwd} (${session.model}${formatContextUsage(session)})${suffix}`;
+  const identity = `• ${name} (${shortSessionId(session.id)}) — ${session.cwd} (${session.model}${formatContextUsage(session)})${suffix}`;
+  return session.workSummary ? `${identity}\n  Working on: ${session.workSummary}` : identity;
 }
 function previewText(value: unknown, maxLength = 72): string | undefined {
   if (typeof value !== "string") {
@@ -485,6 +487,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   let sessionStartedAt: number | null = null;
   let reconnectTimer: NodeJS.Timeout | null = null;
   let namePollTimer: NodeJS.Timeout | null = null;
+  let stopWorkSummaryWatch: (() => void) | null = null;
+  let currentWorkSummary: string | undefined;
   let lastPresenceName: string | null = null;
   const previousIntercomSessionId = process.env[INTERCOM_SESSION_ID_ENV];
   let reconnectPromise: Promise<IntercomClient> | null = null;
@@ -638,6 +642,23 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     clearInterval(namePollTimer);
     namePollTimer = null;
   }
+  function clearWorkSummaryWatch(): void {
+    stopWorkSummaryWatch?.();
+    stopWorkSummaryWatch = null;
+    currentWorkSummary = undefined;
+  }
+  function startWorkSummaryWatch(piSessionId: string): void {
+    clearWorkSummaryWatch();
+    const subscription = watchManagedWorkSummary({
+      piSessionId,
+      onChange: (summary) => {
+        currentWorkSummary = summary;
+        client?.updatePresence({ workSummary: summary ?? null });
+      },
+    });
+    currentWorkSummary = subscription.summary;
+    stopWorkSummaryWatch = subscription.stop;
+  }
   function clearInboundFlushTimer(): void {
     if (!inboundFlushTimer) {
       return;
@@ -780,6 +801,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       startedAt: sessionStartedAt,
       lastActivity: Date.now(),
       status: currentStatus(),
+      ...(currentWorkSummary ? { workSummary: currentWorkSummary } : {}),
       ...(localExtensions.size > 0
         ? {
             extensions: currentExtensionCapabilities(),
@@ -813,7 +835,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     const identity = buildPresenceIdentity(pi, currentIntercomSessionId ?? sessionId);
     lastPresenceName = identity.name;
-    client.updatePresence({ ...identity, status: currentStatus(), ...currentContextUsage() });
+    client.updatePresence({ ...identity, status: currentStatus(), workSummary: currentWorkSummary ?? null, ...currentContextUsage() });
   }
   function startNamePoll(): void {
     clearNamePollTimer();
@@ -844,7 +866,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       return;
     }
     // context% rides the status heartbeat so peers see live usage at turn boundaries.
-    client.updatePresence({ status: currentStatus(), ...currentContextUsage() });
+    client.updatePresence({ status: currentStatus(), workSummary: currentWorkSummary ?? null, ...currentContextUsage() });
   }
   function currentSessionTargetMatches(to: string, resolvedTo?: string | null, activeClient?: IntercomClient): boolean {
     const targets = new Set<string>();
@@ -1251,6 +1273,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     clearReconnectTimer();
     clearStartupConnectTimer();
     clearNamePollTimer();
+    clearWorkSummaryWatch();
     clearInboundFlushTimer();
     rejectReplyWaiter(new Error("Session replaced"));
     replyTracker.reset();
@@ -1261,6 +1284,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     runtimeContext = ctx;
     currentSessionId = ctx.sessionManager.getSessionId();
+    startWorkSummaryWatch(currentSessionId);
     currentIntercomSessionId = resolveConfiguredIntercomSessionId(currentSessionId, config);
     publishIntercomSessionId(currentIntercomSessionId);
     currentModel = ctx.model?.id ?? "unknown";
@@ -1397,6 +1421,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     clearStartupConnectTimer();
     clearReconnectTimer();
     clearNamePollTimer();
+    clearWorkSummaryWatch();
     restoreIntercomSessionId();
     rejectReplyWaiter(new Error("Session shutting down"));
     replyTracker.reset();
