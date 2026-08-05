@@ -2242,6 +2242,39 @@ test("intercom reply targets exact replyTo when multiple asks are pending", { co
   }
 });
 
+test("intercom reply targets one of multiple pending asks by short session ID", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("reply-short-id-worker");
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const worker = await waitForSessionByName(planner, "reply-short-id-worker");
+
+    assert.equal((await planner.send(worker.id, { messageId: "reply-short-id-1", text: "First?", expectsReply: true })).delivered, true);
+    assert.equal((await orchestrator.send(worker.id, { messageId: "reply-short-id-2", text: "Second?", expectsReply: true })).delivered, true);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const replyReceived = waitForReply(planner, "reply-short-id-1");
+    const result = await intercomTool.execute("reply-short-id", {
+      action: "reply",
+      to: planner.sessionId!.slice(0, 8),
+      message: "First answer.",
+    }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(result.details?.delivered, true);
+    assert.equal((await replyReceived).message.content.text, "First answer.");
+
+    const pending = await intercomTool.execute("pending-after-short-id", { action: "pending" }, new AbortController().signal, undefined, harness.ctx);
+    assert.doesNotMatch(pending.content[0]?.text ?? "", /reply-short-id-1/);
+    assert.match(pending.content[0]?.text ?? "", /reply-short-id-2/);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
 test("broker queues replies to recently disconnected named senders", { concurrency: false }, async () => {
   const { planner, orchestrator, cleanup } = await setupClients();
   const replacement = new IntercomClient();

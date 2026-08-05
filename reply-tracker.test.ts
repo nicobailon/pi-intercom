@@ -50,8 +50,36 @@ test("reply with to resolves matching pending ask", () => {
   tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "First"), 1000);
   tracker.recordIncomingMessage(createSession("reviewer-id", "reviewer"), createMessage("ask-2", "Second"), 1001);
 
-  assert.equal(tracker.resolveReplyTarget({ to: "reviewer" }, 1002).message.id, "ask-2");
+  assert.equal(tracker.resolveReplyTarget({ to: "ReViEwEr" }, 1002).message.id, "ask-2");
   assert.equal(tracker.resolveReplyTarget({ to: "planner-id" }, 1002).message.id, "ask-1");
+});
+
+test("reply with to resolves a pending ask by a unique short session ID", () => {
+  const tracker = new ReplyTracker();
+  tracker.recordIncomingMessage(createSession("019fd3c4-1111-7222-8333-444444444444", "planner"), createMessage("ask-1", "First"), 1000);
+  tracker.recordIncomingMessage(createSession("019fd3d5-1111-7222-8333-444444444444", "reviewer"), createMessage("ask-2", "Second"), 1001);
+
+  assert.equal(tracker.resolveReplyTarget({ to: "019fd3c4" }, 1002).message.id, "ask-1");
+  assert.equal(tracker.resolveReplyTarget({ to: "019fd3c4", replyTo: "ask-1" }, 1002).message.id, "ask-1");
+});
+
+test("reply with to prefers an exact sender name over another sender ID prefix", () => {
+  const tracker = new ReplyTracker();
+  tracker.recordIncomingMessage(createSession("planner-session-id", "019fd3c4"), createMessage("ask-1", "Named sender"), 1000);
+  tracker.recordIncomingMessage(createSession("019fd3c4-1111-7222-8333-444444444444", "reviewer"), createMessage("ask-2", "Prefixed sender"), 1001);
+
+  assert.equal(tracker.resolveReplyTarget({ to: "019fd3c4" }, 1002).message.id, "ask-1");
+});
+
+test("reply with to clearly rejects an ambiguous session ID prefix", () => {
+  const tracker = new ReplyTracker();
+  tracker.recordIncomingMessage(createSession("019fd3c4-1111-7222-8333-444444444444", "planner"), createMessage("ask-1", "First"), 1000);
+  tracker.recordIncomingMessage(createSession("019fd3c4-5555-7666-8777-888888888888", "reviewer"), createMessage("ask-2", "Second"), 1001);
+
+  assert.throws(
+    () => tracker.resolveReplyTarget({ to: "019fd3c4" }, 1002),
+    /Multiple pending asks match ID prefix "019fd3c4" — use a longer session ID prefix or specify `replyTo`/,
+  );
 });
 
 test("explicit to overrides the current turn context", () => {
