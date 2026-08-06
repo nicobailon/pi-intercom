@@ -36,6 +36,24 @@ function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
+/**
+ * Liveness heartbeat interval. A half-open socket (peer killed with SIGKILL or
+ * crashed without sending a FIN) stays "writable" indefinitely, so passive
+ * close-event detection never fires and the client silently drops out of the
+ * roster. The heartbeat actively round-trips a lightweight request and tears
+ * down the socket if the broker does not respond within the timeout, letting
+ * the existing onClose -> "disconnected" path drive reconnection.
+ */
+function getLivenessIntervalMs(): number {
+  const raw = Number.parseInt(process.env.PI_INTERCOM_LIVENESS_INTERVAL_MS ?? "", 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : 30_000;
+}
+
+function getLivenessTimeoutMs(): number {
+  const raw = Number.parseInt(process.env.PI_INTERCOM_LIVENESS_TIMEOUT_MS ?? "", 10);
+  return Number.isFinite(raw) && raw > 0 ? Math.min(raw, getLivenessIntervalMs()) : 5_000;
+}
+
 function connectToBrokerTarget(target: BrokerConnectTarget): net.Socket {
   return typeof target === "string"
     ? net.connect(target)
@@ -197,6 +215,8 @@ export class IntercomClient extends EventEmitter {
   private nextSenderSequence = 1;
   private disconnecting = false;
   private disconnectError: Error | null = null;
+  private livenessTimer: NodeJS.Timeout | null = null;
+  private livenessInFlight = false;
 
   private failPending(error: Error): void {
     for (const pending of this.pendingSends.values()) {
@@ -220,6 +240,50 @@ export class IntercomClient extends EventEmitter {
   isConnected(): boolean {
     const socket = this.socket;
     return Boolean(socket && this._sessionId && !this.disconnecting && !socket.destroyed && !socket.writableEnded && socket.writable);
+  }
+
+  /**
+   * Start the liveness heartbeat. Must be called once the connection is
+   * registered. The heartbeat periodically round-trips a lightweight list
+   * request and tears down the socket if the broker does not respond within
+   * the liveness timeout, so a half-open connection is detected within a
+   * bounded window instead of silently lingering forever.
+   */
+  private startLivenessHeartbeat(): void {
+    this.stopLivenessHeartbeat();
+    this.livenessTimer = setInterval(() => {
+      this.runLivenessProbe();
+    }, getLivenessIntervalMs());
+    this.livenessTimer.unref?.();
+  }
+
+  private stopLivenessHeartbeat(): void {
+    if (this.livenessTimer) {
+      clearInterval(this.livenessTimer);
+      this.livenessTimer = null;
+    }
+    this.livenessInFlight = false;
+  }
+
+  private async runLivenessProbe(): Promise<void> {
+    if (this.livenessInFlight || !this.isConnected()) {
+      return;
+    }
+    this.livenessInFlight = true;
+    try {
+      await this.listSessions({ timeoutMs: getLivenessTimeoutMs() });
+    } catch (error) {
+      // A timeout or write error means the socket is half-open: the broker is
+      // gone but the OS never delivered a close event. Destroy the socket so
+      // the onClose handler emits "disconnected" and the extension reconnects.
+      const socket = this.socket;
+      if (socket && !socket.destroyed) {
+        this.disconnectError = toError(error);
+        socket.destroy();
+      }
+    } finally {
+      this.livenessInFlight = false;
+    }
   }
 
   private requireActiveSocket(): net.Socket {
@@ -275,6 +339,7 @@ export class IntercomClient extends EventEmitter {
         settled = true;
         connectionEstablished = true;
         cleanupConnectionAttempt();
+        this.startLivenessHeartbeat();
         resolve();
       };
       
@@ -294,6 +359,7 @@ export class IntercomClient extends EventEmitter {
         const wasDisconnecting = this.disconnecting;
         const disconnectError = this.disconnectError ?? new Error("Client disconnected");
         this.disconnecting = false;
+        this.stopLivenessHeartbeat();
         cleanupConnectionAttempt();
         cleanupSocketListeners();
         this.failPending(disconnectError);
@@ -315,6 +381,13 @@ export class IntercomClient extends EventEmitter {
         if (connectionEstablished) {
           this.disconnectError = err;
           this.emit("error", err);
+          // A socket error after registration means the connection is dead.
+          // Destroy the socket so onClose fires and emits "disconnected",
+          // driving the extension's reconnect path. Without this, a half-open
+          // socket can linger with isConnected() returning true.
+          if (!socket.destroyed) {
+            socket.destroy();
+          }
         }
       };
 
@@ -609,6 +682,7 @@ export class IntercomClient extends EventEmitter {
 
     this.disconnecting = true;
     this.disconnectError = null;
+    this.stopLivenessHeartbeat();
     this.failPending(new Error("Client disconnected"));
 
     await new Promise<void>((resolve) => {
@@ -650,7 +724,7 @@ export class IntercomClient extends EventEmitter {
     writeMessage(socket, { type: "extension_capabilities_update", extensions: extensions ?? [] });
   }
 
-  listSessions(): Promise<SessionInfo[]> {
+  listSessions(options: { timeoutMs?: number } = {}): Promise<SessionInfo[]> {
     let socket: net.Socket;
     try {
       socket = this.requireActiveSocket();
@@ -673,7 +747,7 @@ export class IntercomClient extends EventEmitter {
           this.pendingLists.delete(requestId);
           wrappedReject(new Error("List sessions timeout"));
         }
-      }, 5000);
+      }, options.timeoutMs ?? 5000);
       this.pendingLists.set(requestId, { resolve: wrappedResolve, reject: wrappedReject });
       try {
         writeMessage(socket, { type: "list", requestId });
