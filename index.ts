@@ -28,8 +28,6 @@ import { formatContextUsage } from "./format-context.ts";
 const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
 const SUBAGENT_RESULT_INTERCOM_EVENT = "subagent:result-intercom";
 const SUBAGENT_RESULT_INTERCOM_DELIVERY_EVENT = "subagent:result-intercom-delivery";
-const INBOUND_FLUSH_DELAY_MS = 200;
-const INBOUND_IDLE_RETRY_MS = 500;
 const INBOUND_MESSAGE_DEDUPE_MAX = 1000;
 const INBOUND_MESSAGE_DEDUPE_RETENTION_MS = 60 * 60 * 1000;
 const DEFAULT_UNNAMED_SESSION_ALIAS_PREFIX = "subagent-chat";
@@ -498,19 +496,10 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   let agentRunning = false;
   const activeTools = new Map<string, string>();
   const replyTracker = new ReplyTracker();
-  const pendingIdleMessages: InboundMessageEntry[] = [];
   const seenInboundMessages = new Map<string, number>();
   const latestOutboundReceipts = new Map<string, { status: MessageReceiptStatus; timestamp: number; detail?: string }>();
   function dismissIncomingAsk(messageId: string): void {
     replyTracker.dismissPendingAsk(messageId);
-    const queuedIndex = pendingIdleMessages.findIndex((entry) => entry.message.id === messageId);
-    if (queuedIndex >= 0) pendingIdleMessages.splice(queuedIndex, 1);
-  }
-  function expirePendingIdleMessages(detail: string): void {
-    for (const entry of pendingIdleMessages) {
-      emitMessageReceipt(entry.message.id, "expired", detail);
-    }
-    pendingIdleMessages.length = 0;
   }
   function hasSeenInboundMessage(from: SessionInfo, message: Message, now = Date.now()): boolean {
     for (const [key, seenAt] of seenInboundMessages) {
@@ -543,22 +532,11 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
   }
   function handleMessageControl(control: MessageControl): void {
-    const queuedIndex = pendingIdleMessages.findIndex((entry) => entry.message.id === control.messageId);
+    replyTracker.dismissPendingAsk(control.messageId);
     if (control.action === "cancel") {
-      if (queuedIndex >= 0) {
-        pendingIdleMessages.splice(queuedIndex, 1);
-        replyTracker.dismissPendingAsk(control.messageId);
-        emitMessageReceipt(control.messageId, "cancelled", "cancelled before injection");
-      } else {
-        emitMessageReceipt(control.messageId, "cancellation_requested", "message was not queued; it may already be injected or processed");
-      }
+      emitMessageReceipt(control.messageId, "cancellation_requested", "message may already be injected or processed");
       return;
     }
-
-    if (queuedIndex >= 0) {
-      pendingIdleMessages.splice(queuedIndex, 1);
-    }
-    replyTracker.dismissPendingAsk(control.messageId);
     emitMessageReceipt(control.messageId, "superseded", control.supersededBy ? `superseded by ${control.supersededBy}` : undefined);
   }
   function latestDeliveryState(messageId: string | null, fallback: string): string {
@@ -568,7 +546,6 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     const receipt = latestOutboundReceipts.get(messageId);
     return receipt ? receipt.status : fallback;
   }
-  let inboundFlushTimer: NodeJS.Timeout | null = null;
   let replyWaiter: {
     from: string;
     replyTo: string;
@@ -637,13 +614,6 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     clearInterval(namePollTimer);
     namePollTimer = null;
-  }
-  function clearInboundFlushTimer(): void {
-    if (!inboundFlushTimer) {
-      return;
-    }
-    clearTimeout(inboundFlushTimer);
-    inboundFlushTimer = null;
   }
   function getLiveContext(ctx: ExtensionContext | null = runtimeContext, generation = runtimeGeneration): ExtensionContext | null {
     if (disposed || shuttingDown || generation !== runtimeGeneration || !ctx) {
@@ -872,16 +842,14 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     return false;
   }
-  function sendIncomingMessage(entry: InboundMessageEntry, delivery: "trigger" | "followUp", generation = runtimeGeneration, forceTrigger = false): void {
+  function sendIncomingMessage(entry: InboundMessageEntry, delivery: "trigger" | "steer", generation = runtimeGeneration, forceTrigger = false): void {
     if (runtimeStarted && !getLiveContext(runtimeContext, generation)) {
       return;
     }
     const injectedMessage = { ...entry.message, injectedAt: Date.now() };
     emitMessageReceipt(injectedMessage.id, "injected");
     const deliveredEntry = { ...entry, message: injectedMessage };
-    if (delivery !== "followUp") {
-      replyTracker.queueTurnContext({ from: entry.from, message: injectedMessage, receivedAt: Date.now() });
-    }
+    replyTracker.queueTurnContext({ from: entry.from, message: injectedMessage, receivedAt: Date.now() });
     const senderDisplay = entry.from.name || entry.from.id.slice(0, 8);
     const replyInstruction = entry.replyCommand ? `\n\nTo reply, use the intercom tool: ${entry.replyCommand}` : "";
     const deliveryMetadata = formatInboundDeliveryMetadata(injectedMessage);
@@ -894,50 +862,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       },
       delivery === "trigger" && shouldTriggerInboundMessage(entry, forceTrigger)
         ? { triggerTurn: true }
-        : { deliverAs: "followUp" }
+        : { deliverAs: "steer" }
     );
-  }
-  function scheduleInboundFlush(delayMs = INBOUND_FLUSH_DELAY_MS): void {
-    if (!getLiveContext()) {
-      return;
-    }
-    const scheduledGeneration = runtimeGeneration;
-    clearInboundFlushTimer();
-    inboundFlushTimer = setTimeout(() => {
-      inboundFlushTimer = null;
-      flushIdleMessages(scheduledGeneration);
-    }, delayMs);
-  }
-  function flushIdleMessages(generation = runtimeGeneration): void {
-    if (pendingIdleMessages.length === 0) {
-      return;
-    }
-    const ctx = getLiveContext(runtimeContext, generation);
-    if (!ctx) {
-      return;
-    }
-
-    let isIdle: boolean;
-    try {
-      isIdle = ctx.isIdle();
-    } catch {
-      // Stale contexts are cleaned up by shutdown/reload; do not deliver queued messages through them.
-      return;
-    }
-    if (!isIdle) {
-      scheduleInboundFlush(INBOUND_IDLE_RETRY_MS);
-      return;
-    }
-
-    const entries = pendingIdleMessages.splice(0, pendingIdleMessages.length);
-    entries.forEach((entry, index) => {
-      sendIncomingMessage(entry, index === 0 ? "trigger" : "followUp");
-    });
-  }
-  function queueIdleMessage(entry: InboundMessageEntry): void {
-    pendingIdleMessages.push(entry);
-    emitMessageReceipt(entry.message.id, "queued");
-    scheduleInboundFlush();
   }
   function handleIncomingMessage(ctx: ExtensionContext, from: SessionInfo, message: Message): void {
     const messageGeneration = runtimeGeneration;
@@ -996,7 +922,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
           }
           return;
         }
-        queueIdleMessage(entry);
+        sendIncomingMessage(entry, "steer");
         return;
       }
       if (getLiveContext(liveContext, messageGeneration)) {
@@ -1251,10 +1177,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     clearReconnectTimer();
     clearStartupConnectTimer();
     clearNamePollTimer();
-    clearInboundFlushTimer();
     rejectReplyWaiter(new Error("Session replaced"));
     replyTracker.reset();
-    expirePendingIdleMessages("receiver session replaced before injection");
     if (previousClient) {
       client = null;
       void previousClient.disconnect().catch(() => undefined);
@@ -1400,8 +1324,6 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     restoreIntercomSessionId();
     rejectReplyWaiter(new Error("Session shutting down"));
     replyTracker.reset();
-    expirePendingIdleMessages("receiver session shut down before injection");
-    clearInboundFlushTimer();
     agentRunning = false;
     activeTools.clear();
     if (client) {
@@ -1418,7 +1340,6 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       return;
     }
     replyTracker.endTurn();
-    scheduleInboundFlush(0);
   });
   pi.on("agent_start", () => {
     if (!getLiveContext()) {
@@ -1449,7 +1370,6 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     agentRunning = false;
     activeTools.clear();
     syncPresenceStatus();
-    scheduleInboundFlush(0);
   });
   pi.on("turn_start", (_event, ctx) => {
     const sessionId = ctx.sessionManager.getSessionId();
