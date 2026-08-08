@@ -26,17 +26,23 @@ import { writeMessage } from "./framing.ts";
  */
 
 const homeDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-liveness-unit-"));
+const runtimeAgentDir = process.platform === "win32" ? undefined : mkdtempSync("/tmp/piic-");
 const previousHome = process.env.HOME;
 const previousUserProfile = process.env.USERPROFILE;
+const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 process.env.HOME = homeDir;
 process.env.USERPROFILE = homeDir;
+if (runtimeAgentDir) process.env.PI_CODING_AGENT_DIR = runtimeAgentDir;
 process.env.PI_INTERCOM_LIVENESS_INTERVAL_MS = "100";
 process.env.PI_INTERCOM_LIVENESS_TIMEOUT_MS = "200";
 
 test.after(() => {
   process.env.HOME = previousHome;
   process.env.USERPROFILE = previousUserProfile;
+  if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
   rmSync(homeDir, { recursive: true, force: true });
+  if (runtimeAgentDir) rmSync(runtimeAgentDir, { recursive: true, force: true });
 });
 
 /**

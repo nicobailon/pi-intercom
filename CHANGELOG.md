@@ -6,6 +6,7 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ### Fixed
 - Allow replies to target pending asks by a unique sender session-ID prefix. Thanks to Benjamin Jesuiter (`bjesuiter`) for PR #85.
+- Detect half-open broker sockets and reconnect clients. Thanks to Nicolas Marchildon (`elecnix`) for issue #89 and PR #88.
 
 ## [0.9.2] - 2026-08-03
 
