@@ -380,15 +380,17 @@ function duplicateSessionNames(sessions: SessionInfo[]): Set<string> {
 function sessionIdPrefixes(sessions: SessionInfo[]): Map<string, string> {
   const prefixes = new Map<string, string>();
   for (const session of sessions) {
-    const longestSharedPrefix = Math.max(0, ...sessions
-      .filter((other) => other.id !== session.id)
-      .map((other) => {
-        let length = 0;
-        while (length < session.id.length && session.id[length] === other.id[length]) {
-          length += 1;
-        }
-        return length;
-      }));
+    let longestSharedPrefix = 0;
+    for (const other of sessions) {
+      if (other.id === session.id) {
+        continue;
+      }
+      let length = 0;
+      while (length < session.id.length && session.id[length] === other.id[length]) {
+        length += 1;
+      }
+      longestSharedPrefix = Math.max(longestSharedPrefix, length);
+    }
     const minimumLength = Math.max(8, longestSharedPrefix + 1);
     const groupBoundary = session.id.indexOf("-", minimumLength);
     const length = groupBoundary === -1 ? minimumLength : groupBoundary;
@@ -1947,15 +1949,9 @@ Usage:
             if (effectiveReplyTo) {
               dismissIncomingAsk(effectiveReplyTo);
             }
-            if (inferredAsk) {
-              return {
-                content: [{ type: "text", text: `Reply sent to ${to} (inferred from pending ask)` }],
-                details: { messageId: result.id, delivered: true, replyTo: effectiveReplyTo },
-              };
-            }
             return {
-              content: [{ type: "text", text: `Message sent to ${to}` }],
-              details: { messageId: result.id, delivered: true, replyTo: effectiveReplyTo },
+              content: [{ type: "text", text: inferredAsk ? `Reply sent to ${to} (inferred from pending ask)` : `Message sent to ${to}` }],
+              details: { messageId: result.id, delivered: true, ...(effectiveReplyTo ? { replyTo: effectiveReplyTo } : {}) },
             };
           } catch (error) {
             return {
