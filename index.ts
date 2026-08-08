@@ -848,10 +848,13 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     const injectedMessage = { ...entry.message, injectedAt: Date.now() };
     emitMessageReceipt(injectedMessage.id, "injected");
-    const deliveredEntry = { ...entry, message: injectedMessage };
+    const replyCommand = delivery === "steer" && entry.replyCommand && entry.message.expectsReply
+      ? `intercom({ action: "reply", replyTo: ${JSON.stringify(entry.message.id)}, message: "..." })`
+      : entry.replyCommand;
+    const deliveredEntry = { ...entry, message: injectedMessage, replyCommand };
     replyTracker.queueTurnContext({ from: entry.from, message: injectedMessage, receivedAt: Date.now() });
     const senderDisplay = entry.from.name || entry.from.id.slice(0, 8);
-    const replyInstruction = entry.replyCommand ? `\n\nTo reply, use the intercom tool: ${entry.replyCommand}` : "";
+    const replyInstruction = replyCommand ? `\n\nTo reply, use the intercom tool: ${replyCommand}` : "";
     const deliveryMetadata = formatInboundDeliveryMetadata(injectedMessage);
     pi.sendMessage(
       {

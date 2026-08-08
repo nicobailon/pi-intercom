@@ -1186,7 +1186,7 @@ test("busy interactive sessions steer top-level asks without aborting", { concur
     const target = await waitForSessionByName(planner, "interactive-worker");
 
     const delivered = await planner.send(target.id, {
-      messageId: "interactive-busy-ask",
+      messageId: 'interactive-busy-"ask',
       text: "Can you respond after your current turn?",
       expectsReply: true,
     });
@@ -1197,6 +1197,7 @@ test("busy interactive sessions steer top-level asks without aborting", { concur
     assert.equal(harness.sentMessages[0]?.message.customType, "intercom_message");
     assert.equal(harness.sentMessages[0]?.options?.deliverAs, "steer");
     assert.match(harness.sentMessages[0]?.message.content ?? "", /Can you respond after your current turn/);
+    assert.match(harness.sentMessages[0]?.message.content ?? "", /replyTo: "interactive-busy-\\"ask"/);
 
     await harness.emitLifecycle("turn_end");
     assert.equal(harness.sentMessages.length, 1, "turn end must not inject the steered message again");
