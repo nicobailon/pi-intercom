@@ -179,6 +179,13 @@ test("findUniquePendingAskFrom returns the sole match by case-insensitive name",
   assert.equal(context?.message.id, "ask-1");
 });
 
+test("findUniquePendingAskFrom does not resolve an ID prefix", () => {
+  const tracker = new ReplyTracker();
+  tracker.recordIncomingMessage(createSession("abcdef-session-id", "planner"), createMessage("ask-1", "Need a decision"), 1000);
+
+  assert.equal(tracker.findUniquePendingAskFrom("abcdef", 1001), null);
+});
+
 test("findUniquePendingAskFrom returns null when there is no match", () => {
   const tracker = new ReplyTracker();
   tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "Need a decision"), 1000);

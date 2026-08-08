@@ -116,7 +116,7 @@ export class ReplyTracker {
       if (now - context.receivedAt > this.askTimeoutMs) {
         return false;
       }
-      return matchesPendingSender(context, to);
+      return context.from.id === to || context.from.name?.toLowerCase() === to.toLowerCase();
     });
     return candidates.length === 1 ? candidates[0]! : null;
   }
