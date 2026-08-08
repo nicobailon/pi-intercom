@@ -9,6 +9,7 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 - Detect half-open broker sockets and reconnect clients. Thanks to Nicolas Marchildon (`elecnix`) for issue #89 and PR #88.
 - Hand busy interactive inbound messages directly to Pi's safe steering queue instead of waiting for aggregate idle, preventing stale coordination from appearing hours after it was received. Thanks to Xiangzhe (`xz-dev`) for issue #86 and PR #87.
 - Treat a public send to the sole pending asker as its reply. Thanks to Grant Hutchins (`nertzy`) for PR #90.
+- Display session-ID prefixes that distinguish listed sessions. Thanks to Chris Goddard (`chrisgoddard`) for issue #83.
 
 ## [0.9.2] - 2026-08-03
 

@@ -910,7 +910,7 @@ test("intercom-id inserts a stable handoff snippet into the editor", { concurren
   }
 });
 
-test("intercom tool points at the short id when names collide", { concurrency: false }, async () => {
+test("intercom tool shows unique ID prefixes when names collide", { concurrency: false }, async () => {
   const { cleanup } = await setupClients();
   const { default: piIntercomExtension } = await import("./index.ts");
   const twinA = new IntercomClient();
@@ -918,19 +918,29 @@ test("intercom tool points at the short id when names collide", { concurrency: f
   const harness = createExtensionHarness("collision-sender");
 
   try {
-    await twinA.connect({ name: "twin", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, "aaaa1111-session");
-    await twinB.connect({ name: "twin", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, "bbbb2222-session");
+    await twinA.connect({ name: "twin", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, "019fc92c-066f-755e-95d8-50ebb030d40d");
+    await twinB.connect({ name: "twin", cwd: `${repoDir}/other`, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, "019fc92c-b5f7-7536-b715-e41a4a6e9eb5");
     piIntercomExtension(harness.pi as never);
     await harness.emitLifecycle("session_start");
 
     const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const listed = await intercomTool.execute("list-twin", { action: "list" }, new AbortController().signal, undefined, harness.ctx);
+    const listText = listed.content.map((part) => (part as { text?: string }).text ?? "").join("");
+    assert.match(listText, /019fc92c-066f/);
+    assert.match(listText, /019fc92c-b5f7/);
+
+    const listedCwd = await intercomTool.execute("list-cwd-twin", { action: "list-cwd" }, new AbortController().signal, undefined, harness.ctx);
+    const listCwdText = listedCwd.content.map((part) => (part as { text?: string }).text ?? "").join("");
+    assert.match(listCwdText, /019fc92c-066f/);
+    assert.doesNotMatch(listCwdText, /019fc92c-b5f7/);
+
     const result = await intercomTool.execute("send-twin", { action: "send", to: "twin", message: "which one?" }, new AbortController().signal, undefined, harness.ctx);
 
     assert.equal(result.details?.error, true);
     const text = result.content.map((part) => (part as { text?: string }).text ?? "").join("");
     assert.match(text, /parentheses/);
-    assert.match(text, /aaaa1111/);
-    assert.match(text, /bbbb2222/);
+    assert.match(text, /019fc92c-066f/);
+    assert.match(text, /019fc92c-b5f7/);
     await harness.emitLifecycle("session_shutdown");
   } finally {
     await twinA.disconnect().catch(() => undefined);

@@ -377,8 +377,24 @@ function duplicateSessionNames(sessions: SessionInfo[]): Set<string> {
       .filter((name, index, names) => names.indexOf(name) !== index)
   );
 }
-function shortSessionId(sessionId: string): string {
-  return sessionId.slice(0, 8);
+function sessionIdPrefixes(sessions: SessionInfo[]): Map<string, string> {
+  const prefixes = new Map<string, string>();
+  for (const session of sessions) {
+    const longestSharedPrefix = Math.max(0, ...sessions
+      .filter((other) => other.id !== session.id)
+      .map((other) => {
+        let length = 0;
+        while (length < session.id.length && session.id[length] === other.id[length]) {
+          length += 1;
+        }
+        return length;
+      }));
+    const minimumLength = Math.max(8, longestSharedPrefix + 1);
+    const groupBoundary = session.id.indexOf("-", minimumLength);
+    const length = groupBoundary === -1 ? minimumLength : groupBoundary;
+    prefixes.set(session.id, session.id.slice(0, length));
+  }
+  return prefixes;
 }
 function parseSubagentIntercomPayload(payload: unknown): { to: string; message: string; requestId?: string } | null {
   if (typeof payload !== "object" || payload === null) {
@@ -415,15 +431,15 @@ function formatSessionLabel(session: SessionInfo, duplicates: Set<string>): stri
     return session.id;
   }
   return duplicates.has(session.name.toLowerCase())
-    ? `${session.name} (${shortSessionId(session.id)})`
+    ? `${session.name} (${session.id.slice(0, 8)})`
     : session.name;
 }
-function formatSessionListRow(session: SessionInfo, currentCwd: string, isSelf: boolean): string {
+function formatSessionListRow(session: SessionInfo, currentCwd: string, isSelf: boolean, idPrefix: string): string {
   const name = session.name || "Unnamed session";
   const tags = [isSelf ? "self" : session.cwd === currentCwd ? "same cwd" : undefined, session.status]
     .filter((tag): tag is string => Boolean(tag));
   const suffix = tags.length ? ` [${tags.join(", ")}]` : "";
-  return `• ${name} (${shortSessionId(session.id)}) — ${session.cwd} (${session.model}${formatContextUsage(session)})${suffix}`;
+  return `• ${name} (${idPrefix}) — ${session.cwd} (${session.model}${formatContextUsage(session)})${suffix}`;
 }
 function previewText(value: unknown, maxLength = 72): string | undefined {
   if (typeof value !== "string") {
@@ -1115,7 +1131,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     const lowerName = nameOrId.toLowerCase();
     const byName = sessions.filter(s => s.name?.toLowerCase() === lowerName);
     if (byName.length > 1) {
-      const ids = byName.map(s => shortSessionId(s.id)).join(", ");
+      const prefixes = sessionIdPrefixes(sessions);
+      const ids = byName.map((session) => prefixes.get(session.id)!).join(", ");
       throw new Error(`Multiple sessions named "${nameOrId}" are connected. Address one by the id shown in parentheses by "list" (${ids}).`);
     }
     if (byName.length === 1) {
@@ -1777,10 +1794,11 @@ Usage:
               };
             }
 
-            const currentSection = `**Current session:**\n${formatSessionListRow(currentSession, currentSession.cwd, true)}`;
+            const prefixes = sessionIdPrefixes(sessions);
+            const currentSection = `**Current session:**\n${formatSessionListRow(currentSession, currentSession.cwd, true, prefixes.get(currentSession.id)!)}`;
             const otherSection = otherSessions.length === 0
               ? "**Other sessions:**\nNo other sessions connected."
-              : `**Other sessions:**\n${otherSessions.map(s => formatSessionListRow(s, currentSession.cwd, false)).join("\n")}`;
+              : `**Other sessions:**\n${otherSessions.map((session) => formatSessionListRow(session, currentSession.cwd, false, prefixes.get(session.id)!)).join("\n")}`;
 
             return {
               content: [{ type: "text", text: `${currentSection}\n\n${otherSection}` }],
@@ -1830,10 +1848,11 @@ Usage:
               }
             }
 
-            const currentSection = `**Current session:**\n${formatSessionListRow(currentSession, currentSession.cwd, true)}`;
+            const prefixes = sessionIdPrefixes(sessions);
+            const currentSection = `**Current session:**\n${formatSessionListRow(currentSession, currentSession.cwd, true, prefixes.get(currentSession.id)!)}`;
             const otherSection = otherSessions.length === 0
               ? `**Other sessions (cwd: ${filterCwd}):**\n${emptyNote}`
-              : `**Other sessions (cwd: ${filterCwd}):**\n${otherSessions.map(s => formatSessionListRow(s, currentSession.cwd, false)).join("\n")}`;
+              : `**Other sessions (cwd: ${filterCwd}):**\n${otherSessions.map((session) => formatSessionListRow(session, currentSession.cwd, false, prefixes.get(session.id)!)).join("\n")}`;
 
             return {
               content: [{ type: "text", text: `${currentSection}\n\n${otherSection}` }],
