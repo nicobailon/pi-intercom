@@ -15,7 +15,7 @@ import { dirname, join } from "node:path";
 
 const MAX_STATE_BYTES = 64 * 1024;
 
-export interface StateEnvelope {
+interface StateEnvelope {
   formatVersion: 1;
   namespace: string;
   revision: number;
@@ -74,23 +74,34 @@ export class ExtensionStateManager {
       if (!value || typeof value !== "object" || Array.isArray(value)) return null;
 
       const envelope = value as Record<string, unknown>;
+      const revision = envelope.revision;
+      const updatedAt = envelope.updatedAt;
+      const payloadSha256 = envelope.payloadSha256;
       if (
         envelope.formatVersion !== 1
         || envelope.namespace !== namespace
-        || !Number.isSafeInteger(envelope.revision)
-        || (envelope.revision as number) < 0
-        || typeof envelope.updatedAt !== "number"
-        || typeof envelope.payloadSha256 !== "string"
+        || typeof revision !== "number"
+        || !Number.isSafeInteger(revision)
+        || revision < 0
+        || typeof updatedAt !== "number"
+        || typeof payloadSha256 !== "string"
       ) {
         return null;
       }
 
       const payloadJson = serializePayload(envelope.payload);
-      if (payloadJson === null || payloadHash(payloadJson) !== envelope.payloadSha256) {
+      if (payloadJson === null || payloadHash(payloadJson) !== payloadSha256) {
         return null;
       }
 
-      return envelope as unknown as StateEnvelope;
+      return {
+        formatVersion: 1,
+        namespace,
+        revision,
+        updatedAt,
+        payloadSha256,
+        payload: envelope.payload,
+      };
     } catch {
       return null;
     }

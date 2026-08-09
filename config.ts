@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { getIntercomDirPath } from "./broker/paths.ts";
 
-export const DEFAULT_ASK_TIMEOUT_MS = 10 * 60 * 1000;
+const DEFAULT_ASK_TIMEOUT_MS = 10 * 60 * 1000;
 
 export function getAskTimeoutMs(): number {
   const raw = process.env.PI_INTERCOM_ASK_TIMEOUT_MS;
@@ -151,7 +151,7 @@ export function loadConfig(): IntercomConfig {
 
     return config;
   } catch (error) {
-    console.error(`Failed to load intercom config at ${configPath}:`, error);
-    return { ...defaults, inboundTrigger: "never" };
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to load intercom config at ${configPath}: ${message}`, { cause: error });
   }
 }

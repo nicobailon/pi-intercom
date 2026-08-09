@@ -73,20 +73,18 @@ test("loadConfig accepts a restart-stable intercom id", async () => {
   }
 });
 
-test("loadConfig rejects invalid inboundTrigger values by failing closed", async () => {
+test("loadConfig rejects invalid inboundTrigger values", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-intercom-config-"));
   try {
     mkdirSync(join(root, "intercom"), { recursive: true });
     writeFileSync(join(root, "intercom", "config.json"), JSON.stringify({ inboundTrigger: "prompt" }));
-    const previousError = console.error;
-    console.error = () => undefined;
-    try {
-      await withAgentDir(root, () => {
-        assert.equal(loadConfig().inboundTrigger, "never");
-      });
-    } finally {
-      console.error = previousError;
-    }
+
+    await withAgentDir(root, () => {
+      assert.throws(
+        () => loadConfig(),
+        /Failed to load intercom config.*"inboundTrigger" must be "always", "replies", or "never"/,
+      );
+    });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

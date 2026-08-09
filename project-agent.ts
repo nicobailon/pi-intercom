@@ -65,7 +65,7 @@ function normalizeCode(raw: unknown): HerdrErrorCode {
   return "VALIDATION_ERROR";
 }
 
-export function createHerdrClient(options: { bin?: string; spawn?: SpawnHerdr } = {}): HerdrClient {
+function createHerdrClient(options: { bin?: string; spawn?: SpawnHerdr } = {}): HerdrClient {
   const bin = options.bin ?? process.env.HERDR_BIN ?? "herdr";
   const spawnImpl = options.spawn ?? spawn;
   return {
@@ -93,11 +93,11 @@ export function createHerdrClient(options: { bin?: string; spawn?: SpawnHerdr } 
           resolveResult(result);
         };
         const abort = () => {
-          try { child.kill(); } catch {}
+          child.kill();
           finish(error("TIMEOUT", `Herdr command '${args.join(" ")}' was aborted.`));
         };
         const timer = setTimeout(() => {
-          try { child.kill(); } catch {}
+          child.kill();
           finish(error("TIMEOUT", `Herdr command '${args.join(" ")}' timed out after ${runOptions.timeoutMs ?? 15_000}ms.`));
         }, runOptions.timeoutMs ?? 15_000);
         timer.unref?.();
@@ -176,11 +176,7 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-export function buildProjectPaneCommand(piCommand: string = process.env.PI_INTERCOM_PI_BIN?.trim() || process.env.PI_BIN?.trim() || "pi"): string {
-  return shellQuote(piCommand);
-}
-
-export function resolveProjectRoot(cwd: string): string {
+function resolveProjectRoot(cwd: string): string {
   const resolved = resolve(cwd);
   const stat = statSync(resolved);
   if (!stat.isDirectory()) {
@@ -246,7 +242,7 @@ export async function openProjectPane(input: {
   const paneId = extractPaneId(split.data);
   if (!paneId) throw new Error("Herdr project pane error (PANE_GONE): pane split returned no pane id.");
 
-  const command = buildProjectPaneCommand();
+  const command = shellQuote(process.env.PI_INTERCOM_PI_BIN?.trim() || process.env.PI_BIN?.trim() || "pi");
   const started = await client.run(["pane", "run", paneId, command], { timeoutMs: 15_000, signal: input.signal });
   if (started.ok === false) {
     await client.run(["pane", "close", paneId], { timeoutMs: 5_000 });

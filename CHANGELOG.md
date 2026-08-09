@@ -7,7 +7,11 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 ### Added
 - Added cwd-scoped `send` and `ask` targeting plus `openProjectPaneIfMissing` for visible cross-codebase peer conversations through Herdr project panes.
 
+### Changed
+- Cleaned intercom tool copy, visible-peer skill guidance, and broker protocol validation structure.
+
 ### Fixed
+- Surface malformed intercom config errors with path context instead of silently falling back to defaults.
 - Fail blocking `ask` and supervisor-decision requests immediately when the target is not connected instead of accepting a mailbox delivery that can wait until timeout.
 - Prevent disconnected mailbox routing from delivering a message back to its sender or transferring mail through runtime-only unnamed-session aliases. Thanks to ELA718 for PR #93.
 - Extend unnamed-session fallback aliases with enough session-ID characters to distinguish UUIDv7 sessions started close together.

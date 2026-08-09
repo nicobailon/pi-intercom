@@ -1,6 +1,6 @@
 import type { Socket } from "net";
 
-export const MAX_FRAME_BYTES = 1024 * 1024;
+const MAX_FRAME_BYTES = 1024 * 1024;
 
 /**
  * Write a length-prefixed message to a socket.

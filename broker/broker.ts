@@ -3,6 +3,7 @@ import { writeFileSync, unlinkSync } from "fs";
 import { join } from "path";
 import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.ts";
+import { isMessage, isMessageReceipt, isSessionId, isSessionRegistration } from "./protocol.ts";
 import {
   ensureIntercomRuntimeDir,
   getBrokerListenTarget,
@@ -17,7 +18,7 @@ import {
 import { getAskTimeoutMs } from "../config.ts";
 import { sameCwd } from "../cwd.ts";
 import { EXTENSION_BUS_FEATURE } from "../types.ts";
-import type { SessionInfo, Message, Attachment, BrokerMessage, SessionRegistration, ExtensionCapability, MessageControl, MessageReceipt, MessageReceiptStatus } from "../types.ts";
+import type { SessionInfo, Message, BrokerMessage, ExtensionCapability, MessageControl } from "../types.ts";
 import { ExtensionStateManager } from "./extension-state.ts";
 import { assertNoLiveBroker } from "./runtime-claim.ts";
 
@@ -91,127 +92,6 @@ interface MailboxMessage {
   target: SessionInfo;
   message: Message;
   queuedAt: number;
-}
-
-function isMessageReceiptStatus(value: unknown): value is MessageReceiptStatus {
-  return value === "receiver_received"
-    || value === "queued"
-    || value === "injected"
-    || value === "acknowledged"
-    || value === "expired"
-    || value === "cancelled"
-    || value === "superseded"
-    || value === "cancellation_requested";
-}
-
-function isMessageReceipt(value: unknown): value is MessageReceipt {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return false;
-  }
-  const receipt = value as Record<string, unknown>;
-  if (typeof receipt.messageId !== "string" || !isMessageReceiptStatus(receipt.status) || typeof receipt.timestamp !== "number") {
-    return false;
-  }
-  return receipt.detail === undefined || typeof receipt.detail === "string";
-}
-
-function isAttachment(value: unknown): value is Attachment {
-  if (typeof value !== "object" || value === null) {
-    return false;
-  }
-
-  const attachment = value as Record<string, unknown>;
-
-  if (
-    attachment.type !== "file"
-    && attachment.type !== "snippet"
-    && attachment.type !== "context"
-  ) {
-    return false;
-  }
-
-  if (typeof attachment.name !== "string" || typeof attachment.content !== "string") {
-    return false;
-  }
-
-  return attachment.language === undefined || typeof attachment.language === "string";
-}
-
-function isMessage(value: unknown): value is Message {
-  if (typeof value !== "object" || value === null) {
-    return false;
-  }
-
-  const message = value as Record<string, unknown>;
-
-  if (typeof message.id !== "string" || typeof message.timestamp !== "number") {
-    return false;
-  }
-
-  for (const key of ["senderSequence", "brokerReceivedAt", "brokerDeliveredAt", "receiverReceivedAt", "injectedAt"] as const) {
-    if (message[key] !== undefined && typeof message[key] !== "number") {
-      return false;
-    }
-  }
-
-  if (message.supersedes !== undefined && typeof message.supersedes !== "string") {
-    return false;
-  }
-
-  if (message.retryOf !== undefined && typeof message.retryOf !== "string") {
-    return false;
-  }
-
-  if (message.replyTo !== undefined && typeof message.replyTo !== "string") {
-    return false;
-  }
-
-  if (message.expectsReply !== undefined && typeof message.expectsReply !== "boolean") {
-    return false;
-  }
-
-  if (typeof message.content !== "object" || message.content === null) {
-    return false;
-  }
-
-  const content = message.content as Record<string, unknown>;
-  if (typeof content.text !== "string") {
-    return false;
-  }
-
-  return content.attachments === undefined
-    || (Array.isArray(content.attachments) && content.attachments.every(isAttachment));
-}
-
-function isSessionId(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0;
-}
-
-function isSessionRegistration(value: unknown): value is SessionRegistration {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return false;
-  }
-
-  const session = value as Record<string, unknown>;
-
-  if (
-    typeof session.cwd !== "string"
-    || typeof session.model !== "string"
-    || typeof session.pid !== "number"
-    || typeof session.startedAt !== "number"
-    || typeof session.lastActivity !== "number"
-  ) {
-    return false;
-  }
-
-  if (session.name !== undefined && typeof session.name !== "string") {
-    return false;
-  }
-  if (session.runtimeFallbackAlias !== undefined && typeof session.runtimeFallbackAlias !== "boolean") {
-    return false;
-  }
-
-  return session.status === undefined || typeof session.status === "string";
 }
 
 class IntercomBroker {
@@ -1248,12 +1128,10 @@ class IntercomBroker {
       const winner = candidates[0];
       const existing = this.namespaceOwners.get(namespace);
 
-      // Check if owner changed or socket changed
       const ownerChanged = !existing || existing.sessionId !== winner.sessionId;
       const socketChanged = existing && existing.socket !== winner.session.socket;
 
       if (ownerChanged || socketChanged) {
-        // Generate new epoch
         const epoch = randomUUID();
         this.namespaceOwners.set(namespace, {
           sessionId: winner.sessionId,
@@ -1261,7 +1139,6 @@ class IntercomBroker {
           epoch,
         });
 
-        // Broadcast owner change to all capable sessions
         for (const session of this.sessions.values()) {
           if (session.extensions?.length) {
             const isCapable = session.extensions.some((ext) => ext.namespace === namespace);

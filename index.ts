@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { randomUUID } from "crypto";
 import { Type } from "typebox";
@@ -96,9 +96,9 @@ function formatAttachments(attachments: Attachment[]): string {
   let text = "";
   for (const att of attachments) {
     if (att.language) {
-      text += `\n\n---\n📎 ${att.name}\n~~~${att.language}\n${att.content}\n~~~`;
+      text += `\n\n---\nAttachment: ${att.name}\n~~~${att.language}\n${att.content}\n~~~`;
     } else {
-      text += `\n\n---\n📎 ${att.name}\n${att.content}`;
+      text += `\n\n---\nAttachment: ${att.name}\n${att.content}`;
     }
   }
   return text;
@@ -890,7 +890,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     pi.sendMessage(
       {
         customType: "intercom_message",
-        content: `**📨 From ${senderDisplay}** (${entry.from.cwd})${replyInstruction}\n\n_${deliveryMetadata}_\n\n${entry.bodyText}`,
+        content: `**From ${senderDisplay}** (${entry.from.cwd})${replyInstruction}\n\n_${deliveryMetadata}_\n\n${entry.bodyText}`,
         display: true,
         details: deliveredEntry,
       },
@@ -1505,7 +1505,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   const childOrchestratorMetadata = readChildOrchestratorMetadata();
   const nativeSupervisorChannelAvailable = Boolean(process.env[SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV]?.trim());
   if (childOrchestratorMetadata && !nativeSupervisorChannelAvailable) {
-    pi.registerTool({
+    pi.registerTool(defineTool({
       name: "contact_supervisor",
       label: "Contact Supervisor",
       description: "Subagent-only tool for contacting the supervisor agent that delegated this task. Use need_decision when blocked, uncertain, needing approval, or facing a product/API/scope decision before continuing; this waits for the supervisor's reply. Use interview_request when multiple structured questions need supervisor answers; this also waits for a reply. Use progress_update only for meaningful progress or unexpected discoveries that change the plan; this does not wait for a reply. Do not use for routine completion handoffs.",
@@ -1773,10 +1773,10 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         }
         return new Text(text, 0, 0);
       },
-    } as any);
+    }));
   }
 
-  pi.registerTool({
+  pi.registerTool(defineTool({
     name: "intercom",
     label: "Intercom",
     description: `Send a message to another pi session running on this machine.
@@ -1987,7 +1987,7 @@ Usage:
             const attachmentText = attachments?.length ? formatAttachments(attachments) : "";
             if (confirmSend && cwd && openProjectPaneIfMissing) {
               const confirmed = await ctx.ui.confirm(
-                "Send Message",
+                "Send message",
                 `Send to "${to ?? cwd}":\n\n${message}${attachmentText}`,
               );
               if (!confirmed) {
@@ -2012,7 +2012,7 @@ Usage:
             const effectiveReplyTo = replyTo ?? inferredAsk?.message.id;
             if (confirmSend && !(cwd && openProjectPaneIfMissing)) {
               const confirmed = await ctx.ui.confirm(
-                "Send Message",
+                "Send message",
                 `Send to "${targetDisplay}":\n\n${message}${attachmentText}`,
               );
               if (!confirmed) {
@@ -2328,7 +2328,7 @@ Usage:
       }
       return new Text(text, 0, 0);
     },
-  } as any);
+  }));
 
   function insertIntoEditor(ctx: ExtensionContext, text: string): boolean {
     if (!ctx.hasUI) return false;

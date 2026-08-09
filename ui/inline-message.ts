@@ -42,7 +42,7 @@ export class InlineMessageComponent implements Component {
     }
     const bodyWidth = Math.max(1, width - 2);
 
-    const header = ` 📨 From: ${senderName} (${this.from.cwd}) `;
+    const header = ` From: ${senderName} (${this.from.cwd}) `;
     const headerText = truncateToWidth(this.collapsed ? `${header} Ctrl+O expands ` : header, bodyWidth, "");
     const headerPadding = Math.max(0, bodyWidth - visibleWidth(headerText));
     lines.push(
@@ -62,12 +62,12 @@ export class InlineMessageComponent implements Component {
       lines.push(frameLine(this.theme.fg("text", this.collapsedPreview)));
 
       const meta: string[] = [];
-      if (this.replyCommand) meta.push(`↩ To reply: ${this.replyCommand}`);
+      if (this.replyCommand) meta.push(`To reply: ${this.replyCommand}`);
       if (this.message.content.attachments?.length) {
         const count = this.message.content.attachments.length;
-        meta.push(`📎 ${count} attachment${count === 1 ? "" : "s"}`);
+        meta.push(`${count} attachment${count === 1 ? "" : "s"}`);
       }
-      if (this.message.replyTo && !this.message.expectsReply) meta.push(`↳ Reply to ${this.message.replyTo.slice(0, 8)}`);
+      if (this.message.replyTo && !this.message.expectsReply) meta.push(`Reply to ${this.message.replyTo.slice(0, 8)}`);
       meta.push("Ctrl+O to expand");
 
       lines.push(frameLine(this.theme.fg("dim", ` ${meta.join(" · ")}`)));
@@ -87,7 +87,7 @@ export class InlineMessageComponent implements Component {
 
     if (this.replyCommand) {
       lines.push(frameLine(""));
-      const replyLines = wrapTextWithAnsi(this.theme.fg("dim", ` ↩ To reply: ${this.replyCommand}`), bodyWidth);
+      const replyLines = wrapTextWithAnsi(this.theme.fg("dim", ` To reply: ${this.replyCommand}`), bodyWidth);
       for (const line of replyLines) {
         lines.push(frameLine(line));
       }
@@ -96,13 +96,13 @@ export class InlineMessageComponent implements Component {
     if (this.message.content.attachments?.length) {
       lines.push(frameLine(""));
       for (const att of this.message.content.attachments) {
-        lines.push(frameLine(this.theme.fg("dim", ` 📎 ${att.name}`)));
+        lines.push(frameLine(this.theme.fg("dim", ` Attachment: ${att.name}`)));
       }
     }
 
     if (this.message.replyTo && !this.message.expectsReply) {
       lines.push(frameLine(""));
-      lines.push(frameLine(this.theme.fg("dim", ` ↳ Reply to ${this.message.replyTo.slice(0, 8)}`)));
+      lines.push(frameLine(this.theme.fg("dim", ` Reply to ${this.message.replyTo.slice(0, 8)}`)));
     }
 
     lines.push(this.theme.fg("muted", `╰${borderChar.repeat(bodyWidth)}╯`));

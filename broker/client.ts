@@ -3,6 +3,7 @@ import net from "net";
 import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.ts";
 import { getBrokerConnectTarget, type BrokerConnectTarget } from "./paths.ts";
+import { isMessage, isMessageControl, isMessageReceipt, isSessionInfo } from "./protocol.ts";
 import { EXTENSION_BUS_FEATURE } from "../types.ts";
 import type {
   Attachment,
@@ -11,7 +12,6 @@ import type {
   Message,
   MessageControl,
   MessageReceipt,
-  MessageReceiptStatus,
   SessionInfo,
   SessionRegistration,
 } from "../types.ts";
@@ -58,152 +58,6 @@ function connectToBrokerTarget(target: BrokerConnectTarget): net.Socket {
   return typeof target === "string"
     ? net.connect(target)
     : net.connect({ host: target.host, port: target.port });
-}
-
-function isMessageReceiptStatus(value: unknown): value is MessageReceiptStatus {
-  return value === "receiver_received"
-    || value === "queued"
-    || value === "injected"
-    || value === "acknowledged"
-    || value === "expired"
-    || value === "cancelled"
-    || value === "superseded"
-    || value === "cancellation_requested";
-}
-
-function isMessageReceipt(value: unknown): value is MessageReceipt {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return false;
-  }
-  const receipt = value as Record<string, unknown>;
-  if (typeof receipt.messageId !== "string" || !isMessageReceiptStatus(receipt.status) || typeof receipt.timestamp !== "number") {
-    return false;
-  }
-  return receipt.detail === undefined || typeof receipt.detail === "string";
-}
-
-function isMessageControl(value: unknown): value is MessageControl {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return false;
-  }
-  const control = value as Record<string, unknown>;
-  if (typeof control.messageId !== "string" || typeof control.timestamp !== "number") {
-    return false;
-  }
-  if (control.action !== "cancel" && control.action !== "supersede") {
-    return false;
-  }
-  if (control.supersededBy !== undefined && typeof control.supersededBy !== "string") {
-    return false;
-  }
-  return control.detail === undefined || typeof control.detail === "string";
-}
-
-function isAttachment(value: unknown): value is Attachment {
-  if (typeof value !== "object" || value === null) {
-    return false;
-  }
-
-  const attachment = value as Record<string, unknown>;
-
-  if (
-    attachment.type !== "file"
-    && attachment.type !== "snippet"
-    && attachment.type !== "context"
-  ) {
-    return false;
-  }
-
-  if (typeof attachment.name !== "string" || typeof attachment.content !== "string") {
-    return false;
-  }
-
-  return attachment.language === undefined || typeof attachment.language === "string";
-}
-
-function isMessage(value: unknown): value is Message {
-  if (typeof value !== "object" || value === null) {
-    return false;
-  }
-
-  const message = value as Record<string, unknown>;
-
-  if (typeof message.id !== "string" || typeof message.timestamp !== "number") {
-    return false;
-  }
-
-  for (const key of ["senderSequence", "brokerReceivedAt", "brokerDeliveredAt", "receiverReceivedAt", "injectedAt"] as const) {
-    if (message[key] !== undefined && typeof message[key] !== "number") {
-      return false;
-    }
-  }
-
-  if (message.supersedes !== undefined && typeof message.supersedes !== "string") {
-    return false;
-  }
-
-  if (message.retryOf !== undefined && typeof message.retryOf !== "string") {
-    return false;
-  }
-
-  if (message.replyTo !== undefined && typeof message.replyTo !== "string") {
-    return false;
-  }
-
-  if (message.expectsReply !== undefined && typeof message.expectsReply !== "boolean") {
-    return false;
-  }
-
-  if (typeof message.content !== "object" || message.content === null) {
-    return false;
-  }
-
-  const content = message.content as Record<string, unknown>;
-  if (typeof content.text !== "string") {
-    return false;
-  }
-
-  return content.attachments === undefined
-    || (Array.isArray(content.attachments) && content.attachments.every(isAttachment));
-}
-
-function isSessionInfo(value: unknown): value is SessionInfo {
-  if (typeof value !== "object" || value === null) {
-    return false;
-  }
-
-  const session = value as Record<string, unknown>;
-
-  if (
-    typeof session.id !== "string"
-    || typeof session.cwd !== "string"
-    || typeof session.model !== "string"
-    || typeof session.pid !== "number"
-    || typeof session.startedAt !== "number"
-    || typeof session.lastActivity !== "number"
-  ) {
-    return false;
-  }
-
-  if (session.name !== undefined && typeof session.name !== "string") {
-    return false;
-  }
-
-  if (session.status !== undefined && typeof session.status !== "string") {
-    return false;
-  }
-
-  if (session.peerUid !== undefined && typeof session.peerUid !== "number") {
-    return false;
-  }
-
-  for (const key of ["contextPct", "contextTokens", "contextWindow"] as const) {
-    if (session[key] !== undefined && typeof session[key] !== "number") {
-      return false;
-    }
-  }
-
-  return session.trustedLocal === undefined || typeof session.trustedLocal === "boolean";
 }
 
 export class IntercomClient extends EventEmitter {

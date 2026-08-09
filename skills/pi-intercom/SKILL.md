@@ -238,101 +238,14 @@ new visible project panes should go through the supervisor.
 | `list` | Returns all sessions with live status | You need to discover targets or choose an idle peer |
 | `status` | Returns your connection state | Troubleshooting |
 
-## Optional: Manual Visible Peer Sessions via cmux or tmux
+## Visible Peer Sessions
 
-For bounded cross-codebase work, prefer `pi-subagents` with an explicit `cwd`. Use `intercom({ action: "send", cwd: "/path", openProjectPaneIfMissing: true, ... })` only when a long-lived visible peer session is useful.
+For bounded cross-codebase work, prefer `pi-subagents` with an explicit `cwd`.
+Use `intercom({ action: "send", cwd: "/path", openProjectPaneIfMissing: true, ... })`
+only when a long-lived visible peer session is useful.
 
-If Herdr is unavailable and the task still benefits from a long-lived visible conversation, you may start a new `pi` session manually.
-
-Prefer `cmux new-split right` over new surfaces or workspaces so both sessions are visible side by side.
-
-If `cmux` is unavailable, `tmux` is an optional fallback when it is installed and relevant. Use it with a private socket so the session is isolated and observable.
-
-Use visible peer sessions only for:
-- same-codebase worker/planner conversations that should stay visible
-- reference-codebase scouting where a durable conversation helps
-- long-lived project discussions where the user benefits from watching both sides
-
-Do not use this for ordinary bounded subagent work, unrelated repos, trivial questions, or work you can finish cleanly in the current session.
-
-### Preferred: cmux Worker or Scout Session
-
-Same codebase:
-
-```bash
-cmux new-split right
-sleep 0.5
-cmux send --surface right 'cd /path/to/current/repo && pi\n'
-```
-
-Reference codebase:
-
-```bash
-cmux new-split right
-sleep 0.5
-cmux send --surface right 'cd /path/to/reference/repo && pi\n'
-```
-
-### Optional Fallback: tmux Worker or Scout Session
-
-Same codebase:
-
-```bash
-SOCKET_DIR=${TMPDIR:-/tmp}/pi-tmux-sockets
-mkdir -p "$SOCKET_DIR"
-SOCKET="$SOCKET_DIR/pi.sock"
-SESSION=pi-worker
-tmux -S "$SOCKET" new -d -s "$SESSION" -c "/path/to/current/repo" 'pi'
-```
-
-Reference codebase:
-
-```bash
-SOCKET_DIR=${TMPDIR:-/tmp}/pi-tmux-sockets
-mkdir -p "$SOCKET_DIR"
-SOCKET="$SOCKET_DIR/pi.sock"
-SESSION=pi-reference-auth
-tmux -S "$SOCKET" new -d -s "$SESSION" -c "/path/to/reference/repo" 'pi'
-```
-
-When you use `tmux`, tell the user how to watch it:
-
-```bash
-tmux -S "$SOCKET" attach -t "$SESSION"
-```
-
-After launch, name the new session clearly so it is easy to target:
-
-```text
-/name worker
-/name reference-auth
-```
-
-Then coordinate from the current session:
-
-```typescript
-intercom({
-  action: "send",
-  to: "worker",
-  message: "Take task X. Ask if blocked."
-})
-
-intercom({
-  action: "ask",
-  to: "reference-auth",
-  message: "How does this repo structure token refresh retries?"
-})
-```
-
-### Spawn Decision Rule
-
-Spawn a visible peer session only when all of these are true:
-- no existing intercom-connected session already fits the need
-- the work benefits from a long-lived visible peer session
-- the peer session is either in the same codebase or in an intentional reference codebase
-- `cmux` is available, or `tmux` is available as an intentional fallback
-
-If neither Herdr nor the manual terminal fallback is available, skip this path and use normal `intercom` workflows.
+If Herdr is unavailable, do not invent a terminal fallback inside this workflow.
+Ask the user before opening another visible surface manually.
 
 ## Important Constraints
 
@@ -387,21 +300,6 @@ intercom({
   message: "PR #123 is ready for review. Key changes in auth.ts."
 });
 // Continue immediately, don't wait
-```
-
-### Include reply hints in messages
-
-Make it easy for recipients to respond:
-
-```typescript
-// GOOD: Recipient sees exact command to reply
-intercom({
-  action: "send",
-  to: "worker",
-  message: `Found the issue in auth.ts:142. Use getUserById() instead of getUser().
-
-Reply with: intercom({ action: "reply", message: "..." })`
-});
 ```
 
 ### Name sessions meaningfully

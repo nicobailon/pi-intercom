@@ -115,11 +115,11 @@ test("inline message colors follow the tool-title, text, muted-border, and dim-m
   const lines = component.render(72);
   const rendered = lines.join("\n");
 
-  assert.match(lines[0], /^\u001b\[34m╭\u001b\[0m\u001b\[32m 📨 From:/);
+  assert.match(lines[0], /^\u001b\[34m╭\u001b\[0m\u001b\[32m From:/);
   assert.match(rendered, /\u001b\[34m│\u001b\[0m\u001b\[33mBody copy\u001b\[0m/);
-  assert.match(rendered, /\u001b\[35m ↩ To reply: intercom reply\u001b\[0m/);
-  assert.match(rendered, /\u001b\[35m 📎 note\.txt\u001b\[0m/);
-  assert.match(rendered, /\u001b\[35m ↳ Reply to parent-m\u001b\[0m/);
+  assert.match(rendered, /\u001b\[35m To reply: intercom reply\u001b\[0m/);
+  assert.match(rendered, /\u001b\[35m Attachment: note\.txt\u001b\[0m/);
+  assert.match(rendered, /\u001b\[35m Reply to parent-m\u001b\[0m/);
   assert.match(lines.at(-1)!, /^\u001b\[34m╰─+╯\u001b\[0m$/);
   assert.ok(calls.includes("toolTitle"));
   assert.ok(calls.includes("text"));
@@ -134,9 +134,9 @@ test("collapsed inline messages preserve the same hierarchy without accent", () 
 
   const rendered = component.render(72).join("\n");
 
-  assert.match(rendered, /\u001b\[32m 📨 From:/);
+  assert.match(rendered, /\u001b\[32m From:/);
   assert.match(rendered, /\u001b\[33mThis is a long message/);
-  assert.match(rendered, /\u001b\[35m ↩ To reply:/);
+  assert.match(rendered, /\u001b\[35m To reply:/);
   assert.ok(!calls.includes("accent"));
 });
 
@@ -146,7 +146,7 @@ test("semantic styling remains ANSI- and Unicode-width safe", () => {
     ...message,
     content: { text: "\u001b[36m色付き本文\u001b[0m with emoji 🧪 and a long Unicode tail 計画計画計画" },
   };
-  const component = new InlineMessageComponent(unicodeFrom, unicodeMessage, styledTheme() as any, "返信 📨");
+  const component = new InlineMessageComponent(unicodeFrom, unicodeMessage, styledTheme() as any, "返信");
 
   for (const width of [18, 31, 52]) {
     const lines = component.render(width);
@@ -176,8 +176,8 @@ test("inline messages pick up mutable theme proxy changes on rerender", () => {
   palette.muted = 90;
   const after = component.render(72).join("\n");
 
-  assert.match(before, /\u001b\[32m 📨 From:/);
-  assert.match(after, /\u001b\[96m 📨 From:/);
+  assert.match(before, /\u001b\[32m From:/);
+  assert.match(after, /\u001b\[96m From:/);
   assert.match(after, /\u001b\[97mThis is a long message/);
   assert.match(after, /\u001b\[90m╭/);
   assert.notEqual(before, after);
