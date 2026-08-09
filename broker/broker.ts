@@ -207,6 +207,9 @@ function isSessionRegistration(value: unknown): value is SessionRegistration {
   if (session.name !== undefined && typeof session.name !== "string") {
     return false;
   }
+  if (session.runtimeFallbackAlias !== undefined && typeof session.runtimeFallbackAlias !== "boolean") {
+    return false;
+  }
 
   return session.status === undefined || typeof session.status === "string";
 }
@@ -472,6 +475,7 @@ class IntercomBroker {
         const info: SessionInfo = {
           id,
           ...(session.name !== undefined ? { name: session.name } : {}),
+          ...(session.runtimeFallbackAlias !== undefined ? { runtimeFallbackAlias: session.runtimeFallbackAlias } : {}),
           cwd: session.cwd,
           model: session.model,
           pid: session.pid,
@@ -745,20 +749,15 @@ class IntercomBroker {
             });
             break;
           }
-          const liveMailboxTarget = this.findUniqueLiveSessionForDisconnectedSession(target);
-          const effectiveTargetId = liveMailboxTarget?.info.id ?? target.id;
           if (message.expectsReply) {
-            const reverseEdge = Array.from(this.askEdges.entries()).find(([edgeMessageId, edge]) => edgeMessageId !== message.replyTo && edge.from === effectiveTargetId && edge.to === currentId);
-            if (reverseEdge) {
-              writeMessage(socket, {
-                type: "delivery_failed",
-                messageId: message.id,
-                reason: "Mutual ask refused: target session is already waiting for a reply from this session.",
-              });
-              break;
-            }
-            this.askEdges.set(message.id, { from: currentId, to: effectiveTargetId, createdAt: Date.now() });
+            writeMessage(socket, {
+              type: "delivery_failed",
+              messageId: message.id,
+              reason: "Target session is not currently connected; blocking asks are not queued",
+            });
+            break;
           }
+          const liveMailboxTarget = this.findUniqueLiveSessionForDisconnectedSession(target, currentId);
           if (liveMailboxTarget) {
             const deliveredMessage: Message = {
               ...message,
@@ -897,6 +896,15 @@ class IntercomBroker {
               changed = true;
             }
           }
+          if (clientMessage.runtimeFallbackAlias !== undefined) {
+            if (typeof clientMessage.runtimeFallbackAlias !== "boolean") {
+              throw new Error("Invalid presence runtimeFallbackAlias");
+            }
+            if (session.info.runtimeFallbackAlias !== clientMessage.runtimeFallbackAlias) {
+              session.info.runtimeFallbackAlias = clientMessage.runtimeFallbackAlias;
+              changed = true;
+            }
+          }
           if (clientMessage.status !== undefined) {
             if (typeof clientMessage.status !== "string") {
               throw new Error("Invalid presence status");
@@ -1025,9 +1033,15 @@ class IntercomBroker {
     for (let index = 0; index < this.mailboxMessages.length;) {
       const entry = this.mailboxMessages[index]!;
       const matchesId = entry.target.id === session.info.id;
+      const matchesSenderIdentity = Boolean(
+        sessionName
+        && entry.from.name?.toLowerCase() === sessionName
+        && sameCwd(entry.from.cwd, session.info.cwd),
+      );
       const matchesUniqueName = Boolean(
         uniqueMailboxIdentity
         && sessionName
+        && !matchesSenderIdentity
         && entry.target.name?.toLowerCase() === sessionName
         && sameCwd(entry.target.cwd, session.info.cwd),
       );
@@ -1125,22 +1139,26 @@ class IntercomBroker {
       .map(([, session]) => session);
   }
 
-  private findUniqueLiveSessionForDisconnectedSession(info: SessionInfo): ConnectedSession | null {
-    const matches = this.findLiveSessionsSharingMailboxIdentity(info);
+  private findUniqueLiveSessionForDisconnectedSession(info: SessionInfo, senderId?: string): ConnectedSession | null {
+    const matches = this.findLiveSessionsSharingMailboxIdentity(info)
+      .filter((session) => session.info.id !== senderId);
     return matches.length === 1 ? matches[0]! : null;
   }
 
   /**
-   * Mailbox identity is name plus directory, never name alone. A name on its own
-   * is display metadata that unrelated projects reuse, so matching on it would
-   * hand one project's queued mail to a same-named session in another project.
+   * Mailbox identity is an explicit name plus directory, never name alone. A
+   * runtime fallback alias is derived from the session id rather than chosen as
+   * a durable identity, so it must not transfer mail to another process. This
+   * also prevents two unnamed UUIDv7 sessions started close together from
+   * inheriting each other's mailbox through a shared short alias.
+   *
    * Directories compare through sameCwd so a relaunch that reports the same
    * directory differently (trailing slash, "."/"..", or a symlink such as macOS
    * /tmp vs /private/tmp) still matches.
    */
   private findLiveSessionsSharingMailboxIdentity(info: SessionInfo): ConnectedSession[] {
     const lowerName = info.name?.toLowerCase();
-    if (!lowerName) {
+    if (!lowerName || info.runtimeFallbackAlias) {
       return [];
     }
     return Array.from(this.sessions.values()).filter(session =>

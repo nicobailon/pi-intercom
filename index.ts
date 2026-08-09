@@ -415,11 +415,13 @@ function resolveIntercomPresenceName(sessionName: string | undefined, sessionId:
     return trimmedName;
   }
   const normalizedSessionId = sessionId.startsWith("session-") ? sessionId.slice("session-".length) : sessionId;
-  return `${DEFAULT_UNNAMED_SESSION_ALIAS_PREFIX}-${normalizedSessionId.slice(0, 8)}`;
+  return `${DEFAULT_UNNAMED_SESSION_ALIAS_PREFIX}-${normalizedSessionId.slice(0, 18)}`;
 }
-function buildPresenceIdentity(pi: ExtensionAPI, sessionId: string): { name: string } {
+function buildPresenceIdentity(pi: ExtensionAPI, sessionId: string): { name: string; runtimeFallbackAlias: boolean } {
+  const sessionName = pi.getSessionName();
   return {
-    name: resolveIntercomPresenceName(pi.getSessionName(), sessionId),
+    name: resolveIntercomPresenceName(sessionName, sessionId),
+    runtimeFallbackAlias: !sessionName?.trim(),
   };
 }
 function resolveConfiguredIntercomSessionId(piSessionId: string, config: IntercomConfig): string {
@@ -502,6 +504,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   let reconnectTimer: NodeJS.Timeout | null = null;
   let namePollTimer: NodeJS.Timeout | null = null;
   let lastPresenceName: string | null = null;
+  let lastPresenceRuntimeFallbackAlias: boolean | null = null;
   const previousIntercomSessionId = process.env[INTERCOM_SESSION_ID_ENV];
   let reconnectPromise: Promise<IntercomClient> | null = null;
   let reconnectPromiseGeneration: number | null = null;
@@ -761,7 +764,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
 
     const identity = buildPresenceIdentity(pi, currentIntercomSessionId ?? currentSessionId);
     return {
-      name: identity.name,
+      ...identity,
       cwd: liveContext.cwd,
       model: currentModel,
       pid: process.pid,
@@ -801,17 +804,20 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     const identity = buildPresenceIdentity(pi, currentIntercomSessionId ?? sessionId);
     lastPresenceName = identity.name;
+    lastPresenceRuntimeFallbackAlias = identity.runtimeFallbackAlias;
     client.updatePresence({ ...identity, status: currentStatus(), ...currentContextUsage() });
   }
   function startNamePoll(): void {
     clearNamePollTimer();
-    lastPresenceName = currentSessionId ? buildPresenceIdentity(pi, currentIntercomSessionId ?? currentSessionId).name : null;
+    const initialIdentity = currentSessionId ? buildPresenceIdentity(pi, currentIntercomSessionId ?? currentSessionId) : null;
+    lastPresenceName = initialIdentity?.name ?? null;
+    lastPresenceRuntimeFallbackAlias = initialIdentity?.runtimeFallbackAlias ?? null;
     namePollTimer = setInterval(() => {
       if (!currentSessionId || !getLiveContext()) {
         return;
       }
       const identity = buildPresenceIdentity(pi, currentIntercomSessionId ?? currentSessionId);
-      if (identity.name !== lastPresenceName) {
+      if (identity.name !== lastPresenceName || identity.runtimeFallbackAlias !== lastPresenceRuntimeFallbackAlias) {
         syncPresenceIdentity(currentSessionId);
       }
     }, getNamePollMs());
@@ -1150,14 +1156,14 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     return null;
   }
-  async function resolveSupervisorTarget(activeClient: IntercomClient, metadata: ChildOrchestratorMetadata): Promise<string> {
+  async function resolveSupervisorTarget(activeClient: IntercomClient, metadata: ChildOrchestratorMetadata): Promise<string | null> {
     if (metadata.orchestratorSessionId) {
       const bySessionId = await resolveSessionTarget(activeClient, metadata.orchestratorSessionId);
       if (bySessionId) {
         return bySessionId;
       }
     }
-    return await resolveSessionTarget(activeClient, metadata.orchestratorTarget) ?? metadata.orchestratorTarget;
+    return resolveSessionTarget(activeClient, metadata.orchestratorTarget);
   }
   function deliverLocalSubagentRelayMessage(sender: "subagent-control" | "subagent-result", status: string, messageText: string): void {
     const liveContext = getLiveContext();
@@ -1211,7 +1217,9 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     publishIntercomSessionId(currentIntercomSessionId);
     currentModel = ctx.model?.id ?? "unknown";
     sessionStartedAt = Date.now();
-    lastPresenceName = buildPresenceIdentity(pi, currentIntercomSessionId).name;
+    const initialPresenceIdentity = buildPresenceIdentity(pi, currentIntercomSessionId);
+    lastPresenceName = initialPresenceIdentity.name;
+    lastPresenceRuntimeFallbackAlias = initialPresenceIdentity.runtimeFallbackAlias;
     agentRunning = false;
     activeTools.clear();
     startNamePoll();
@@ -1523,15 +1531,22 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         }
 
         const metadata = childOrchestratorMetadata;
-        let sendTo: string;
+        let resolvedSupervisor: string | null;
         try {
-          sendTo = await resolveSupervisorTarget(connectedClient, metadata);
+          resolvedSupervisor = await resolveSupervisorTarget(connectedClient, metadata);
         } catch (error) {
           return {
             content: [{ type: "text", text: `Failed to resolve supervisor target: ${getErrorMessage(error)}` }],
             details: { error: true },
           };
         }
+        if (!resolvedSupervisor && reason !== "progress_update") {
+          return {
+            content: [{ type: "text", text: `Supervisor "${metadata.orchestratorTarget}" is not currently connected. Blocking requests are not queued; use a progress update or retry after the supervisor reconnects.` }],
+            details: { error: true },
+          };
+        }
+        const sendTo = resolvedSupervisor ?? metadata.orchestratorTarget;
         if (signal?.aborted) {
           return {
             content: [{ type: "text", text: "Cancelled" }],
@@ -1987,7 +2002,13 @@ Usage:
           let questionId: string | null = null;
 
           try {
-            const sendTo = await resolveSessionTarget(connectedClient, to) ?? to;
+            const sendTo = await resolveSessionTarget(connectedClient, to);
+            if (!sendTo) {
+              return {
+                content: [{ type: "text", text: `Session "${to}" is not currently connected. Blocking asks are not queued; use send for a non-blocking mailbox delivery or retry after the session reconnects.` }],
+                details: { error: true },
+              };
+            }
             if (_signal?.aborted) {
               return {
                 content: [{ type: "text", text: "Cancelled" }],

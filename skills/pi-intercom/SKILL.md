@@ -301,9 +301,10 @@ If neither `cmux` nor `tmux` is available, skip this path and use normal `interc
 
 ### `ask` Limitations
 
+- **Connected targets only**: `ask` fails immediately when the target is not in the live intercom roster. Use `list` before asking when liveness is uncertain; use `send` for non-blocking mailbox delivery.
 - **Configurable timeout**: If no reply arrives before the shared ask timeout, the ask fails. The default is 10 minutes; set `PI_INTERCOM_ASK_TIMEOUT_MS` to a positive millisecond value to change it.
 - **One at a time**: Cannot have multiple pending asks from the same session
-- **Cannot self-target**: A session cannot ask itself
+- **Cannot self-target**: A session cannot ask itself, including through disconnected-mailbox remapping
 
 ```typescript
 // Check if already waiting before asking
@@ -404,7 +405,7 @@ if (!result.delivered) {
   await intercom({ action: "list" });
 }
 ```
-Replies to recently disconnected named senders can be queued by the broker and delivered if that sender reconnects with the same name. New sends still need a known live or recently disconnected target.
+Replies to recently disconnected explicitly named senders can be queued by the broker and delivered if that sender reconnects with the same name and directory. Runtime-only `subagent-chat-...` aliases are not reconnect identities. New `send` calls may target a known live or recently disconnected session; blocking `ask` calls require a live target.
 
 **Ask timeout**
 ```typescript

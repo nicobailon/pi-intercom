@@ -677,6 +677,33 @@ test("broker times out sockets that unregister and go idle", { concurrency: fals
   }
 });
 
+test("unnamed sessions use a collision-resistant runtime alias", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const firstSessionId = "019fe418-248e-7447-9379-fdce6e91dcba";
+  const secondSessionId = "019fe418-248e-7abc-8123-111111111111";
+  const firstHarness = createExtensionHarness("", { sessionId: firstSessionId });
+  const secondHarness = createExtensionHarness("", { sessionId: secondSessionId });
+
+  try {
+    piIntercomExtension(firstHarness.pi as never);
+    piIntercomExtension(secondHarness.pi as never);
+    await firstHarness.emitLifecycle("session_start");
+    await secondHarness.emitLifecycle("session_start");
+    const first = await waitForSessionId(planner, firstSessionId);
+    const second = await waitForSessionId(planner, secondSessionId);
+    assert.equal(first.name, "subagent-chat-019fe418-248e-7447");
+    assert.equal(second.name, "subagent-chat-019fe418-248e-7abc");
+    assert.equal(first.runtimeFallbackAlias, true);
+    assert.equal(second.runtimeFallbackAlias, true);
+    assert.notEqual(first.name, second.name);
+  } finally {
+    await firstHarness.emitLifecycle("session_shutdown");
+    await secondHarness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
 test("broker coalesces no-op presence floods", { concurrency: false }, async () => {
   const { planner, cleanup } = await setupClients();
   const worker = new IntercomClient();
@@ -1941,7 +1968,7 @@ test("child supervisor tool rejects invalid reasons and interview payloads", asy
   });
 });
 
-test("child supervisor tool preserves delivery failure reasons", { concurrency: false }, async () => {
+test("child supervisor blocking requests fail fast when the supervisor is disconnected", { concurrency: false }, async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const { cleanup } = await setupClients();
 
@@ -1963,11 +1990,11 @@ test("child supervisor tool preserves delivery failure reasons", { concurrency: 
 
       const askResult = await supervisorTool.execute("ask-1", { reason: "need_decision", message: "Which path?" }, new AbortController().signal, undefined, harness.ctx);
       assert.equal(askResult.details?.error, true);
-      assert.match(askResult.content[0]?.text ?? "", /Session not found/);
+      assert.match(askResult.content[0]?.text ?? "", /not currently connected/);
 
       const secondAskResult = await supervisorTool.execute("ask-2", { reason: "need_decision", message: "Still blocked." }, new AbortController().signal, undefined, harness.ctx);
       assert.equal(secondAskResult.details?.error, true);
-      assert.match(secondAskResult.content[0]?.text ?? "", /Session not found/);
+      assert.match(secondAskResult.content[0]?.text ?? "", /not currently connected/);
       assert.doesNotMatch(secondAskResult.content[0]?.text ?? "", /Already waiting/);
       await harness.emitLifecycle("session_shutdown");
     });
@@ -2436,6 +2463,184 @@ test("broker queues replies to recently disconnected named senders", { concurren
     assert.equal(typeof message.brokerReceivedAt, "number");
     assert.equal(typeof message.brokerDeliveredAt, "number");
   } finally {
+    await replacement.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("broker rejects blocking asks to disconnected targets", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+
+  try {
+    const disconnectedId = planner.sessionId!;
+    await planner.disconnect();
+    const result = await orchestrator.send(disconnectedId, {
+      messageId: "offline-broker-ask",
+      text: "Do not queue this blocking request.",
+      expectsReply: true,
+    });
+    assert.equal(result.delivered, false);
+    assert.match(result.reason ?? "", /not currently connected/);
+    assert.match(result.reason ?? "", /not queued/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("broker never remaps a disconnected mailbox back to the sending session", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const sender = new IntercomClient();
+  const replacement = new IntercomClient();
+
+  try {
+    const disconnectedId = planner.sessionId!;
+    await planner.disconnect();
+    await sender.connect({
+      name: "planner",
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    });
+    const senderId = sender.sessionId!;
+
+    const selfDeliveries: Message[] = [];
+    sender.on("message", (_from: SessionInfo, message: Message) => selfDeliveries.push(message));
+    const result = await sender.send(disconnectedId, {
+      messageId: "no-self-mailbox-remap",
+      text: "Queue this for the disconnected session.",
+    });
+    assert.equal(result.delivered, true);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(selfDeliveries, []);
+
+    await sender.disconnect();
+    await sender.connect({
+      name: "planner",
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    }, senderId);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(selfDeliveries, []);
+
+    const queuedMessage = once(replacement, "message") as Promise<[SessionInfo, Message]>;
+    await replacement.connect({
+      name: "planner",
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    }, disconnectedId);
+    const [, message] = await queuedMessage;
+    assert.equal(message.id, "no-self-mailbox-remap");
+  } finally {
+    await sender.disconnect().catch(() => undefined);
+    await replacement.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("broker does not treat runtime fallback aliases as reconnect identities", { concurrency: false }, async () => {
+  const { orchestrator, cleanup } = await setupClients();
+  const original = new IntercomClient();
+  const unrelated = new IntercomClient();
+  const replacement = new IntercomClient();
+  const fallbackAlias = "subagent-chat-019fe418-248e-7447";
+  const originalId = "runtime-fallback-original";
+
+  try {
+    await original.connect({
+      name: fallbackAlias,
+      runtimeFallbackAlias: true,
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    }, originalId);
+    await original.disconnect();
+
+    const unrelatedDeliveries: Message[] = [];
+    unrelated.on("message", (_from: SessionInfo, message: Message) => unrelatedDeliveries.push(message));
+    await unrelated.connect({
+      name: fallbackAlias,
+      runtimeFallbackAlias: true,
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    });
+
+    assert.equal((await orchestrator.send(originalId, {
+      messageId: "fallback-alias-mail",
+      text: "Only the original session should receive this.",
+    })).delivered, true);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(unrelatedDeliveries, []);
+
+    const queuedMessage = once(replacement, "message") as Promise<[SessionInfo, Message]>;
+    await replacement.connect({
+      name: fallbackAlias,
+      runtimeFallbackAlias: true,
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    }, originalId);
+    const [, message] = await queuedMessage;
+    assert.equal(message.id, "fallback-alias-mail");
+  } finally {
+    await original.disconnect().catch(() => undefined);
+    await unrelated.disconnect().catch(() => undefined);
+    await replacement.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("broker preserves mailbox reconnects for explicit subagent-chat names", { concurrency: false }, async () => {
+  const { orchestrator, cleanup } = await setupClients();
+  const original = new IntercomClient();
+  const replacement = new IntercomClient();
+  const explicitName = "subagent-chat-explicit-worker";
+  const originalId = "explicit-subagent-chat-original";
+
+  try {
+    await original.connect({
+      name: explicitName,
+      runtimeFallbackAlias: false,
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    }, originalId);
+    await original.disconnect();
+
+    const delivered = once(replacement, "message") as Promise<[SessionInfo, Message]>;
+    await replacement.connect({
+      name: explicitName,
+      runtimeFallbackAlias: false,
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    });
+    assert.equal((await orchestrator.send(originalId, {
+      messageId: "explicit-subagent-chat-mail",
+      text: "Explicit names keep mailbox reconnect semantics.",
+    })).delivered, true);
+    const [, message] = await delivered;
+    assert.equal(message.id, "explicit-subagent-chat-mail");
+  } finally {
+    await original.disconnect().catch(() => undefined);
     await replacement.disconnect().catch(() => undefined);
     await cleanup();
   }
@@ -3046,6 +3251,36 @@ test("an expired pending ask is not inferred; the send remains ordinary", { conc
       await cleanup();
     }
   });
+});
+
+test("intercom ask fails fast when the target is not currently connected", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("offline-ask-worker");
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    await waitForSessionByName(orchestrator, "offline-ask-worker");
+    const disconnectedId = planner.sessionId!;
+    await planner.disconnect();
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 250);
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const result = await intercomTool.execute("ask-offline", {
+      action: "ask",
+      to: disconnectedId,
+      message: "This must not wait in the disconnected mailbox.",
+    }, controller.signal, undefined, harness.ctx);
+    clearTimeout(timeout);
+
+    assert.match(result.content[0]?.text ?? "", /not currently connected/i);
+    assert.equal(result.details?.error, true);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
 });
 
 test("send falls back to an exact stored ID or name for a disconnected asker but never guesses from an ID prefix", { concurrency: false }, async () => {

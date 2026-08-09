@@ -3,6 +3,8 @@ export const EXTENSION_BUS_FEATURE = "extension-bus-v1";
 export interface SessionInfo {
   id: string;
   name?: string;
+  /** True only when the extension synthesized name for an unnamed runtime. */
+  runtimeFallbackAlias?: boolean;
   cwd: string;
   model: string;
   pid: number;
@@ -83,7 +85,7 @@ export type ClientMessage =
   | { type: "message_receipt"; receipt: MessageReceipt }
   | { type: "cancel_message"; messageId: string }
   | { type: "cancel_ask"; messageId: string }
-  | { type: "presence"; name?: string; status?: string; model?: string; contextPct?: number | null; contextTokens?: number | null; contextWindow?: number | null }
+  | { type: "presence"; name?: string; runtimeFallbackAlias?: boolean; status?: string; model?: string; contextPct?: number | null; contextTokens?: number | null; contextWindow?: number | null }
   | {
       type: "extension_publish";
       namespace: string;
