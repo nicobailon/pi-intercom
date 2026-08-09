@@ -23,6 +23,7 @@ This skill covers how to handle those orchestrator-side escalations.
 - **Context handoffs**: Send findings from a research session to an execution session
 - **Clarification loops**: Worker asks questions, planner answers, work continues
 - **Multi-session workflows**: Coordinate between specialized sessions (frontend/backend, research/implementation)
+- **Cross-codebase peer messages**: Message an explicit live peer in another project, or open a visible Herdr project pane when a long-lived conversation is needed
 
 ## Core Patterns
 
@@ -126,7 +127,39 @@ intercom({
 })
 ```
 
-### Pattern 6: Handle Subagent Escalations (Orchestrator Side)
+### Pattern 6: Cross-Codebase Peer Messages
+
+Use `to` alone to message any explicit live peer on the machine, even when it is
+in another codebase. Use `cwd` alone when there should be exactly one live peer
+in that repo. Use `to` plus `cwd` when the directory is a safety guard.
+
+```typescript
+intercom({
+  action: "ask",
+  cwd: "/path/to/other-repo",
+  to: "workbench-agent",
+  message: "Which module owns workbench source slices?"
+})
+```
+
+Only open a Herdr project pane when you need a durable visible peer session in
+that repo. For bounded work, prefer `pi-subagents` with an explicit `cwd`; the
+child can use `contact_supervisor` for owner decisions and regular `intercom`
+for explicit peer coordination.
+
+```typescript
+intercom({
+  action: "send",
+  cwd: "/path/to/other-repo",
+  openProjectPaneIfMissing: true,
+  message: "Let's discuss the workbench API ergonomics in this repo."
+})
+```
+
+If a live session already exists in that `cwd`, intercom reuses it. If multiple
+sessions are active there, pass `to` to select one by name or session ID.
+
+### Pattern 7: Handle Subagent Escalations (Orchestrator Side)
 
 When `pi-subagents` spawns a delegated child and supplies child bridge metadata,
 that child can reach you through `contact_supervisor`. You receive a formatted
@@ -190,7 +223,9 @@ intercom({ action: "reply", to: "subagent-worker-78f659a3-1", message: "Use the 
 **Important:** Only sessions where `pi-subagents` supplied child bridge metadata
 get the `contact_supervisor` tool. Normal sessions use the regular `intercom`
 tool. If you see the formatted supervisor decision/progress update message, treat
-it as a `contact_supervisor` escalation.
+it as a `contact_supervisor` escalation. A subagent may use regular `intercom` for
+peer coordination, including peers in other directories, but owner decisions and
+new visible project panes should go through the supervisor.
 
 ## Key Differences
 
@@ -203,20 +238,22 @@ it as a `contact_supervisor` escalation.
 | `list` | Returns all sessions with live status | You need to discover targets or choose an idle peer |
 | `status` | Returns your connection state | Troubleshooting |
 
-## Optional: Visible Peer Sessions via cmux or tmux
+## Optional: Manual Visible Peer Sessions via cmux or tmux
 
-If no suitable intercom-connected peer session already exists and the task benefits from a long-lived visible conversation, you may spawn a new `pi` session.
+For bounded cross-codebase work, prefer `pi-subagents` with an explicit `cwd`. Use `intercom({ action: "send", cwd: "/path", openProjectPaneIfMissing: true, ... })` only when a long-lived visible peer session is useful.
+
+If Herdr is unavailable and the task still benefits from a long-lived visible conversation, you may start a new `pi` session manually.
 
 Prefer `cmux new-split right` over new surfaces or workspaces so both sessions are visible side by side.
 
 If `cmux` is unavailable, `tmux` is an optional fallback when it is installed and relevant. Use it with a private socket so the session is isolated and observable.
 
-Use spawned peer sessions only for:
-- same-codebase worker/planner splits
-- reference-codebase scouting
-- long-lived visible conversations where the user benefits from watching both sides
+Use visible peer sessions only for:
+- same-codebase worker/planner conversations that should stay visible
+- reference-codebase scouting where a durable conversation helps
+- long-lived project discussions where the user benefits from watching both sides
 
-Do not use this for unrelated repos, trivial questions, or work you can finish cleanly in the current session.
+Do not use this for ordinary bounded subagent work, unrelated repos, trivial questions, or work you can finish cleanly in the current session.
 
 ### Preferred: cmux Worker or Scout Session
 
@@ -295,7 +332,7 @@ Spawn a visible peer session only when all of these are true:
 - the peer session is either in the same codebase or in an intentional reference codebase
 - `cmux` is available, or `tmux` is available as an intentional fallback
 
-If neither `cmux` nor `tmux` is available, skip this path and use normal `intercom` workflows.
+If neither Herdr nor the manual terminal fallback is available, skip this path and use normal `intercom` workflows.
 
 ## Important Constraints
 

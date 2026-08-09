@@ -24,6 +24,7 @@ import { ReplyTracker } from "./reply-tracker.ts";
 import { resolve as resolvePath } from "node:path";
 import { sameCwd } from "./cwd.ts";
 import { formatContextUsage } from "./format-context.ts";
+import { openProjectPane, resolveTargetInCwd, waitForProjectSession, type ProjectPaneLaunch } from "./project-agent.ts";
 
 const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
 const SUBAGENT_RESULT_INTERCOM_EVENT = "subagent:result-intercom";
@@ -56,6 +57,12 @@ interface InboundMessageEntry {
   message: Message;
   replyCommand?: string;
   bodyText: string;
+}
+
+interface DeliveryTarget {
+  id: string;
+  label: string;
+  projectPane?: ProjectPaneLaunch;
 }
 
 type ContactSupervisorReason = "need_decision" | "progress_update" | "interview_request";
@@ -1165,6 +1172,50 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     return resolveSessionTarget(activeClient, metadata.orchestratorTarget);
   }
+  async function resolveCwdDeliveryTarget(activeClient: IntercomClient, options: {
+    to?: string;
+    cwd: string;
+    openProjectPaneIfMissing?: boolean;
+    focus?: boolean;
+    signal?: AbortSignal;
+  }): Promise<DeliveryTarget> {
+    const sessions = await activeClient.listSessions();
+    const currentSessionId = activeClient.sessionId;
+    if (!currentSessionId) {
+      throw new Error("Current session is not registered with intercom.");
+    }
+    const currentSession = sessions.find((session) => session.id === currentSessionId);
+    if (!currentSession) {
+      throw new Error("Current session is missing from intercom session list.");
+    }
+
+    const targetCwd = options.cwd && options.cwd !== "."
+      ? resolvePath(currentSession.cwd, options.cwd)
+      : currentSession.cwd;
+    const existing = resolveTargetInCwd({
+      sessions,
+      currentSessionId,
+      targetCwd,
+      ...(options.to ? { to: options.to } : {}),
+    });
+    if (existing.kind === "found" && existing.session) {
+      return { id: existing.session.id, label: options.to || existing.session.name || existing.session.id };
+    }
+    if (!options.openProjectPaneIfMissing) {
+      throw new Error(`${existing.reason ?? `No intercom session is connected in ${targetCwd}.`} Pass openProjectPaneIfMissing: true to open a Herdr project pane and start Pi there.`);
+    }
+
+    const beforeSessionIds = new Set(sessions.map((session) => session.id));
+    const projectPane = await openProjectPane({ cwd: targetCwd, focus: options.focus, signal: options.signal });
+    const session = await waitForProjectSession(activeClient, {
+      projectRoot: projectPane.projectRoot,
+      currentSessionId,
+      beforeSessionIds,
+      ...(options.to ? { to: options.to } : {}),
+      signal: options.signal,
+    });
+    return { id: session.id, label: session.name || session.id, projectPane };
+  }
   function deliverLocalSubagentRelayMessage(sender: "subagent-control" | "subagent-result", status: string, messageText: string): void {
     const liveContext = getLiveContext();
     const now = Date.now();
@@ -1740,6 +1791,7 @@ Usage:
   intercom({ action: "list-cwd" })                → List sessions in the current working directory
   intercom({ action: "list-cwd", cwd: "/path" })  → List sessions in a specific directory
   intercom({ action: "send", to: "name-or-id", message: "..." })  → Send message
+  intercom({ action: "send", cwd: "/path", openProjectPaneIfMissing: true, message: "..." }) → Open a visible Herdr project pane when needed, then send
   intercom({ action: "ask", to: "name-or-id", message: "..." })   → Ask and wait for reply
   intercom({ action: "cancel", messageId: "..." })                 → Request cancellation of a sent message
   intercom({ action: "reply", message: "..." })                      → Reply to the active/single pending ask
@@ -1753,7 +1805,7 @@ Usage:
         description: "Action: 'list', 'list-cwd', 'send', 'ask', 'reply', 'pending', 'status', or 'cancel'",
       }),
       to: Type.Optional(Type.String({
-        description: "Target session: name, full session ID, or the short id shown in parentheses by 'list' (a leading ID prefix resolves). For 'send', 'ask', or disambiguating 'reply'.",
+        description: "Target session: name, full session ID, or the short id shown in parentheses by 'list' (a leading ID prefix resolves). For send/ask with cwd, omit to target the sole live session in that cwd or the newly opened project-pane session. For 'reply', disambiguates the pending ask.",
       })),
       message: Type.Optional(Type.String({
         description: "Message to send (for 'send', 'ask', or 'reply' action)",
@@ -1777,7 +1829,13 @@ Usage:
         description: "Previous message ID this send/ask is a user-authored retry of. Retries always send a new message ID.",
       })),
       cwd: Type.Optional(Type.String({
-        description: "Working directory filter for 'list-cwd' (absolute, or relative to the current session's cwd; '.' means the current cwd). Defaults to the current session's cwd.",
+        description: "Working directory filter for 'list-cwd'. For send/ask, scopes target lookup to that directory; omit 'to' to target the sole live peer there. Absolute, or relative to the current session's cwd; '.' means the current cwd.",
+      })),
+      openProjectPaneIfMissing: Type.Optional(Type.Boolean({
+        description: "For send/ask with cwd, open a visible Herdr project pane and launch Pi there when no matching live session is connected.",
+      })),
+      focus: Type.Optional(Type.Boolean({
+        description: "For openProjectPaneIfMissing, focus the new Herdr pane. Defaults to true.",
       })),
     }),
 
@@ -1794,7 +1852,7 @@ Usage:
 
       syncPresenceIdentity(ctx.sessionManager.getSessionId());
 
-      const { action, to, message, attachments, replyTo, messageId, supersedes, retryOf, cwd } = params;
+      const { action, to, message, attachments, replyTo, messageId, supersedes, retryOf, cwd, openProjectPaneIfMissing, focus } = params;
 
       switch (action) {
         case "list": {
@@ -1912,14 +1970,38 @@ Usage:
         }
 
         case "send": {
-          if (!to || !message) {
+          if ((!to && !cwd) || !message) {
             return {
-              content: [{ type: "text", text: "Missing 'to' or 'message' parameter" }],
+              content: [{ type: "text", text: "Missing 'to' or 'cwd', or missing 'message' parameter" }],
               details: { error: true },
             };
           }
           try {
-            const sendTo = await resolveSessionTarget(connectedClient, to) ?? to;
+            if (openProjectPaneIfMissing && !cwd) {
+              return {
+                content: [{ type: "text", text: "openProjectPaneIfMissing requires a target cwd." }],
+                details: { error: true },
+              };
+            }
+            const confirmSend = !replyTo && config.confirmSend && ctx.hasUI;
+            const attachmentText = attachments?.length ? formatAttachments(attachments) : "";
+            if (confirmSend && cwd && openProjectPaneIfMissing) {
+              const confirmed = await ctx.ui.confirm(
+                "Send Message",
+                `Send to "${to ?? cwd}":\n\n${message}${attachmentText}`,
+              );
+              if (!confirmed) {
+                return {
+                  content: [{ type: "text", text: "Message cancelled by user" }],
+                  details: {},
+                };
+              }
+            }
+            const target: DeliveryTarget = cwd
+              ? await resolveCwdDeliveryTarget(connectedClient, { to, cwd, openProjectPaneIfMissing, focus, signal: _signal })
+              : { id: await resolveSessionTarget(connectedClient, to) ?? to, label: to };
+            const sendTo = target.id;
+            const targetDisplay = target.projectPane ? target.label : to ?? target.label;
             if (sendTo === connectedClient.sessionId) {
               return {
                 content: [{ type: "text", text: "Cannot message the current session" }],
@@ -1928,11 +2010,10 @@ Usage:
             }
             const inferredAsk = replyTo ? null : replyTracker.findUniquePendingAskFrom(sendTo);
             const effectiveReplyTo = replyTo ?? inferredAsk?.message.id;
-            if (!replyTo && config.confirmSend && ctx.hasUI) {
-              const attachmentText = attachments?.length ? formatAttachments(attachments) : "";
+            if (confirmSend && !(cwd && openProjectPaneIfMissing)) {
               const confirmed = await ctx.ui.confirm(
                 "Send Message",
-                `Send to "${to}":\n\n${message}${attachmentText}`,
+                `Send to "${targetDisplay}":\n\n${message}${attachmentText}`,
               );
               if (!confirmed) {
                 return {
@@ -1951,12 +2032,12 @@ Usage:
             if (!result.delivered) {
               const errorText = result.reason ?? "Session may not exist or has disconnected.";
               return {
-                content: [{ type: "text", text: `Message to "${to}" was not delivered: ${errorText}` }],
+                content: [{ type: "text", text: `Message to "${targetDisplay}" was not delivered: ${errorText}` }],
                 details: { messageId: result.id, delivered: false, reason: result.reason },
               };
             }
             pi.appendEntry("intercom_sent", {
-              to,
+              to: targetDisplay,
               message: { text: message, attachments, replyTo: effectiveReplyTo, supersedes, retryOf },
               messageId: result.id,
               timestamp: Date.now(),
@@ -1965,8 +2046,18 @@ Usage:
               dismissIncomingAsk(effectiveReplyTo);
             }
             return {
-              content: [{ type: "text", text: inferredAsk ? `Reply sent to ${to} (inferred from pending ask)` : `Message sent to ${to}` }],
-              details: { messageId: result.id, delivered: true, ...(effectiveReplyTo ? { replyTo: effectiveReplyTo } : {}) },
+              content: [{
+                type: "text",
+                text: target.projectPane
+                  ? `Opened Herdr project pane ${target.projectPane.paneId} for ${target.projectPane.projectRoot} and sent message to ${targetDisplay}`
+                  : inferredAsk ? `Reply sent to ${targetDisplay} (inferred from pending ask)` : `Message sent to ${targetDisplay}`,
+              }],
+              details: {
+                messageId: result.id,
+                delivered: true,
+                ...(effectiveReplyTo ? { replyTo: effectiveReplyTo } : {}),
+                ...(target.projectPane ? { openedProjectPane: true, paneId: target.projectPane.paneId, projectRoot: target.projectPane.projectRoot } : {}),
+              },
             };
           } catch (error) {
             return {
@@ -1977,9 +2068,9 @@ Usage:
         }
 
         case "ask": {
-          if (!to || !message) {
+          if ((!to && !cwd) || !message) {
             return {
-              content: [{ type: "text", text: "Missing 'to' or 'message' parameter" }],
+              content: [{ type: "text", text: "Missing 'to' or 'cwd', or missing 'message' parameter" }],
               details: { error: true },
             };
           }
@@ -2002,13 +2093,27 @@ Usage:
           let questionId: string | null = null;
 
           try {
-            const sendTo = await resolveSessionTarget(connectedClient, to);
-            if (!sendTo) {
+            if (openProjectPaneIfMissing && !cwd) {
               return {
-                content: [{ type: "text", text: `Session "${to}" is not currently connected. Blocking asks are not queued; use send for a non-blocking mailbox delivery or retry after the session reconnects.` }],
+                content: [{ type: "text", text: "openProjectPaneIfMissing requires a target cwd." }],
                 details: { error: true },
               };
             }
+            let target: DeliveryTarget;
+            if (cwd) {
+              target = await resolveCwdDeliveryTarget(connectedClient, { to, cwd, openProjectPaneIfMissing, focus, signal: _signal });
+            } else {
+              const resolved = await resolveSessionTarget(connectedClient, to);
+              if (!resolved) {
+                return {
+                  content: [{ type: "text", text: `Session "${to}" is not currently connected. Blocking asks are not queued; use send for a non-blocking mailbox delivery or retry after the session reconnects.` }],
+                  details: { error: true },
+                };
+              }
+              target = { id: resolved, label: to };
+            }
+            const sendTo = target.id;
+            const targetDisplay = target.projectPane ? target.label : to ?? target.label;
             if (_signal?.aborted) {
               return {
                 content: [{ type: "text", text: "Cancelled" }],
@@ -2043,7 +2148,7 @@ Usage:
             deliveryState = sendResult.delivered ? "socket_delivered" : "delivery_failed";
             if (!sendResult.delivered) {
               const errorText = sendResult.reason ?? "Session may not exist or has disconnected.";
-              rejectReplyWaiter(new Error(`Message to "${to}" was not delivered: ${errorText}`));
+              rejectReplyWaiter(new Error(`Message to "${targetDisplay}" was not delivered: ${errorText}`));
               if (replyPromise) {
                 try {
                   await replyPromise;
@@ -2052,12 +2157,12 @@ Usage:
                 }
               }
               return {
-                content: [{ type: "text", text: `Message to "${to}" was not delivered: ${errorText}` }],
+                content: [{ type: "text", text: `Message to "${targetDisplay}" was not delivered: ${errorText}` }],
                 details: { error: true },
               };
             }
             pi.appendEntry("intercom_sent", {
-              to,
+              to: targetDisplay,
               message: { text: message, attachments, replyTo, supersedes, retryOf },
               messageId: sendResult.id,
               timestamp: Date.now(),
@@ -2068,14 +2173,14 @@ Usage:
               ? formatAttachments(replyMessage.content.attachments)
               : "";
             pi.appendEntry("intercom_received", {
-              from: to,
+              from: targetDisplay,
               message: { text: replyText, attachments: replyMessage.content.attachments },
               messageId: replyMessage.id,
               timestamp: replyMessage.timestamp,
             });
             return {
-              content: [{ type: "text", text: `**Reply from ${to}:**\n${replyText}${replyAttachments}` }],
-              details: {},
+              content: [{ type: "text", text: `**Reply from ${targetDisplay}:**\n${replyText}${replyAttachments}` }],
+              details: target.projectPane ? { openedProjectPane: true, paneId: target.projectPane.paneId, projectRoot: target.projectPane.projectRoot } : {},
             };
           } catch (error) {
             rejectReplyWaiter(toError(error));
