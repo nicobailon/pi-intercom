@@ -2604,6 +2604,65 @@ test("broker does not treat runtime fallback aliases as reconnect identities", {
   }
 });
 
+test("broker does not deliver explicit mailbox mail to a matching fallback alias", { concurrency: false }, async () => {
+  const { orchestrator, cleanup } = await setupClients();
+  const original = new IntercomClient();
+  const fallback = new IntercomClient();
+  const replacement = new IntercomClient();
+  const sharedName = "subagent-chat-shared-worker";
+  const originalId = "explicit-mailbox-original";
+
+  try {
+    await original.connect({
+      name: sharedName,
+      runtimeFallbackAlias: false,
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    }, originalId);
+    await original.disconnect();
+
+    const fallbackDeliveries: Message[] = [];
+    fallback.on("message", (_from: SessionInfo, message: Message) => fallbackDeliveries.push(message));
+    await fallback.connect({
+      name: sharedName,
+      runtimeFallbackAlias: true,
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    });
+
+    assert.equal((await orchestrator.send(originalId, {
+      messageId: "explicit-mailbox-not-fallback",
+      text: "Keep this message for the explicit identity.",
+    })).delivered, true);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(fallbackDeliveries, []);
+
+    const queuedMessage = once(replacement, "message") as Promise<[SessionInfo, Message]>;
+    await replacement.connect({
+      name: sharedName,
+      runtimeFallbackAlias: false,
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    }, originalId);
+    const [, message] = await queuedMessage;
+    assert.equal(message.id, "explicit-mailbox-not-fallback");
+  } finally {
+    await original.disconnect().catch(() => undefined);
+    await fallback.disconnect().catch(() => undefined);
+    await replacement.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
 test("broker preserves mailbox reconnects for explicit subagent-chat names", { concurrency: false }, async () => {
   const { orchestrator, cleanup } = await setupClients();
   const original = new IntercomClient();

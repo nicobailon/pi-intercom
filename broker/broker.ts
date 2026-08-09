@@ -1162,7 +1162,9 @@ class IntercomBroker {
       return [];
     }
     return Array.from(this.sessions.values()).filter(session =>
-      session.info.name?.toLowerCase() === lowerName && sameCwd(session.info.cwd, info.cwd)
+      !session.info.runtimeFallbackAlias
+      && session.info.name?.toLowerCase() === lowerName
+      && sameCwd(session.info.cwd, info.cwd)
     );
   }
 
