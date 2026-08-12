@@ -2216,6 +2216,7 @@ Usage:
             }
             const result = await connectedClient.send(target.from.id, {
               text: message,
+              attachments,
               replyTo: target.message.id,
             });
             if (!result.delivered) {
@@ -2231,7 +2232,7 @@ Usage:
             dismissIncomingAsk(target.message.id);
             pi.appendEntry("intercom_sent", {
               to: target.from.name || target.from.id,
-              message: { text: message, replyTo: target.message.id },
+              message: { text: message, attachments, replyTo: target.message.id },
               messageId: result.id,
               timestamp: Date.now(),
             });

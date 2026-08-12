@@ -2346,6 +2346,42 @@ test("intercom reply targets exact replyTo when multiple asks are pending", { co
   }
 });
 
+test("intercom reply sends attachments", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("reply-attachment-worker");
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const worker = await waitForSessionByName(planner, "reply-attachment-worker");
+
+    const askId = "reply-attachment-ask";
+    assert.equal((await planner.send(worker.id, { messageId: askId, text: "Send details?", expectsReply: true })).delivered, true);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const attachments = [{ type: "snippet" as const, name: "details.md", content: "attached details", language: "md" }];
+    const replyReceived = waitForReply(planner, askId);
+    const result = await intercomTool.execute("reply-with-attachment", {
+      action: "reply",
+      message: "Here are details.",
+      attachments,
+    }, new AbortController().signal, undefined, harness.ctx);
+
+    assert.equal(result.details?.delivered, true);
+    const reply = await replyReceived;
+    assert.equal(reply.message.content.text, "Here are details.");
+    assert.deepEqual(reply.message.content.attachments, attachments);
+
+    const sentEntry = harness.entries.find((entry) => entry.type === "intercom_sent");
+    assert.deepEqual((sentEntry?.data as { message?: { attachments?: unknown } }).message?.attachments, attachments);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
 test("intercom reply targets one of multiple pending asks by short session ID", { concurrency: false }, async () => {
   const { planner, orchestrator, cleanup } = await setupClients();
   const { default: piIntercomExtension } = await import("./index.ts");
