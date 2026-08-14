@@ -434,6 +434,14 @@ function buildPresenceIdentity(pi: ExtensionAPI, sessionId: string): { name: str
 function resolveConfiguredIntercomSessionId(piSessionId: string, config: IntercomConfig): string {
   return process.env[STABLE_INTERCOM_SESSION_ID_ENV]?.trim() || config.stableId || piSessionId;
 }
+// The tmux pane id (e.g. "%212") the session was launched in. $TMUX_PANE is
+// inherited at process start and immutable for the lifetime — moving the pane
+// between windows keeps its id — so it is a stable join key a peer can use to
+// live-resolve the current window via tmux. Absent outside tmux.
+function currentTmuxPane(): string | undefined {
+  const pane = process.env.TMUX_PANE?.trim();
+  return pane ? pane : undefined;
+}
 function formatIntercomContactSnippet(sessionId: string): string {
   return `Use pi-intercom: intercom({ action: "send", to: "${sessionId}", message: "..." })`;
 }
@@ -450,7 +458,8 @@ function formatSessionListRow(session: SessionInfo, currentCwd: string, isSelf: 
   const tags = [isSelf ? "self" : session.cwd === currentCwd ? "same cwd" : undefined, session.status]
     .filter((tag): tag is string => Boolean(tag));
   const suffix = tags.length ? ` [${tags.join(", ")}]` : "";
-  return `• ${name} (${idPrefix}) — ${session.cwd} (${session.model}${formatContextUsage(session)})${suffix}`;
+  const pane = session.tmuxPane ? ` · tmux ${session.tmuxPane}` : "";
+  return `• ${name} (${idPrefix}) — ${session.cwd} (${session.model}${formatContextUsage(session)}${pane})${suffix}`;
 }
 function previewText(value: unknown, maxLength = 72): string | undefined {
   if (typeof value !== "string") {
@@ -770,6 +779,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
 
     const identity = buildPresenceIdentity(pi, currentIntercomSessionId ?? currentSessionId);
+    const tmuxPane = currentTmuxPane();
     return {
       ...identity,
       cwd: liveContext.cwd,
@@ -778,6 +788,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       startedAt: sessionStartedAt,
       lastActivity: Date.now(),
       status: currentStatus(),
+      ...(tmuxPane ? { tmuxPane } : {}),
       ...(localExtensions.size > 0
         ? {
             extensions: currentExtensionCapabilities(),

@@ -21,6 +21,13 @@ export interface SessionInfo {
   contextPct?: number;
   contextTokens?: number;
   contextWindow?: number;
+  /** tmux pane id (e.g. "%212") of the session's terminal, read from
+   *  $TMUX_PANE at registration. Present only when the session runs inside a
+   *  tmux pane; absent for cloud, headless, IDE-embedded, or Herdr sessions.
+   *  The pane id is immutable for the process lifetime — unlike the window
+   *  name, which is mutable — so a peer can live-resolve the current window
+   *  from it via tmux when it needs to introspect or drive that pane. */
+  tmuxPane?: string;
 }
 
 export interface Message {

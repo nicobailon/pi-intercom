@@ -558,6 +558,49 @@ test("broker accepts caller supplied stable IDs across reconnect", { concurrency
   }
 });
 
+test("broker propagates a session's tmux pane id into the roster", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const worker = new IntercomClient();
+
+  try {
+    await worker.connect({
+      name: "tmux-worker",
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+      tmuxPane: "%212",
+    });
+    const session = await waitForSessionByName(planner, "tmux-worker");
+    assert.equal(session.tmuxPane, "%212");
+  } finally {
+    await worker.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("broker omits tmux pane id for sessions outside tmux", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const worker = new IntercomClient();
+
+  try {
+    await worker.connect({
+      name: "paneless-worker",
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    });
+    const session = await waitForSessionByName(planner, "paneless-worker");
+    assert.equal(session.tmuxPane, undefined);
+  } finally {
+    await worker.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
 test("broker owns local trust metadata instead of trusting registration payloads", { concurrency: false }, async () => {
   const { planner, cleanup } = await setupClients();
   const raw = await connectRawRegistered("trust-metadata-worker-id", "trust-metadata-worker", {

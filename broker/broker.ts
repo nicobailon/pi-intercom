@@ -362,6 +362,7 @@ class IntercomBroker {
           startedAt: session.startedAt,
           lastActivity: session.lastActivity,
           ...(session.status !== undefined ? { status: session.status } : {}),
+          ...(session.tmuxPane !== undefined ? { tmuxPane: session.tmuxPane } : {}),
           trustedLocal: typeof LISTEN_TARGET === "string" && process.platform !== "win32",
         };
 

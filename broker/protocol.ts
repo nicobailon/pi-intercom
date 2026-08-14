@@ -146,6 +146,10 @@ export function isSessionInfo(value: unknown): value is SessionInfo {
     }
   }
 
+  if (value.tmuxPane !== undefined && typeof value.tmuxPane !== "string") {
+    return false;
+  }
+
   return value.trustedLocal === undefined || typeof value.trustedLocal === "boolean";
 }
 
@@ -175,6 +179,9 @@ export function isSessionRegistration(value: unknown): value is SessionRegistrat
     return false;
   }
   if (value.extensions !== undefined && !Array.isArray(value.extensions)) {
+    return false;
+  }
+  if (value.tmuxPane !== undefined && typeof value.tmuxPane !== "string") {
     return false;
   }
 
