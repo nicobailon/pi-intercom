@@ -4,6 +4,9 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+### Added
+- Added tmux pane IDs to the roster. Thanks to [@odfalik](https://github.com/odfalik) for issue #102 and PR #101.
+
 ## [0.10.1] - 2026-08-12
 
 ### Fixed
