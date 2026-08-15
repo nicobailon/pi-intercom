@@ -1795,7 +1795,7 @@ Use this to communicate findings, request help, or coordinate work with other se
 
 Target a session by name, full session ID, or the short id shown in parentheses
 by "list" (a leading prefix of the ID is enough). Prefer the short id when two
-sessions share a name.
+sessions share a name. Re-list before reusing a session ID; skip if it resolves to self.
 
 Usage:
   intercom({ action: "list" })                    → List active sessions
