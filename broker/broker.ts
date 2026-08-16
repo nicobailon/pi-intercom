@@ -1,5 +1,5 @@
 import net from "net";
-import { writeFileSync, unlinkSync } from "fs";
+import { chmodSync, mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from "fs";
 import { join } from "path";
 import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.ts";
@@ -9,6 +9,7 @@ import {
   getBrokerListenTarget,
   getBrokerPortFilePath,
   getIntercomDirPath,
+  INTERCOM_DIR_MODE,
   INTERCOM_PROTOCOL_NAME,
   INTERCOM_PROTOCOL_VERSION,
   INTERCOM_RUNTIME_FILE_MODE,
@@ -26,6 +27,7 @@ const INTERCOM_DIR = getIntercomDirPath();
 const LISTEN_TARGET = getBrokerListenTarget();
 const PID_PATH = join(INTERCOM_DIR, "broker.pid");
 const PORT_PATH = getBrokerPortFilePath(INTERCOM_DIR);
+const PENDING_ASKS_DIR = join(INTERCOM_DIR, "pending-asks");
 const BROKER_STATE_ID = randomUUID();
 const MAX_SESSIONS = 128;
 const MAX_UNREGISTERED_CONNECTIONS = 32;
@@ -76,6 +78,16 @@ interface AskEdge {
   createdAt: number;
 }
 
+interface PendingAskRecord {
+  askId: string;
+  messageId: string;
+  asker: { sessionId: string; name: string | null };
+  target: { sessionId: string; name: string | null };
+  question: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
 interface MessageReceiptRoute {
   from: string;
   to: string;
@@ -92,6 +104,37 @@ interface MailboxMessage {
   target: SessionInfo;
   message: Message;
   queuedAt: number;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isPendingAskRecord(value: unknown): value is PendingAskRecord {
+  if (!isRecord(value) || !isRecord(value.asker) || !isRecord(value.target)) {
+    return false;
+  }
+  return typeof value.askId === "string"
+    && typeof value.messageId === "string"
+    && typeof value.asker.sessionId === "string"
+    && (typeof value.asker.name === "string" || value.asker.name === null)
+    && typeof value.target.sessionId === "string"
+    && (typeof value.target.name === "string" || value.target.name === null)
+    && typeof value.question === "string"
+    && Number.isSafeInteger(value.createdAt)
+    && Number.isSafeInteger(value.expiresAt)
+    && value.expiresAt >= value.createdAt;
+}
+
+function pendingAskRecordPath(messageId: string): string {
+  return join(PENDING_ASKS_DIR, `${encodeURIComponent(messageId)}.json`);
+}
+
+function ensurePendingAskRecordDir(): void {
+  mkdirSync(PENDING_ASKS_DIR, { recursive: true, mode: INTERCOM_DIR_MODE });
+  if (process.platform !== "win32") {
+    chmodSync(PENDING_ASKS_DIR, INTERCOM_DIR_MODE);
+  }
 }
 
 class IntercomBroker {
@@ -112,6 +155,8 @@ class IntercomBroker {
   constructor() {
     ensureIntercomRuntimeDir(INTERCOM_DIR);
     assertNoLiveBroker(PID_PATH);
+    ensurePendingAskRecordDir();
+    this.prunePendingAskRecords();
     this.extensionStateManager = new ExtensionStateManager(INTERCOM_DIR);
     if (typeof LISTEN_TARGET === "string" && process.platform !== "win32") {
       try {
@@ -552,7 +597,8 @@ class IntercomBroker {
               });
               break;
             }
-            this.askEdges.set(message.id, { from: currentId, to: target.info.id, createdAt: Date.now() });
+            this.writePendingAskRecord(message, fromSession.info, target.info, brokerReceivedAt);
+            this.askEdges.set(message.id, { from: currentId, to: target.info.id, createdAt: brokerReceivedAt });
           }
           const deliveredMessage: Message = {
             ...message,
@@ -579,6 +625,7 @@ class IntercomBroker {
           });
           if (message.replyTo) {
             this.askEdges.delete(message.replyTo);
+            this.removePendingAskRecord(message.replyTo);
           }
           this.messageReceiptRoutes.set(message.id, { from: currentId, to: target.info.id, createdAt: brokerReceivedAt });
           writeMessage(socket, { type: "delivered", messageId: message.id });
@@ -656,6 +703,7 @@ class IntercomBroker {
           }
           if (message.replyTo) {
             this.askEdges.delete(message.replyTo);
+            this.removePendingAskRecord(message.replyTo);
           }
           writeMessage(socket, { type: "delivered", messageId: message.id });
           break;
@@ -715,6 +763,7 @@ class IntercomBroker {
           const edge = this.askEdges.get(clientMessage.messageId);
           if (edge?.from === currentId) {
             this.askEdges.delete(clientMessage.messageId);
+            this.removePendingAskRecord(clientMessage.messageId);
           }
           writeMessage(socket, { type: "delivered", messageId: clientMessage.messageId });
           break;
@@ -741,6 +790,7 @@ class IntercomBroker {
         const edge = this.askEdges.get(clientMessage.messageId);
         if (edge?.from === currentId) {
           this.askEdges.delete(clientMessage.messageId);
+          this.removePendingAskRecord(clientMessage.messageId);
         }
         writeMessage(socket, { type: "delivered", messageId: clientMessage.messageId });
         break;
@@ -757,6 +807,7 @@ class IntercomBroker {
         const edge = this.askEdges.get(clientMessage.messageId);
         if (session?.socket === socket && edge?.from === currentId) {
           this.askEdges.delete(clientMessage.messageId);
+          this.removePendingAskRecord(clientMessage.messageId);
         }
         break;
       }
@@ -881,6 +932,7 @@ class IntercomBroker {
       if (now - entry.queuedAt > MAILBOX_MESSAGE_RETENTION_MS) {
         if (entry.message.expectsReply) {
           this.askEdges.delete(entry.message.id);
+          this.removePendingAskRecord(entry.message.id);
         }
         this.messageReceiptRoutes.delete(entry.message.id);
         this.mailboxMessages.splice(index, 1);
@@ -895,6 +947,7 @@ class IntercomBroker {
       if (!evicted) break;
       if (evicted.message.expectsReply) {
         this.askEdges.delete(evicted.message.id);
+        this.removePendingAskRecord(evicted.message.id);
       }
       this.messageReceiptRoutes.delete(evicted.message.id);
     }
@@ -954,9 +1007,11 @@ class IntercomBroker {
   }
 
   private pruneAskEdges(now = Date.now()): void {
+    this.prunePendingAskRecords(now);
     for (const [messageId, edge] of this.askEdges) {
       if (now - edge.createdAt > this.askTimeoutMs) {
         this.askEdges.delete(messageId);
+        this.removePendingAskRecord(messageId);
       }
     }
   }
@@ -965,6 +1020,53 @@ class IntercomBroker {
     for (const [messageId, edge] of this.askEdges) {
       if (edge.from === sessionId || edge.to === sessionId) {
         this.askEdges.delete(messageId);
+        this.removePendingAskRecord(messageId);
+      }
+    }
+  }
+
+  private writePendingAskRecord(message: Message, from: SessionInfo, target: SessionInfo, createdAt: number): void {
+    ensurePendingAskRecordDir();
+    const record: PendingAskRecord = {
+      askId: message.id,
+      messageId: message.id,
+      asker: { sessionId: from.id, name: from.name ?? null },
+      target: { sessionId: target.id, name: target.name ?? null },
+      question: message.content.text,
+      createdAt,
+      expiresAt: createdAt + this.askTimeoutMs,
+    };
+    const filePath = pendingAskRecordPath(message.id);
+    writeFileSync(filePath, `${JSON.stringify(record, null, 2)}\n`, { mode: INTERCOM_RUNTIME_FILE_MODE });
+    restrictIntercomRuntimeFile(filePath);
+  }
+
+  private removePendingAskRecord(messageId: string): void {
+    try {
+      unlinkSync(pendingAskRecordPath(messageId));
+    } catch (error) {
+      if (!isRecord(error) || error.code !== "ENOENT") {
+        throw error;
+      }
+    }
+  }
+
+  private prunePendingAskRecords(now = Date.now()): void {
+    ensurePendingAskRecordDir();
+    for (const entry of readdirSync(PENDING_ASKS_DIR, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) {
+        continue;
+      }
+      const filePath = join(PENDING_ASKS_DIR, entry.name);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(readFileSync(filePath, "utf-8"));
+      } catch {
+        unlinkSync(filePath);
+        continue;
+      }
+      if (!isPendingAskRecord(parsed) || now > parsed.expiresAt) {
+        unlinkSync(filePath);
       }
     }
   }

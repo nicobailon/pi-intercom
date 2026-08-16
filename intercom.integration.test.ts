@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { EventEmitter, once } from "node:events";
@@ -28,6 +28,7 @@ process.env.HOME = sharedHomeDir;
 process.env.USERPROFILE = sharedHomeDir;
 const { IntercomClient } = await import("./broker/client.ts");
 const { getTsxCliPath } = await import("./broker/spawn.ts");
+const { getAskTimeoutMs } = await import("./config.ts");
 process.on("exit", () => {
   process.env.HOME = previousHome;
   process.env.USERPROFILE = previousUserProfile;
@@ -426,6 +427,26 @@ function waitForReply(client: InstanceType<typeof IntercomClient>, replyTo: stri
     };
     client.on("message", handler);
   });
+}
+
+function pendingAskRecordPath(messageId: string): string {
+  return path.join(sharedHomeDir, ".pi", "agent", "intercom", "pending-asks", `${encodeURIComponent(messageId)}.json`);
+}
+
+function readPendingAskRecord(messageId: string): Record<string, unknown> {
+  return JSON.parse(readFileSync(pendingAskRecordPath(messageId), "utf-8")) as Record<string, unknown>;
+}
+
+async function waitForPendingAskRecordRemoved(messageId: string): Promise<void> {
+  const filePath = pendingAskRecordPath(messageId);
+  const deadline = Date.now() + 1000;
+  while (Date.now() < deadline) {
+    if (!existsSync(filePath)) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.equal(existsSync(filePath), false);
 }
 
 async function waitForSessionByName(client: InstanceType<typeof IntercomClient>, name: string): Promise<SessionInfo> {
@@ -2081,6 +2102,103 @@ test("regular intercom asks fail safely when started concurrently", { concurrenc
     assert.equal(results.filter((result) => /First answer/.test(result.content[0]?.text ?? "")).length, 1);
     await harness.emitLifecycle("session_shutdown");
   } finally {
+    await cleanup();
+  }
+});
+
+test("broker writes a local pending ask record for delivered blocking asks", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const askId = "pending-record-live-ask";
+
+  try {
+    const result = await planner.send(orchestrator.sessionId!, {
+      messageId: askId,
+      text: "Can you decide?",
+      expectsReply: true,
+    });
+
+    assert.equal(result.delivered, true);
+    const record = readPendingAskRecord(askId);
+    assert.equal(record.askId, askId);
+    assert.equal(record.messageId, askId);
+    assert.deepEqual(record.asker, { sessionId: planner.sessionId, name: "planner" });
+    assert.deepEqual(record.target, { sessionId: orchestrator.sessionId, name: "orchestrator" });
+    assert.equal(record.question, "Can you decide?");
+    assert.equal(Number(record.expiresAt) - Number(record.createdAt), getAskTimeoutMs());
+    if (process.platform !== "win32") {
+      assert.equal(statSync(pendingAskRecordPath(askId)).mode & 0o777, 0o600);
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+test("broker removes a pending ask record after a delivered reply", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const askId = "pending-record-replied-ask";
+
+  try {
+    assert.equal((await planner.send(orchestrator.sessionId!, {
+      messageId: askId,
+      text: "Can you answer?",
+      expectsReply: true,
+    })).delivered, true);
+    assert.equal(existsSync(pendingAskRecordPath(askId)), true);
+
+    assert.equal((await orchestrator.send(planner.sessionId!, {
+      text: "Answered.",
+      replyTo: askId,
+    })).delivered, true);
+
+    assert.equal(existsSync(pendingAskRecordPath(askId)), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("broker removes a pending ask record after asker cancellation", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const askId = "pending-record-cancelled-ask";
+
+  try {
+    assert.equal((await planner.send(orchestrator.sessionId!, {
+      messageId: askId,
+      text: "Should I stop?",
+      expectsReply: true,
+    })).delivered, true);
+    assert.equal(existsSync(pendingAskRecordPath(askId)), true);
+
+    planner.cancelAsk(askId);
+    await waitForPendingAskRecordRemoved(askId);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("broker removes a pending ask record during timeout pruning", { concurrency: false }, async () => {
+  const previousTimeout = process.env.PI_INTERCOM_ASK_TIMEOUT_MS;
+  process.env.PI_INTERCOM_ASK_TIMEOUT_MS = "50";
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const askId = "pending-record-timeout-ask";
+
+  try {
+    assert.equal((await planner.send(orchestrator.sessionId!, {
+      messageId: askId,
+      text: "Will this expire?",
+      expectsReply: true,
+    })).delivered, true);
+    assert.equal(existsSync(pendingAskRecordPath(askId)), true);
+
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal((await planner.send(orchestrator.sessionId!, { text: "Prune asks." })).delivered, true);
+
+    assert.equal(existsSync(pendingAskRecordPath(askId)), false);
+  } finally {
+    if (previousTimeout === undefined) {
+      delete process.env.PI_INTERCOM_ASK_TIMEOUT_MS;
+    } else {
+      process.env.PI_INTERCOM_ASK_TIMEOUT_MS = previousTimeout;
+    }
     await cleanup();
   }
 });
