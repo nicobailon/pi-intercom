@@ -318,7 +318,9 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
       cleanup();
       resolveSleep();
     }, ms);
-    timer.unref?.();
+    // Keep the polling promise alive until the next session-list attempt. An
+    // unref'ed timer can let Node's event loop terminate while a project pane
+    // is still starting, leaving callers with a cancelled pending promise.
     signal?.addEventListener("abort", onAbort, { once: true });
   });
 }

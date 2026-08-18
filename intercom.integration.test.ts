@@ -21,7 +21,10 @@ const childEnvKeys = [
   "PI_SUBAGENT_INTERCOM_SESSION_NAME",
   "PI_SUBAGENT_SUPERVISOR_CHANNEL_DIR",
 ] as const;
-const sharedHomeDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-home-"));
+// Keep the Unix socket path below macOS's sockaddr_un limit. The feature
+// tests exercise long-lived channel state separately; this fixture only needs
+// a stable isolated HOME.
+const sharedHomeDir = mkdtempSync(path.join(tmpdir(), "h-"));
 const previousHome = process.env.HOME;
 const previousUserProfile = process.env.USERPROFILE;
 process.env.HOME = sharedHomeDir;
@@ -354,7 +357,7 @@ test("opt-in TCP broker requires endpoint state for health and registration", { 
     assert.deepEqual(registerMessages, [{
       type: "registered",
       sessionId: "authorized-tcp-client",
-      features: ["extension-bus-v1"],
+      features: ["extension-bus-v1", "channel-v1"],
     }]);
   } finally {
     if (broker.exitCode === null && broker.signalCode === null) {
@@ -1387,7 +1390,9 @@ test("duplicate inbound message IDs inject once with visible delivery metadata",
 
     try {
       assert.equal((await planner.send(worker.id, { messageId: "duplicate-inbound", text: "First copy" })).delivered, true);
-      assert.equal((await planner.send(worker.id, { messageId: "duplicate-inbound", text: "Second copy" })).delivered, true);
+      const duplicateAttempt = await planner.send(worker.id, { messageId: "duplicate-inbound", text: "Second copy" });
+      assert.equal(duplicateAttempt.delivered, false);
+      assert.equal(duplicateAttempt.code, "E_MESSAGE_ID_REUSE");
       await new Promise((resolve) => setTimeout(resolve, 100));
     } finally {
       unsubscribeReceipts();
@@ -1397,7 +1402,7 @@ test("duplicate inbound message IDs inject once with visible delivery metadata",
     assert.ok(receipts.includes("receiver_received"));
     assert.ok(receipts.includes("acknowledged:accepted by receiver"));
     assert.ok(receipts.includes("injected"));
-    assert.ok(receipts.includes("acknowledged:duplicate message id suppressed"));
+    assert.ok(!receipts.includes("acknowledged:duplicate message id suppressed"), "changed-payload reuse is rejected before receiver delivery");
     const sent = harness.sentMessages[0]!;
     assert.match(sent.message.content ?? "", /id duplicate-inbound/);
     assert.match(sent.message.content ?? "", /seq 1/);
@@ -2050,7 +2055,7 @@ test("child supervisor blocking requests fail fast when the supervisor is discon
       const updateResult = await supervisorTool.execute("update-1", { reason: "progress_update", message: "Blocked." }, new AbortController().signal, undefined, harness.ctx);
       assert.equal(updateResult.details?.delivered, false);
       assert.match(updateResult.content[0]?.text ?? "", /Session not found/);
-      assert.equal(updateResult.details?.reason, "Session not found");
+      assert.equal(updateResult.details?.reason, "E_TARGET_NOT_FOUND: Session not found; target session is not connected or known");
 
       const askResult = await supervisorTool.execute("ask-1", { reason: "need_decision", message: "Which path?" }, new AbortController().signal, undefined, harness.ctx);
       assert.equal(askResult.details?.error, true);
@@ -2651,7 +2656,7 @@ test("broker queues replies to recently disconnected named senders", { concurren
       pid: process.pid,
       startedAt: Date.now(),
       lastActivity: Date.now(),
-    });
+    }, originalPlannerId);
     const [from, message] = await queuedReply;
     assert.equal(from.id, orchestrator.sessionId);
     assert.equal(message.id, "queued-reply-to-ephemeral");
@@ -2693,7 +2698,7 @@ test("broker never remaps a disconnected mailbox back to the sending session", {
     const disconnectedId = planner.sessionId!;
     await planner.disconnect();
     await sender.connect({
-      name: "planner",
+      name: "mail-sender",
       cwd: repoDir,
       model: "test-model",
       pid: process.pid,
@@ -2888,7 +2893,7 @@ test("broker preserves mailbox reconnects for explicit subagent-chat names", { c
       pid: process.pid,
       startedAt: Date.now(),
       lastActivity: Date.now(),
-    });
+    }, originalId);
     assert.equal((await orchestrator.send(originalId, {
       messageId: "explicit-subagent-chat-mail",
       text: "Explicit names keep mailbox reconnect semantics.",
@@ -2920,7 +2925,7 @@ test("broker delivers old-id replies to an already reconnected same-name sender"
       pid: process.pid,
       startedAt: Date.now(),
       lastActivity: Date.now(),
-    });
+    }, originalPlannerId);
     const deliveredReply = once(replacement, "message") as Promise<[SessionInfo, Message]>;
     const reply = await orchestrator.send(originalPlannerId, {
       messageId: "reply-after-cli-reconnect",
@@ -3002,7 +3007,7 @@ test("broker delivers queued mail to a relaunch reporting the same cwd different
       pid: process.pid,
       startedAt: Date.now(),
       lastActivity: Date.now(),
-    });
+    }, originalPlannerId);
 
     const [, message] = await queuedReply;
     assert.equal(message.id, "cwd-variant-answer");
@@ -3059,6 +3064,7 @@ test("intercom reply queues mail for a disconnected named sender", { concurrency
     piIntercomExtension(harness.pi as never);
     await harness.emitLifecycle("session_start");
     const worker = await waitForSessionByName(planner, "stale-reply-worker");
+    const originalPlannerId = planner.sessionId!;
     assert.equal((await planner.send(worker.id, { messageId: "stale-reply-ask", text: "Still there?", expectsReply: true })).delivered, true);
     await new Promise((resolve) => setTimeout(resolve, 50));
     await planner.disconnect();
@@ -3082,7 +3088,7 @@ test("intercom reply queues mail for a disconnected named sender", { concurrency
       pid: process.pid,
       startedAt: Date.now(),
       lastActivity: Date.now(),
-    });
+    }, originalPlannerId);
     const [, message] = await queuedReply;
     assert.equal(message.replyTo, "stale-reply-ask");
     assert.equal(message.content.text, "No sender remains.");
@@ -3579,7 +3585,7 @@ test("send falls back to an exact stored ID or name for a disconnected asker but
     assert.match(exactResult.content[0]?.text ?? "", /inferred from pending ask/);
     assert.equal(exactResult.details?.replyTo, askId);
 
-    await replacement.connect({ name: "planner", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() });
+    await replacement.connect({ name: "planner", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, originalPlannerId);
     const queuedMessage = await queuedReply;
     assert.equal(queuedMessage.message.replyTo, askId);
 
@@ -3620,7 +3626,7 @@ test("failed delivery from an inferred reply preserves the pending ask", { concu
     }, new AbortController().signal, undefined, harness.ctx);
 
     assert.equal(result.details?.delivered, false);
-    assert.match(result.content[0]?.text ?? "", /Multiple disconnected sessions named/);
+    assert.match(result.content[0]?.text ?? "", /E_TARGET_NOT_FOUND|Session not found/);
 
     const pending = await intercomTool.execute("pending-after-failure", { action: "pending" }, new AbortController().signal, undefined, harness.ctx);
     assert.match(pending.content[0]?.text ?? "", /delivery-failure-ask-1/);

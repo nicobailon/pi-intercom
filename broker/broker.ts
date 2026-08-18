@@ -1,9 +1,9 @@
 import net from "net";
-import { chmodSync, mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync, unlinkSync } from "fs";
 import { join } from "path";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.ts";
-import { isMessage, isMessageReceipt, isSessionId, isSessionRegistration } from "./protocol.ts";
+import { isChannelAddress, isChannelInfo, isMessage, isMessageReceipt, isSessionId, isSessionRegistration } from "./protocol.ts";
 import {
   ensureIntercomRuntimeDir,
   getBrokerListenTarget,
@@ -18,8 +18,28 @@ import {
 } from "./paths.ts";
 import { getAskTimeoutMs } from "../config.ts";
 import { sameCwd } from "../cwd.ts";
-import { EXTENSION_BUS_FEATURE } from "../types.ts";
-import type { SessionInfo, Message, BrokerMessage, ExtensionCapability, MessageControl } from "../types.ts";
+import { CHANNEL_BUS_FEATURE, EXTENSION_BUS_FEATURE } from "../types.ts";
+import type {
+  ChannelAddress,
+  ChannelInfo,
+  ChannelLifecycle,
+  DeliveryState,
+  SessionInfo,
+  Message,
+  BrokerMessage,
+  ExtensionCapability,
+  MessageControl,
+} from "../types.ts";
+import {
+  channelAddress,
+  channelForPair,
+  channelMemberById,
+  channelMemberForSession,
+  cloneChannel,
+  createPairChannel,
+  isChannelExpired,
+  touchChannel,
+} from "./channel.ts";
 import { ExtensionStateManager } from "./extension-state.ts";
 import { assertNoLiveBroker } from "./runtime-claim.ts";
 
@@ -28,6 +48,7 @@ const LISTEN_TARGET = getBrokerListenTarget();
 const PID_PATH = join(INTERCOM_DIR, "broker.pid");
 const PORT_PATH = getBrokerPortFilePath(INTERCOM_DIR);
 const PENDING_ASKS_DIR = join(INTERCOM_DIR, "pending-asks");
+const CHANNELS_STATE_PATH = join(INTERCOM_DIR, "channels.json");
 const BROKER_STATE_ID = randomUUID();
 const MAX_SESSIONS = 128;
 const MAX_UNREGISTERED_CONNECTIONS = 32;
@@ -42,6 +63,8 @@ const MESSAGE_RECEIPT_ROUTE_RETENTION_MS = 60 * 60 * 1000;
 const DISCONNECTED_SESSION_RETENTION_MS = 24 * 60 * 60 * 1000;
 const MAILBOX_MESSAGE_RETENTION_MS = 24 * 60 * 60 * 1000;
 const MAX_MAILBOX_MESSAGES = 256;
+const MAX_CHANNELS = 1024;
+const MAX_CHANNEL_MESSAGE_RECORDS = 4096;
 
 function serializedPayloadSize(payload: unknown): number | null {
   try {
@@ -104,6 +127,17 @@ interface MailboxMessage {
   target: SessionInfo;
   message: Message;
   queuedAt: number;
+  channel?: ChannelAddress;
+}
+
+interface ChannelMessageRecord {
+  fingerprint: string;
+  channelId: string;
+  fromMemberId: string;
+  toMemberId: string;
+  state: DeliveryState;
+  createdAt: number;
+  message: Message;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -143,6 +177,8 @@ class IntercomBroker {
   private messageReceiptRoutes = new Map<string, MessageReceiptRoute>();
   private disconnectedSessions = new Map<string, DisconnectedSession>();
   private mailboxMessages: MailboxMessage[] = [];
+  private channels = new Map<string, ChannelInfo>();
+  private channelMessageRecords = new Map<string, ChannelMessageRecord>();
   private connections = new Set<net.Socket>();
   private unregisteredConnections = new Set<net.Socket>();
   private server: net.Server;
@@ -157,6 +193,7 @@ class IntercomBroker {
     assertNoLiveBroker(PID_PATH);
     ensurePendingAskRecordDir();
     this.prunePendingAskRecords();
+    this.loadChannels();
     this.extensionStateManager = new ExtensionStateManager(INTERCOM_DIR);
     if (typeof LISTEN_TARGET === "string" && process.platform !== "win32") {
       try {
@@ -169,8 +206,20 @@ class IntercomBroker {
   }
 
   start(): void {
+    let socketHardeningAttempts = 0;
     const onListening = () => {
       if (typeof LISTEN_TARGET === "string") {
+        // Node can emit `listening` one tick before the Unix socket directory
+        // entry is visible on some macOS filesystems. Retry the permission
+        // hardening instead of crashing the broker during startup.
+        if (!existsSync(LISTEN_TARGET)) {
+          socketHardeningAttempts += 1;
+          if (socketHardeningAttempts > 100) {
+            throw new Error(`Intercom broker socket did not become visible at ${LISTEN_TARGET}`);
+          }
+          setTimeout(onListening, 5).unref?.();
+          return;
+        }
         restrictIntercomRuntimeFile(LISTEN_TARGET);
       } else {
         const address = this.server.address();
@@ -259,6 +308,7 @@ class IntercomBroker {
         const existing = this.sessions.get(sessionId);
         if (existing?.socket === socket) {
           this.rememberDisconnectedSession(existing.info);
+          this.markChannelsOffline(sessionId);
           this.sessions.delete(sessionId);
           this.clearMessageReceiptRoutesForSession(sessionId);
           this.broadcast({ type: "session_left", sessionId }, sessionId);
@@ -420,6 +470,7 @@ class IntercomBroker {
         };
         this.sessions.set(id, connectedSession);
         this.disconnectedSessions.delete(id);
+        this.rebindChannelsForSession(connectedSession);
         
         if (this.shutdownTimer) {
           clearTimeout(this.shutdownTimer);
@@ -432,7 +483,7 @@ class IntercomBroker {
         writeMessage(socket, {
           type: "registered",
           sessionId: id,
-          features: [EXTENSION_BUS_FEATURE],
+          features: [EXTENSION_BUS_FEATURE, CHANNEL_BUS_FEATURE],
         });
         this.broadcast({ type: "session_joined", session: info }, id);
 
@@ -468,6 +519,7 @@ class IntercomBroker {
         const existing = this.sessions.get(currentId);
         if (existing?.socket === socket) {
           this.rememberDisconnectedSession(existing.info);
+          this.markChannelsOffline(currentId);
           this.sessions.delete(currentId);
           this.clearMessageReceiptRoutesForSession(currentId);
           this.broadcast({ type: "session_left", sessionId: currentId }, currentId);
@@ -527,7 +579,27 @@ class IntercomBroker {
         break;
       }
 
+      case "channel_open": {
+        this.handleChannelOpen(socket, currentId, clientMessage);
+        break;
+      }
+
+      case "channel_close": {
+        this.handleChannelClose(socket, currentId, clientMessage);
+        break;
+      }
+
+      case "channel_send": {
+        this.handleChannelSend(socket, currentId, clientMessage);
+        break;
+      }
+
       case "send": {
+        // Legacy clients are upgraded only when they address an exact session
+        // ID. Name/prefix routing never crosses into the broker delivery seam.
+        if (this.handleLegacySend(socket, currentId, clientMessage)) {
+          break;
+        }
         if (!currentId) {
           throw new Error("Received send before register");
         }
@@ -913,6 +985,425 @@ class IntercomBroker {
     }
   }
 
+  private loadChannels(): void {
+    try {
+      if (!existsSync(CHANNELS_STATE_PATH)) {
+        return;
+      }
+      const parsed: unknown = JSON.parse(readFileSync(CHANNELS_STATE_PATH, "utf8"));
+      if (!isRecord(parsed) || !Array.isArray(parsed.channels)) return;
+      for (const value of parsed.channels) {
+        if (isChannelInfo(value)) {
+          this.channels.set(value.channelId, cloneChannel(value));
+        }
+      }
+      this.pruneChannels(Date.now(), false);
+    } catch (error) {
+      // A corrupt optional channel state must not prevent ordinary intercom
+      // startup. It is quarantined by ignoring it; the next channel open will
+      // create a fresh epoch rather than risk reusing ambiguous membership.
+      console.error(`Failed to load intercom channels: ${error instanceof Error ? error.message : String(error)}`);
+      this.channels.clear();
+    }
+  }
+
+  private persistChannels(): void {
+    try {
+      const payload = JSON.stringify({ version: 1, channels: [...this.channels.values()] }, null, 2);
+      const tempPath = `${CHANNELS_STATE_PATH}.${process.pid}.tmp`;
+      writeFileSync(tempPath, `${payload}\n`, { mode: INTERCOM_RUNTIME_FILE_MODE });
+      restrictIntercomRuntimeFile(tempPath);
+      renameSync(tempPath, CHANNELS_STATE_PATH);
+      restrictIntercomRuntimeFile(CHANNELS_STATE_PATH);
+    } catch (error) {
+      console.error(`Failed to persist intercom channels: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private pruneChannels(now = Date.now(), persist = true): void {
+    let changed = false;
+    for (const channel of this.channels.values()) {
+      if (channel.state === "active" && isChannelExpired(channel, now)) {
+        channel.state = "expired";
+        changed = true;
+      }
+    }
+    if (changed && persist) this.persistChannels();
+  }
+
+  private markChannelsOffline(sessionId: string, now = Date.now()): void {
+    let changed = false;
+    for (const channel of this.channels.values()) {
+      for (const member of channel.members) {
+        if (member.sessionId === sessionId && member.state === "online") {
+          member.state = "offline";
+          member.lastSeenAt = now;
+          changed = true;
+        }
+      }
+    }
+    if (changed) this.persistChannels();
+  }
+
+  private rebindChannelsForSession(session: ConnectedSession, now = Date.now()): void {
+    let changed = false;
+    for (const channel of this.channels.values()) {
+      if (channel.state !== "active") continue;
+      for (const member of channel.members) {
+        if (member.sessionId !== session.info.id || member.state === "left") continue;
+        // A reconnect is a new endpoint binding even when the stable session
+        // ID is retained. Callers must refresh the channel handshake before
+        // sending, so an old socket cannot silently receive new traffic.
+        member.bindingEpoch = randomUUID();
+        member.state = "online";
+        member.lastSeenAt = now;
+        changed = true;
+      }
+    }
+    if (changed) this.persistChannels();
+  }
+
+  private channelError(
+    socket: net.Socket,
+    messageId: string,
+    reason: string,
+    code: string,
+    options: { retryable?: boolean; outcomeKnown?: boolean; channelId?: string } = {},
+  ): void {
+    writeMessage(socket, {
+      type: "delivery_failed",
+      messageId,
+      reason,
+      code,
+      retryable: options.retryable ?? false,
+      outcomeKnown: options.outcomeKnown ?? true,
+      ...(options.channelId ? { channelId: options.channelId } : {}),
+    });
+  }
+
+  private channelOpenError(
+    socket: net.Socket,
+    requestId: string,
+    reason: string,
+    code: string,
+    retryable = false,
+  ): void {
+    writeMessage(socket, { type: "channel_open_failed", requestId, reason, code, retryable });
+  }
+
+  private sessionInfoForChannel(sessionId: string): SessionInfo | null {
+    return this.sessions.get(sessionId)?.info
+      ?? this.disconnectedSessions.get(sessionId)?.info
+      ?? null;
+  }
+
+  private getOrCreatePairChannel(
+    senderId: string,
+    targetId: string,
+    lifecycle: ChannelLifecycle = "ephemeral",
+    now = Date.now(),
+  ): ChannelInfo {
+    this.pruneChannels(now);
+    const existing = channelForPair(this.channels.values(), senderId, targetId);
+    if (existing) {
+      touchChannel(existing, now);
+      for (const member of existing.members) {
+        if (member.sessionId === senderId && this.sessions.has(senderId)) member.state = "online";
+        if (member.sessionId === targetId && this.sessions.has(targetId)) member.state = "online";
+      }
+      this.persistChannels();
+      return existing;
+    }
+    if (this.channels.size >= MAX_CHANNELS) {
+      throw Object.assign(new Error("E_CHANNEL_LIMIT: too many active channels"), { code: "E_CHANNEL_LIMIT" });
+    }
+    const sender = this.sessionInfoForChannel(senderId);
+    const target = this.sessionInfoForChannel(targetId);
+    if (!sender || !target) {
+      throw Object.assign(new Error("E_TARGET_NOT_FOUND: Session not found; target session is not connected or known"), { code: "E_TARGET_NOT_FOUND" });
+    }
+    let channel: ChannelInfo;
+    try {
+      channel = createPairChannel(sender, target, lifecycle, now);
+    } catch (error) {
+      throw Object.assign(new Error(error instanceof Error ? error.message : String(error)), { code: "E_NAME_CONFLICT" });
+    }
+    if (!this.sessions.has(targetId)) {
+      const targetMember = channelMemberForSession(channel, targetId);
+      if (targetMember) targetMember.state = "offline";
+    }
+    this.channels.set(channel.channelId, channel);
+    this.persistChannels();
+    return channel;
+  }
+
+  private handleChannelOpen(socket: net.Socket, currentId: string | null, msg: Record<string, unknown>): void {
+    if (!currentId) throw new Error("Received channel_open before register");
+    const requestId = msg.requestId;
+    const targetSessionId = msg.targetSessionId;
+    const lifecycle = msg.lifecycle === undefined ? "ephemeral" : msg.lifecycle;
+    if (typeof requestId !== "string" || requestId.length === 0 || typeof targetSessionId !== "string" || targetSessionId.length === 0) {
+      throw new Error("Invalid channel_open message");
+    }
+    if (targetSessionId === currentId) {
+      this.channelOpenError(socket, requestId, "E_TARGET_SELF: a channel needs two different sessions", "E_TARGET_SELF");
+      return;
+    }
+    if (lifecycle !== "ephemeral" && lifecycle !== "reusable") {
+      this.channelOpenError(socket, requestId, "E_CHANNEL_LIFECYCLE: lifecycle must be ephemeral or reusable", "E_CHANNEL_LIFECYCLE");
+      return;
+    }
+    try {
+      const channel = this.getOrCreatePairChannel(currentId, targetSessionId, lifecycle as ChannelLifecycle);
+      const self = channelMemberForSession(channel, currentId);
+      const target = channel.members.find((member) => member.sessionId === targetSessionId && member.state !== "left");
+      if (!self || !target) {
+        this.channelOpenError(socket, requestId, "E_MEMBER_NOT_FOUND: channel membership is incomplete", "E_MEMBER_NOT_FOUND");
+        return;
+      }
+      writeMessage(socket, {
+        type: "channel_opened",
+        requestId,
+        channel: cloneChannel(channel),
+        selfMemberId: self.memberId,
+        targetMemberId: target.memberId,
+      });
+    } catch (error) {
+      const code = (error as { code?: unknown }).code;
+      this.channelOpenError(socket, requestId, error instanceof Error ? error.message : String(error), typeof code === "string" ? code : "E_CHANNEL_OPEN", code === "E_TARGET_NOT_FOUND");
+    }
+  }
+
+  private handleChannelClose(socket: net.Socket, currentId: string | null, msg: Record<string, unknown>): void {
+    if (!currentId) throw new Error("Received channel_close before register");
+    const requestId = msg.requestId;
+    const channelId = msg.channelId;
+    const channelEpoch = msg.channelEpoch;
+    if (typeof requestId !== "string" || typeof channelId !== "string" || typeof channelEpoch !== "string") {
+      throw new Error("Invalid channel_close message");
+    }
+    const channel = this.channels.get(channelId);
+    const member = channel ? channelMemberForSession(channel, currentId) : undefined;
+    if (!channel || channel.epoch !== channelEpoch || !member) {
+      this.channelOpenError(socket, requestId, "E_CHANNEL_NOT_FOUND: channel close authorization failed", "E_CHANNEL_NOT_FOUND");
+      return;
+    }
+    channel.state = "closed";
+    this.persistChannels();
+    writeMessage(socket, { type: "channel_closed", requestId, channelId });
+  }
+
+  private messageRecordKey(address: ChannelAddress, messageId: string): string {
+    return `${address.channelId}\0${address.fromMemberId}\0${messageId}`;
+  }
+
+  private messageFingerprint(message: Message): string {
+    const {
+      timestamp: _timestamp,
+      senderSequence: _senderSequence,
+      brokerReceivedAt: _brokerReceivedAt,
+      brokerDeliveredAt: _brokerDeliveredAt,
+      receiverReceivedAt: _receiverReceivedAt,
+      injectedAt: _injectedAt,
+      channel: rawChannel,
+      ...authoredMessage
+    } = message;
+    const channel = rawChannel
+      ? { ...rawChannel, targetBindingEpoch: "<binding>" }
+      : undefined;
+    return createHash("sha256").update(JSON.stringify({ ...authoredMessage, channel })).digest("hex");
+  }
+
+  private pruneChannelMessageRecords(now = Date.now()): void {
+    for (const [key, record] of this.channelMessageRecords) {
+      const channel = this.channels.get(record.channelId);
+      if (!channel || (channel.expiresAt !== undefined && channel.expiresAt < now - MAILBOX_MESSAGE_RETENTION_MS)) {
+        this.channelMessageRecords.delete(key);
+      }
+    }
+    while (this.channelMessageRecords.size > MAX_CHANNEL_MESSAGE_RECORDS) {
+      const oldest = this.channelMessageRecords.keys().next().value;
+      if (typeof oldest !== "string") break;
+      this.channelMessageRecords.delete(oldest);
+    }
+  }
+
+  private sendChannelSuccess(socket: net.Socket, messageId: string, state: DeliveryState, channelId: string): void {
+    writeMessage(socket, { type: "delivered", messageId, state, channelId });
+  }
+
+  private handleChannelSend(socket: net.Socket, currentId: string | null, msg: Record<string, unknown>): void {
+    if (!currentId) throw new Error("Received channel_send before register");
+    const address = msg.channel;
+    const message = msg.message;
+    const messageId = isMessage(message) ? message.id : "unknown";
+    if (!isChannelAddress(address) || !isMessage(message) || !message.channel || JSON.stringify(address) !== JSON.stringify(message.channel)) {
+      this.channelError(socket, messageId, "E_CHANNEL_MESSAGE_FORMAT: channel address and message metadata must match", "E_CHANNEL_MESSAGE_FORMAT");
+      return;
+    }
+    this.routeChannelMessage(socket, currentId, address, message);
+  }
+
+  private handleLegacySend(socket: net.Socket, currentId: string | null, msg: Record<string, unknown>): boolean {
+    const message = msg.message;
+    const messageId = isMessage(message) ? message.id : "unknown";
+    if (!currentId || typeof msg.to !== "string" || !isMessage(message)) return false;
+    const targetId = msg.to;
+    // Legacy wire clients cannot safely express a channel-local name. Exact
+    // IDs are upgraded; fuzzy names/prefixes fail closed with a useful code.
+    const target = this.sessions.get(targetId) ?? this.disconnectedSessions.get(targetId);
+    if (!target || target.info.id !== targetId) {
+      this.channelError(socket, messageId, "E_CHANNEL_REQUIRED: resolve an exact session ID and establish channel-v1 before sending", "E_CHANNEL_REQUIRED");
+      return true;
+    }
+    try {
+      const channel = this.getOrCreatePairChannel(currentId, targetId);
+      const fromMember = channelMemberForSession(channel, currentId);
+      const toMember = channelMemberForSession(channel, targetId);
+      if (!fromMember || !toMember) throw new Error("E_MEMBER_NOT_FOUND: channel membership is incomplete");
+      const address = channelAddress(channel, fromMember, toMember);
+      this.routeChannelMessage(socket, currentId, address, { ...message, channel: address });
+    } catch (error) {
+      const code = (error as { code?: unknown }).code;
+      this.channelError(socket, messageId, error instanceof Error ? error.message : String(error), typeof code === "string" ? code : "E_CHANNEL_REQUIRED");
+    }
+    return true;
+  }
+
+  private routeChannelMessage(socket: net.Socket, currentId: string, address: ChannelAddress, message: Message): void {
+    this.pruneChannels();
+    this.pruneChannelMessageRecords();
+    const channel = this.channels.get(address.channelId);
+    const messageId = message.id;
+    if (!channel) {
+      this.channelError(socket, messageId, "E_CHANNEL_NOT_FOUND: channel does not exist", "E_CHANNEL_NOT_FOUND");
+      return;
+    }
+    if (channel.state !== "active") {
+      this.channelError(socket, messageId, `E_CHANNEL_${channel.state.toUpperCase()}: channel is not active`, `E_CHANNEL_${channel.state.toUpperCase()}`);
+      return;
+    }
+    if (channel.epoch !== address.channelEpoch) {
+      this.channelError(socket, messageId, "E_CHANNEL_STALE_EPOCH: channel epoch is stale", "E_CHANNEL_STALE_EPOCH");
+      return;
+    }
+    const fromMember = channelMemberById(channel, address.fromMemberId);
+    const targetMember = channelMemberById(channel, address.toMemberId);
+    const sender = this.sessions.get(currentId);
+    if (!sender || sender.socket !== socket || !fromMember || fromMember.sessionId !== currentId || fromMember.state !== "online") {
+      this.channelError(socket, messageId, "E_SENDER_NOT_MEMBER: sender is not the bound channel member", "E_SENDER_NOT_MEMBER");
+      return;
+    }
+    if (!targetMember || targetMember.state === "left" || targetMember.memberId === fromMember.memberId) {
+      this.channelError(socket, messageId, "E_TARGET_NOT_MEMBER: target is not a channel member", "E_TARGET_NOT_MEMBER", { channelId: channel.channelId });
+      return;
+    }
+    const recordKey = this.messageRecordKey(address, messageId);
+    const fingerprint = this.messageFingerprint(message);
+    const existing = this.channelMessageRecords.get(recordKey);
+    if (existing) {
+      if (existing.fingerprint !== fingerprint || existing.toMemberId !== targetMember.memberId) {
+        this.channelError(socket, messageId, "E_MESSAGE_ID_REUSE: message ID was already used for different content or recipient", "E_MESSAGE_ID_REUSE", { channelId: channel.channelId });
+      } else if (existing.state === "queued" || existing.state === "socket_delivered") {
+        this.sendChannelSuccess(socket, messageId, existing.state, channel.channelId);
+      } else {
+        this.channelError(socket, messageId, "E_DELIVERY_FAILED: previous delivery failed", "E_DELIVERY_FAILED", { channelId: channel.channelId });
+      }
+      return;
+    }
+    if (address.targetBindingEpoch !== targetMember.bindingEpoch) {
+      this.channelError(socket, messageId, "E_TARGET_REBOUND: target endpoint binding changed; reopen the channel and retry deliberately", "E_TARGET_REBOUND", { retryable: true, channelId: channel.channelId });
+      return;
+    }
+
+    const brokerReceivedAt = Date.now();
+    this.pruneAskEdges(brokerReceivedAt);
+    this.pruneMessageReceiptRoutes(brokerReceivedAt);
+    const replyEdge = message.replyTo ? this.askEdges.get(message.replyTo) : undefined;
+    const target = this.sessions.get(targetMember.sessionId);
+    if (message.replyTo && (!replyEdge || replyEdge.to !== currentId || replyEdge.from !== targetMember.sessionId)) {
+      this.channelError(socket, messageId, "E_REPLY_CHANNEL_MISMATCH: reply does not match a pending ask in this channel", "E_REPLY_CHANNEL_MISMATCH", { channelId: channel.channelId });
+      return;
+    }
+    if (message.supersedes) {
+      const supersededRoute = this.messageReceiptRoutes.get(message.supersedes);
+      if (!supersededRoute || supersededRoute.from !== currentId || supersededRoute.to !== targetMember.sessionId) {
+        this.channelError(socket, messageId, "E_SUPERSEDE_TARGET: supersede target does not match a previous message from the same sender and receiver", "E_SUPERSEDE_TARGET", { channelId: channel.channelId });
+        return;
+      }
+    }
+    if (message.expectsReply) {
+      const reverseEdge = Array.from(this.askEdges.entries()).find(([edgeMessageId, edge]) => edgeMessageId !== message.replyTo && edge.from === targetMember.sessionId && edge.to === currentId);
+      if (reverseEdge) {
+        this.channelError(socket, messageId, "Mutual ask refused: target session is already waiting for a reply from this session.", "E_MUTUAL_ASK", { channelId: channel.channelId });
+        return;
+      }
+      if (!target) {
+        this.channelError(socket, messageId, "E_TARGET_OFFLINE: target session is not currently connected; blocking asks are not queued", "E_TARGET_OFFLINE", { retryable: true, channelId: channel.channelId });
+        return;
+      }
+      this.writePendingAskRecord(message, sender.info, target.info, brokerReceivedAt);
+      this.askEdges.set(message.id, { from: currentId, to: targetMember.sessionId, createdAt: brokerReceivedAt });
+    }
+
+    const deliveredMessage: Message = {
+      ...message,
+      channel: { ...address, targetBindingEpoch: targetMember.bindingEpoch },
+      channelSenderName: fromMember.agentName,
+      channelTargetName: targetMember.agentName,
+      brokerReceivedAt,
+      ...(target ? { brokerDeliveredAt: Date.now() } : {}),
+    };
+    if (target) {
+      try {
+        if (message.supersedes) {
+          writeMessage(target.socket, {
+            type: "message_control",
+            from: sender.info,
+            control: { action: "supersede", messageId: message.supersedes, supersededBy: message.id, timestamp: Date.now() },
+          });
+        }
+        writeMessage(target.socket, { type: "message", from: sender.info, message: deliveredMessage });
+      } catch (error) {
+        if (message.expectsReply) {
+          this.askEdges.delete(message.id);
+          this.removePendingAskRecord(message.id);
+        }
+        this.channelError(socket, messageId, `E_DELIVERY_UNKNOWN: broker could not confirm socket write (${error instanceof Error ? error.message : String(error)})`, "E_DELIVERY_UNKNOWN", { retryable: false, outcomeKnown: false, channelId: channel.channelId });
+        return;
+      }
+      if (message.replyTo) {
+        this.askEdges.delete(message.replyTo);
+        this.removePendingAskRecord(message.replyTo);
+      }
+      this.messageReceiptRoutes.set(message.id, { from: currentId, to: targetMember.sessionId, createdAt: brokerReceivedAt });
+      this.channelMessageRecords.set(recordKey, { fingerprint, channelId: channel.channelId, fromMemberId: fromMember.memberId, toMemberId: targetMember.memberId, state: "socket_delivered", createdAt: brokerReceivedAt, message: deliveredMessage });
+      touchChannel(channel, brokerReceivedAt);
+      this.persistChannels();
+      this.sendChannelSuccess(socket, messageId, "socket_delivered", channel.channelId);
+      return;
+    }
+
+    if (this.mailboxMessages.length >= MAX_MAILBOX_MESSAGES) {
+      if (message.expectsReply) {
+        this.askEdges.delete(message.id);
+        this.removePendingAskRecord(message.id);
+      }
+      this.channelError(socket, messageId, "E_QUEUE_FULL: channel mailbox is full", "E_QUEUE_FULL", { retryable: true, channelId: channel.channelId });
+      return;
+    }
+    this.queueMailboxMessage(sender.info, targetMember.sessionId ? (this.disconnectedSessions.get(targetMember.sessionId)?.info ?? { ...sender.info, id: targetMember.sessionId }) : sender.info, deliveredMessage, brokerReceivedAt, address);
+    this.messageReceiptRoutes.set(message.id, { from: currentId, to: targetMember.sessionId, createdAt: brokerReceivedAt });
+    this.channelMessageRecords.set(recordKey, { fingerprint, channelId: channel.channelId, fromMemberId: fromMember.memberId, toMemberId: targetMember.memberId, state: "queued", createdAt: brokerReceivedAt, message: deliveredMessage });
+    if (message.replyTo) {
+      this.askEdges.delete(message.replyTo);
+      this.removePendingAskRecord(message.replyTo);
+    }
+    touchChannel(channel, brokerReceivedAt);
+    this.persistChannels();
+    this.sendChannelSuccess(socket, messageId, "queued", channel.channelId);
+  }
+
   private rememberDisconnectedSession(info: SessionInfo, now = Date.now()): void {
     this.disconnectedSessions.set(info.id, { info: { ...info }, disconnectedAt: now });
     this.pruneDisconnectedSessions(now);
@@ -940,7 +1431,7 @@ class IntercomBroker {
     }
   }
 
-  private queueMailboxMessage(from: SessionInfo, target: SessionInfo, message: Message, brokerReceivedAt: number): void {
+  private queueMailboxMessage(from: SessionInfo, target: SessionInfo, message: Message, brokerReceivedAt: number, channel?: ChannelAddress): void {
     this.pruneMailboxMessages(brokerReceivedAt);
     while (this.mailboxMessages.length >= MAX_MAILBOX_MESSAGES) {
       const evicted = this.mailboxMessages.shift();
@@ -956,6 +1447,7 @@ class IntercomBroker {
       target: { ...target },
       message: { ...message, brokerReceivedAt },
       queuedAt: brokerReceivedAt,
+      ...(channel ? { channel: { ...channel } } : {}),
     });
   }
 
@@ -966,6 +1458,42 @@ class IntercomBroker {
 
     for (let index = 0; index < this.mailboxMessages.length;) {
       const entry = this.mailboxMessages[index]!;
+      if (entry.channel) {
+        const channel = this.channels.get(entry.channel.channelId);
+        const targetMember = channel ? channelMemberById(channel, entry.channel.toMemberId) : undefined;
+        if (!channel || channel.state !== "active" || !targetMember || targetMember.sessionId !== session.info.id) {
+          index += 1;
+          continue;
+        }
+        this.mailboxMessages.splice(index, 1);
+        const edge = this.askEdges.get(entry.message.id);
+        if (edge?.to === entry.target.id) edge.to = session.info.id;
+        const refreshedAddress = { ...entry.channel, targetBindingEpoch: targetMember.bindingEpoch };
+        const deliveredMessage: Message = {
+          ...entry.message,
+          channel: refreshedAddress,
+          channelSenderName: entry.message.channelSenderName ?? channelMemberById(channel, entry.channel.fromMemberId)?.agentName,
+          channelTargetName: targetMember.agentName,
+          brokerDeliveredAt: Date.now(),
+        };
+        writeMessage(session.socket, { type: "message", from: entry.from, message: deliveredMessage });
+        const key = this.messageRecordKey(entry.channel, entry.message.id);
+        const record = this.channelMessageRecords.get(key);
+        if (record) {
+          record.state = "socket_delivered";
+          record.message = deliveredMessage;
+        }
+        targetMember.state = "online";
+        targetMember.lastSeenAt = now;
+        touchChannel(channel, now);
+        this.messageReceiptRoutes.set(entry.message.id, {
+          from: entry.from.id,
+          to: session.info.id,
+          createdAt: entry.message.brokerReceivedAt ?? entry.queuedAt,
+        });
+        this.persistChannels();
+        continue;
+      }
       const matchesId = entry.target.id === session.info.id;
       const matchesSenderIdentity = Boolean(
         sessionName

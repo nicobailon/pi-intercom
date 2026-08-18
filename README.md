@@ -345,6 +345,12 @@ The supervisor can reply with plain JSON or a fenced `json` block. If the reply 
 | `cwd` | string | Working directory filter for `list-cwd`. For send/ask, scopes target lookup to that directory; without `to`, selects the sole live peer there. |
 | `openProjectPaneIfMissing` | boolean | For `send`/`ask` with `cwd`, open a visible Herdr project pane and launch Pi when no matching live session exists |
 | `focus` | boolean | For `openProjectPaneIfMissing`, focus the new Herdr pane. Defaults to true |
+| `intended` | string | Optional channel-local identity declaration. A configured identity must resolve to the same exact endpoint as `to`. |
+
+Every send/ask is one recipient and establishes or reuses one broker channel. A
+reconnect that should receive queued channel mail must reuse the same stable
+session ID; a same-name session with a new ID is intentionally not treated as
+the old member.
 
 ### contact_supervisor
 
@@ -366,7 +372,7 @@ Only registered in sessions where `pi-subagents` supplied the required child bri
 
 **`list`** — Returns the current session plus other active intercom-connected sessions with name, short ID, working directory, model, and live status. Status is derived automatically from Pi lifecycle events: `idle`, `thinking`, or `tool:<name>`.
 
-**`send`** — Sends a message to the specified session and returns immediately after delivery. If the destination has exactly one pending inbound ask, `send` infers the message is its answer and returns `Reply sent to <target> (inferred from pending ask)`; zero or multiple matches remain unthreaded sends. Set `confirmSend: true` to confirm ordinary and inferred sends. A caller-supplied `replyTo` skips confirmation. `to` alone resolves globally across all live sessions. `cwd` alone targets the sole live peer in that directory. `to` plus `cwd` requires that peer to be in the directory. With `openProjectPaneIfMissing: true`, pi-intercom opens a visible Herdr project pane, starts Pi there, waits for that session to register, then delivers the message through normal intercom routing.
+**`send`** — Establishes or reuses a broker channel, then sends one message to one exact member and returns the broker delivery state. If the destination has exactly one pending inbound ask, `send` infers the message is its answer and returns `Reply sent to <target> (inferred from pending ask)`; zero or multiple matches remain unthreaded sends. Set `confirmSend: true` to confirm ordinary and inferred sends. A caller-supplied `replyTo` skips confirmation. The result details expose `errorCode`, `deliveryState`, `retryable`, `outcomeKnown`, and `channelId` when available. Do not blindly resend after `E_DELIVERY_TIMEOUT_UNKNOWN`; retry with the same `messageId` only after deliberate inspection. `to` alone resolves globally across all live sessions. `cwd` alone targets the sole live peer in that directory. `to` plus `cwd` requires that peer to be in the directory. With `openProjectPaneIfMissing: true`, pi-intercom opens a visible Herdr project pane, starts Pi there, waits for that session to register, then delivers the message through normal intercom routing.
 
 **`ask`** — Requires a currently connected recipient, sends a message, and waits for the recipient to reply (10-minute timeout by default; configurable with `PI_INTERCOM_ASK_TIMEOUT_MS`). A disconnected target fails immediately rather than queueing a blocking request. The reply is returned as the tool result. No confirmation dialog. Only one pending `ask` is allowed per session at a time. Use this when the agent needs the answer to continue working. The same `to`, `cwd`, and `openProjectPaneIfMissing` targeting rules apply.
 
@@ -508,8 +514,55 @@ Runtime files live at `~/.pi/agent/intercom/` by default, or `$PI_CODING_AGENT_D
 - `broker.spawn.lock` — Auto-spawn lock file
 - `broker.port.json` — Dynamic localhost TCP endpoint, only when Windows TCP transport is explicitly enabled
 - `config.json` — User configuration
+- `channels.json` — Broker-owned channel membership and lifecycle state
 
 Supported `config.json` keys include `stableId` for restart-stable addressing, `status` for a custom status suffix, `inboundTrigger` (`always`, `replies`, or `never`), `replyHint`, `confirmSend`, and advanced broker launch overrides.
+
+## Channel-v1 safety boundary
+
+Conversational delivery now uses a broker-enforced logical channel before a
+message is routed. `IntercomClient.send()` resolves a target to an exact
+session ID, performs `channel_open` (which creates or reuses a channel), and
+sends a single-recipient `channel_send` containing:
+
+- `channelId` + channel epoch
+- sender and target member IDs
+- the target binding epoch
+- a broker-resolved channel identity (`执行者-N` for an unnamed member)
+
+A channel member's `memberId` is the stable logical identity inside that
+channel; `sessionId` is only its current runtime endpoint. Unnamed members are
+assigned `执行者-1`, `执行者-2`, ... in successful broker join order. Ordinals
+are not reused. A default channel is `ephemeral` with an idle TTL; opening it
+again reuses the same channel while active. `reusable` is available at the
+client API for workflows that need a longer-lived channel.
+
+The broker validates membership, epoch, sender binding, target binding, reply
+edges, and recipient identity in the same delivery path. A legacy wire `send`
+is upgraded only for an exact session ID; name/prefix-only legacy sends fail
+closed with `E_CHANNEL_REQUIRED`. A disconnected member can receive queued
+ordinary messages only through its exact channel member/session binding;
+blocking `ask` requests are not queued.
+
+Delivery results distinguish `socket_delivered`, `queued`, and `failed`. A
+known failure includes an error code, retryability, and whether the outcome is
+known. A send timeout is reported as `E_DELIVERY_TIMEOUT_UNKNOWN`; callers
+should not blindly create a second message. Reusing a message ID with the same
+authored payload is idempotent, while changing its payload or recipient returns
+`E_MESSAGE_ID_REUSE`. There is no automatic unbounded retry.
+
+Projects may additionally place `.pi/intercom-channel.json` above their cwd to
+restrict the local extension to configured members. Members with an `id` are
+matched by exact ID; their `name` is the channel-local identity. The optional
+`intended` tool field checks that a declared identity resolves to the same
+configured ID. This file is a policy guard, not a substitute for broker
+channel authorization.
+
+Channel membership state is retained in the local intercom runtime directory
+(`channels.json`) so a broker restart does not silently create a new identity.
+A reconnect must use the same stable session ID to resume a queued channel
+message; a same-name process with a different ID is never treated as the same
+member.
 
 ## Design Decisions
 
@@ -517,7 +570,7 @@ Supported `config.json` keys include `stableId` for restart-stable addressing, `
 
 **Auto-spawn with file lock.** The broker starts on first connection and exits after 5 seconds idle. There is no daemon to manage. A spawn lock file, keyed by PID and timestamp, prevents duplicate brokers when multiple sessions start at once.
 
-**`ask` stays client-side.** The broker still routes plain messages; it does not have a special request/response mode for `ask`. The client waits for a matching reply before it triggers a new turn, then returns that reply as the tool result. Reply hints make that flow practical by showing the recipient the exact `send` call to use. Separately, `list` / `sessions` now carry a `requestId` so a delayed session-list reply cannot be mistaken for a newer one.
+**`ask` stays client-side.** The broker enforces the same channel delivery path for an `ask`; it does not have a separate conversational request/response transport. The client waits for a matching channel-bound reply before it triggers a new turn, then returns that reply as the tool result. Reply hints make that flow practical by showing the recipient the exact `send` call to use. Separately, `list` / `sessions` now carry a `requestId` so a delayed session-list reply cannot be mistaken for a newer one.
 
 ## pi-intercom vs pi-messenger
 
@@ -542,7 +595,8 @@ Use pi-messenger for multi-agent swarms working on a shared task. Use pi-interco
 ├── project-agent.ts      # Herdr project-pane launch and cwd target resolution
 ├── broker/
 │   ├── broker.ts         # Broker process
-│   ├── client.ts         # IntercomClient class
+│   ├── client.ts         # IntercomClient class and channel handshake
+│   ├── channel.ts        # Broker channel lifecycle and identity helpers
 │   ├── framing.ts        # Length-prefixed JSON protocol
 │   ├── paths.ts          # Platform-specific socket/pipe paths
 │   ├── spawn.ts          # Auto-spawn logic with lock file
@@ -564,3 +618,5 @@ Use pi-messenger for multi-agent swarms working on a shared task. Use pi-interco
 - **No attachments UI** — `file`, `snippet`, and `context` attachments are supported in the protocol, but not in the compose overlay
 - **Only connected sessions appear** — The list shows Pi sessions that have loaded `pi-intercom` and successfully registered with the broker, not every open Pi process on the machine
 - **Broker lifecycle** — The broker auto-spawns on first use and exits when idle; sessions reconnect automatically if the broker restarts
+- **Single-recipient first round** — There is intentionally no broadcast or transactional multi-recipient message; callers must send separately so every recipient has an independent message ID and delivery state
+- **Bounded runtime mailbox** — Channel membership is persisted, but queued message records and idempotency records are currently bounded broker runtime state; a future iteration can add durable replay across broker replacement

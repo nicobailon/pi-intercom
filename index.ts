@@ -92,6 +92,38 @@ function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
+function deliveryDetails(result: {
+  id?: string;
+  delivered?: boolean;
+  state?: string;
+  reason?: string;
+  code?: string;
+  retryable?: boolean;
+  outcomeKnown?: boolean;
+  channelId?: string;
+}): Record<string, unknown> {
+  return {
+    ...(result.id ? { messageId: result.id } : {}),
+    ...(result.delivered !== undefined ? { delivered: result.delivered } : {}),
+    ...(result.state ? { deliveryState: result.state } : {}),
+    ...(result.reason ? { reason: result.reason } : {}),
+    ...(result.code ? { errorCode: result.code } : {}),
+    ...(result.retryable !== undefined ? { retryable: result.retryable } : {}),
+    ...(result.outcomeKnown !== undefined ? { outcomeKnown: result.outcomeKnown } : {}),
+    ...(result.channelId ? { channelId: result.channelId } : {}),
+  };
+}
+
+function errorDetails(error: unknown): Record<string, unknown> {
+  const value = error as { code?: unknown; retryable?: unknown; outcomeKnown?: unknown; messageId?: unknown };
+  return {
+    ...(typeof value.code === "string" ? { errorCode: value.code } : {}),
+    ...(typeof value.retryable === "boolean" ? { retryable: value.retryable } : {}),
+    ...(typeof value.outcomeKnown === "boolean" ? { outcomeKnown: value.outcomeKnown } : {}),
+    ...(typeof value.messageId === "string" ? { messageId: value.messageId } : {}),
+  };
+}
+
 function formatAttachments(attachments: Attachment[]): string {
   let text = "";
   for (const att of attachments) {
@@ -490,6 +522,11 @@ function formatInboundDeliveryMetadata(message: Message): string {
   if (receiverReceivedAt) parts.push(`receiver received ${receiverReceivedAt}`);
   const injectedAt = formatMessageTimestamp(message.injectedAt);
   if (injectedAt) parts.push(`injected ${injectedAt}`);
+  if (message.channel) {
+    parts.push(`channel ${message.channel.channelId.slice(0, 8)}`);
+    if (message.channelSenderName) parts.push(`identity ${message.channelSenderName}`);
+    if (message.channelTargetName) parts.push(`target ${message.channelTargetName}`);
+  }
   return parts.join(" · ");
 }
 function getNamePollMs(): number {
@@ -895,7 +932,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       : entry.replyCommand;
     const deliveredEntry = { ...entry, message: injectedMessage, replyCommand };
     replyTracker.queueTurnContext({ from: entry.from, message: injectedMessage, receivedAt: Date.now() });
-    const senderDisplay = entry.from.name || entry.from.id.slice(0, 8);
+    const senderDisplay = entry.message.channelSenderName || entry.from.name || entry.from.id.slice(0, 8);
     const replyInstruction = replyCommand ? `\n\nTo reply, use the intercom tool: ${replyCommand}` : "";
     const deliveryMetadata = formatInboundDeliveryMetadata(injectedMessage);
     pi.sendMessage(
@@ -1632,7 +1669,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
               const errorText = result.reason ?? "Session may not exist or has disconnected.";
               return {
                 content: [{ type: "text", text: `Message to "${metadata.orchestratorTarget}" was not delivered: ${errorText}` }],
-                details: { messageId: result.id, delivered: false, reason: result.reason },
+                details: { error: true, ...deliveryDetails(result) },
               };
             }
             pi.appendEntry("intercom_sent", {
@@ -1644,12 +1681,12 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
             });
             return {
               content: [{ type: "text", text: `Progress update sent to supervisor ${metadata.orchestratorTarget}` }],
-              details: { messageId: result.id, delivered: true },
+              details: deliveryDetails(result),
             };
           } catch (error) {
             return {
               content: [{ type: "text", text: `Failed to send progress update: ${getErrorMessage(error)}` }],
-              details: { error: true },
+              details: { error: true, ...errorDetails(error) },
             };
           }
         }
@@ -1701,7 +1738,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
             }
             return {
               content: [{ type: "text", text: `Message to "${metadata.orchestratorTarget}" was not delivered: ${errorText}` }],
-              details: { error: true },
+              details: { error: true, ...deliveryDetails(sendResult) },
             };
           }
           pi.appendEntry("intercom_sent", {
@@ -1747,7 +1784,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
           }
           return {
             content: [{ type: "text", text: `Failed: ${getErrorMessage(error)}` }],
-            details: { error: true, ...(questionId ? { messageId: questionId, deliveryState: latestDeliveryState(questionId, deliveryState) } : {}) },
+            details: { error: true, ...errorDetails(error), ...(questionId ? { messageId: questionId, deliveryState: latestDeliveryState(questionId, deliveryState) } : {}) },
           };
         }
       },
@@ -1831,7 +1868,7 @@ Usage:
         description: "Message ID to reply to (for threading or responding to an 'ask')",
       })),
       messageId: Type.Optional(Type.String({
-        description: "Message ID for actions that operate on an existing message, such as 'cancel'.",
+        description: "Message ID for cancel, or an explicit authored ID for send/ask retries; reusing it with changed content is rejected.",
       })),
       supersedes: Type.Optional(Type.String({
         description: "Previous message ID this send/ask explicitly supersedes. Only works for the same sender and receiver.",
@@ -1848,6 +1885,9 @@ Usage:
       focus: Type.Optional(Type.Boolean({
         description: "For openProjectPaneIfMissing, focus the new Herdr pane. Defaults to true.",
       })),
+      intended: Type.Optional(Type.String({
+        description: "Declared channel identity for send/ask. When a project channel binds an identity to an exact session ID, a mismatch is refused.",
+      })),
     }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -1863,7 +1903,7 @@ Usage:
 
       syncPresenceIdentity(ctx.sessionManager.getSessionId());
 
-      const { action, to, message, attachments, replyTo, messageId, supersedes, retryOf, cwd, openProjectPaneIfMissing, focus } = params;
+      const { action, to, message, attachments, replyTo, messageId, supersedes, retryOf, cwd, openProjectPaneIfMissing, focus, intended } = params;
 
       switch (action) {
         case "list": {
@@ -1965,7 +2005,7 @@ Usage:
               const errorText = result.reason ?? "Message may not exist or may belong to another sender.";
               return {
                 content: [{ type: "text", text: `Cancellation for ${messageId} was not delivered: ${errorText}` }],
-                details: { messageId, delivered: false, reason: result.reason },
+                details: { error: true, ...deliveryDetails(result), messageId },
               };
             }
             return {
@@ -1975,7 +2015,7 @@ Usage:
           } catch (error) {
             return {
               content: [{ type: "text", text: `Failed to cancel message: ${getErrorMessage(error)}` }],
-              details: { error: true, messageId },
+              details: { error: true, ...errorDetails(error), messageId },
             };
           }
         }
@@ -2036,15 +2076,17 @@ Usage:
             const result = await connectedClient.send(sendTo, {
               text: message,
               attachments,
+              ...(messageId ? { messageId } : {}),
               replyTo: effectiveReplyTo,
               supersedes,
               retryOf,
+              intended,
             });
             if (!result.delivered) {
               const errorText = result.reason ?? "Session may not exist or has disconnected.";
               return {
                 content: [{ type: "text", text: `Message to "${targetDisplay}" was not delivered: ${errorText}` }],
-                details: { messageId: result.id, delivered: false, reason: result.reason },
+                details: { error: true, ...deliveryDetails(result) },
               };
             }
             pi.appendEntry("intercom_sent", {
@@ -2064,8 +2106,8 @@ Usage:
                   : inferredAsk ? `Reply sent to ${targetDisplay} (inferred from pending ask)` : `Message sent to ${targetDisplay}`,
               }],
               details: {
-                messageId: result.id,
-                delivered: true,
+                ...deliveryDetails(result),
+                to: targetDisplay,
                 ...(effectiveReplyTo ? { replyTo: effectiveReplyTo } : {}),
                 ...(target.projectPane ? { openedProjectPane: true, paneId: target.projectPane.paneId, projectRoot: target.projectPane.projectRoot } : {}),
               },
@@ -2073,7 +2115,7 @@ Usage:
           } catch (error) {
             return {
               content: [{ type: "text", text: `Failed to send: ${getErrorMessage(error)}` }],
-              details: { error: true },
+              details: { error: true, ...errorDetails(error) },
             };
           }
         }
@@ -2143,7 +2185,7 @@ Usage:
                 details: { error: true },
               };
             }
-            questionId = randomUUID();
+            questionId = messageId ?? randomUUID();
             replyPromise = waitForReply(sendTo, questionId, _signal, () => connectedClient.cancelAsk(questionId!), () => latestDeliveryState(questionId, deliveryState));
             replyPromise.catch(() => undefined);
             const sendResult = await connectedClient.send(sendTo, {
@@ -2154,6 +2196,7 @@ Usage:
               expectsReply: true,
               supersedes,
               retryOf,
+              intended,
             });
 
             deliveryState = sendResult.delivered ? "socket_delivered" : "delivery_failed";
@@ -2169,7 +2212,7 @@ Usage:
               }
               return {
                 content: [{ type: "text", text: `Message to "${targetDisplay}" was not delivered: ${errorText}` }],
-                details: { error: true },
+                details: { error: true, ...deliveryDetails(sendResult) },
               };
             }
             pi.appendEntry("intercom_sent", {
@@ -2204,7 +2247,7 @@ Usage:
             }
             return {
               content: [{ type: "text", text: `Failed: ${getErrorMessage(error)}` }],
-              details: { error: true, ...(questionId ? { messageId: questionId, deliveryState: latestDeliveryState(questionId, deliveryState) } : {}) },
+              details: { error: true, ...errorDetails(error), ...(questionId ? { messageId: questionId, deliveryState: latestDeliveryState(questionId, deliveryState) } : {}) },
             };
           }
         }
@@ -2237,7 +2280,7 @@ Usage:
               }
               return {
                 content: [{ type: "text", text: `Reply to "${target.from.name || target.from.id}" was not delivered: ${errorText}` }],
-                details: { messageId: result.id, delivered: false, reason: result.reason },
+                details: { error: true, ...deliveryDetails(result) },
               };
             }
             dismissIncomingAsk(target.message.id);
@@ -2249,12 +2292,12 @@ Usage:
             });
             return {
               content: [{ type: "text", text: `Reply sent to ${target.from.name || target.from.id}` }],
-              details: { messageId: result.id, delivered: true, replyTo: target.message.id },
+              details: { ...deliveryDetails(result), replyTo: target.message.id },
             };
           } catch (error) {
             return {
               content: [{ type: "text", text: `Failed to reply: ${getErrorMessage(error)}` }],
-              details: { error: true },
+              details: { error: true, ...errorDetails(error) },
             };
           }
         }

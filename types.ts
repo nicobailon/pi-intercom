@@ -1,4 +1,45 @@
 export const EXTENSION_BUS_FEATURE = "extension-bus-v1";
+/** Broker-enforced logical channels for conversational delivery. */
+export const CHANNEL_BUS_FEATURE = "channel-v1";
+
+export type ChannelLifecycle = "ephemeral" | "reusable";
+export type ChannelState = "active" | "closed" | "expired";
+export type ChannelMemberState = "online" | "offline" | "left";
+
+/** Stable logical identity inside a channel; sessionId is only the current endpoint. */
+export interface ChannelMemberInfo {
+  memberId: string;
+  agentName: string;
+  joinOrdinal: number;
+  sessionId: string;
+  bindingEpoch: string;
+  state: ChannelMemberState;
+  joinedAt: number;
+  lastSeenAt: number;
+}
+
+export interface ChannelInfo {
+  schemaVersion: 1;
+  channelId: string;
+  epoch: string;
+  lifecycle: ChannelLifecycle;
+  state: ChannelState;
+  createdAt: number;
+  lastActivityAt: number;
+  expiresAt?: number;
+  members: ChannelMemberInfo[];
+}
+
+/** Every channel message has one sender member and exactly one target member. */
+export interface ChannelAddress {
+  channelId: string;
+  channelEpoch: string;
+  fromMemberId: string;
+  toMemberId: string;
+  targetBindingEpoch: string;
+}
+
+export type DeliveryState = "socket_delivered" | "queued" | "failed" | "unknown";
 
 export interface SessionInfo {
   id: string;
@@ -42,6 +83,11 @@ export interface Message {
   retryOf?: string;
   replyTo?: string;
   expectsReply?: boolean;
+  /** Present on all broker-enforced conversational messages. */
+  channel?: ChannelAddress;
+  /** Broker-resolved channel-local identities for model-visible diagnostics. */
+  channelSenderName?: string;
+  channelTargetName?: string;
   content: {
     text: string;
     attachments?: Attachment[];
@@ -88,6 +134,10 @@ export type ClientMessage =
   | { type: "unregister" }
   | { type: "extension_capabilities_update"; extensions: ExtensionCapability[] }
   | { type: "list"; requestId: string }
+  | { type: "channel_open"; requestId: string; targetSessionId: string; lifecycle?: ChannelLifecycle }
+  | { type: "channel_close"; requestId: string; channelId: string; channelEpoch: string }
+  | { type: "channel_send"; channel: ChannelAddress; message: Message }
+  /** Legacy wire form. The broker only accepts an exact session ID and upgrades it to a channel. */
   | { type: "send"; to: string; message: Message }
   | { type: "message_receipt"; receipt: MessageReceipt }
   | { type: "cancel_message"; messageId: string }
@@ -112,13 +162,24 @@ export type ClientMessage =
 export type BrokerMessage =
   | { type: "registered"; sessionId: string; features?: string[] }
   | { type: "sessions"; requestId: string; sessions: SessionInfo[] }
+  | { type: "channel_opened"; requestId: string; channel: ChannelInfo; selfMemberId: string; targetMemberId: string }
+  | { type: "channel_closed"; requestId: string; channelId: string }
   | { type: "message"; from: SessionInfo; message: Message }
   | { type: "presence_update"; session: SessionInfo }
   | { type: "session_joined"; session: SessionInfo }
   | { type: "session_left"; sessionId: string }
   | { type: "error"; error: string }
-  | { type: "delivered"; messageId: string }
-  | { type: "delivery_failed"; messageId: string; reason: string }
+  | { type: "delivered"; messageId: string; state?: DeliveryState; channelId?: string }
+  | {
+      type: "delivery_failed";
+      messageId: string;
+      reason: string;
+      code?: string;
+      retryable?: boolean;
+      outcomeKnown?: boolean;
+      channelId?: string;
+    }
+  | { type: "channel_open_failed"; requestId: string; reason: string; code?: string; retryable?: boolean }
   | { type: "message_receipt"; from: SessionInfo; receipt: MessageReceipt }
   | { type: "message_control"; from: SessionInfo; control: MessageControl }
   | { type: "extension_owner"; namespace: string; ownerId?: string; ownerEpoch?: string }

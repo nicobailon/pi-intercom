@@ -3,12 +3,17 @@ import net from "net";
 import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.ts";
 import { getBrokerConnectTarget, type BrokerConnectTarget } from "./paths.ts";
-import { isMessage, isMessageControl, isMessageReceipt, isSessionInfo } from "./protocol.ts";
-import { EXTENSION_BUS_FEATURE } from "../types.ts";
+import { channelMemberFor, channelRejectsSession, findChannelFile, loadChannel, resolveBoundId } from "../channel.ts";
+import { isChannelInfo, isMessage, isMessageControl, isMessageReceipt, isSessionInfo } from "./protocol.ts";
+import { CHANNEL_BUS_FEATURE, EXTENSION_BUS_FEATURE } from "../types.ts";
 import type {
   Attachment,
   BrokerMessage,
+  ChannelInfo,
+  ChannelLifecycle,
+  ChannelAddress,
   ClientMessage,
+  DeliveryState,
   Message,
   MessageControl,
   MessageReceipt,
@@ -16,7 +21,7 @@ import type {
   SessionRegistration,
 } from "../types.ts";
 
-interface SendOptions {
+export interface SendOptions {
   text: string;
   attachments?: Attachment[];
   replyTo?: string;
@@ -24,12 +29,31 @@ interface SendOptions {
   messageId?: string;
   supersedes?: string;
   retryOf?: string;
+  /** Optional declared identity; static project channel policy verifies it. */
+  intended?: string;
 }
 
-interface SendResult {
+export interface SendResult {
   id: string;
   delivered: boolean;
+  state?: DeliveryState;
   reason?: string;
+  code?: string;
+  retryable?: boolean;
+  outcomeKnown?: boolean;
+  channelId?: string;
+}
+
+export interface ChannelBinding {
+  channel: ChannelInfo;
+  selfMemberId: string;
+  targetMemberId: string;
+  targetSessionId: string;
+}
+
+interface PendingChannelOpen {
+  resolve: (binding: ChannelBinding) => void;
+  reject: (error: Error) => void;
 }
 
 function toError(error: unknown): Error {
@@ -66,6 +90,10 @@ export class IntercomClient extends EventEmitter {
   private _features = new Set<string>();
   private pendingSends = new Map<string, { resolve: (r: SendResult) => void; reject: (e: Error) => void }>();
   private pendingLists = new Map<string, { resolve: (sessions: SessionInfo[]) => void; reject: (e: Error) => void }>();
+  private pendingChannelOpens = new Map<string, PendingChannelOpen>();
+  private pendingChannelCloses = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
+  private channelBindings = new Map<string, ChannelBinding>();
+  private registration: SessionRegistration | null = null;
   private nextSenderSequence = 1;
   private disconnecting = false;
   private disconnectError: Error | null = null;
@@ -81,6 +109,15 @@ export class IntercomClient extends EventEmitter {
       pending.reject(error);
     }
     this.pendingLists.clear();
+    for (const pending of this.pendingChannelOpens.values()) {
+      pending.reject(error);
+    }
+    this.pendingChannelOpens.clear();
+    for (const pending of this.pendingChannelCloses.values()) {
+      pending.reject(error);
+    }
+    this.pendingChannelCloses.clear();
+    this.channelBindings.clear();
   }
 
   get sessionId(): string | null {
@@ -173,6 +210,7 @@ export class IntercomClient extends EventEmitter {
         return;
       }
       this.socket = socket;
+      this.registration = session;
       this.disconnectError = null;
       let settled = false;
       const timeout = setTimeout(() => {
@@ -222,6 +260,7 @@ export class IntercomClient extends EventEmitter {
         }
         this._sessionId = null;
         this._features.clear();
+        this.registration = null;
         this.disconnectError = null;
         if (connectionEstablished && !wasDisconnecting) {
           this.emit("disconnected", disconnectError);
@@ -355,6 +394,75 @@ export class IntercomClient extends EventEmitter {
         break;
       }
 
+      case "channel_opened": {
+        const { requestId, channel, selfMemberId, targetMemberId } = brokerMessage;
+        if (
+          typeof requestId !== "string"
+          || !isChannelInfo(channel)
+          || typeof selfMemberId !== "string"
+          || typeof targetMemberId !== "string"
+        ) {
+          throw new Error("Invalid channel_opened message");
+        }
+        const pending = this.pendingChannelOpens.get(requestId);
+        if (!pending) return;
+        this.pendingChannelOpens.delete(requestId);
+        const self = channel.members.find((member) => member.memberId === selfMemberId);
+        const target = channel.members.find((member) => member.memberId === targetMemberId);
+        if (!self || !target) {
+          pending.reject(new Error("Invalid channel_opened membership"));
+          return;
+        }
+        const binding: ChannelBinding = {
+          channel,
+          selfMemberId,
+          targetMemberId,
+          targetSessionId: target.sessionId,
+        };
+        this.channelBindings.set(target.sessionId, binding);
+        pending.resolve(binding);
+        break;
+      }
+
+      case "channel_closed": {
+        if (typeof brokerMessage.requestId !== "string" || typeof brokerMessage.channelId !== "string") {
+          throw new Error("Invalid channel_closed message");
+        }
+        for (const [targetId, binding] of this.channelBindings) {
+          if (binding.channel.channelId === brokerMessage.channelId) this.channelBindings.delete(targetId);
+        }
+        const pending = this.pendingChannelCloses.get(brokerMessage.requestId);
+        if (pending) {
+          this.pendingChannelCloses.delete(brokerMessage.requestId);
+          pending.resolve();
+        }
+        break;
+      }
+
+      case "channel_open_failed": {
+        const { requestId, reason, code, retryable } = brokerMessage;
+        if (typeof requestId !== "string" || typeof reason !== "string") {
+          throw new Error("Invalid channel_open_failed message");
+        }
+        const pending = this.pendingChannelOpens.get(requestId);
+        if (pending) {
+          this.pendingChannelOpens.delete(requestId);
+          const error = new Error(reason) as Error & { code?: string; retryable?: boolean };
+          if (typeof code === "string") error.code = code;
+          if (typeof retryable === "boolean") error.retryable = retryable;
+          pending.reject(error);
+          break;
+        }
+        const closePending = this.pendingChannelCloses.get(requestId);
+        if (!closePending) return;
+        this.pendingChannelCloses.delete(requestId);
+        const error = new Error(reason) as Error & { code?: string; retryable?: boolean };
+        if (typeof code === "string") error.code = code;
+        if (typeof retryable === "boolean") error.retryable = retryable;
+        closePending.reject(error);
+        break;
+      }
+
       case "message": {
         const { from, message } = brokerMessage;
         if (!isSessionInfo(from) || !isMessage(message)) {
@@ -378,7 +486,12 @@ export class IntercomClient extends EventEmitter {
         }
 
         this.pendingSends.delete(messageId);
-        pending.resolve({ id: messageId, delivered: true });
+        pending.resolve({
+          id: messageId,
+          delivered: true,
+          state: brokerMessage.state === "queued" || brokerMessage.state === "socket_delivered" ? brokerMessage.state : "socket_delivered",
+          ...(typeof brokerMessage.channelId === "string" ? { channelId: brokerMessage.channelId } : {}),
+        });
         break;
       }
 
@@ -395,7 +508,16 @@ export class IntercomClient extends EventEmitter {
         }
 
         this.pendingSends.delete(messageId);
-        pending.resolve({ id: messageId, delivered: false, reason });
+        pending.resolve({
+          id: messageId,
+          delivered: false,
+          state: "failed",
+          reason,
+          ...(typeof brokerMessage.code === "string" ? { code: brokerMessage.code } : {}),
+          ...(typeof brokerMessage.retryable === "boolean" ? { retryable: brokerMessage.retryable } : {}),
+          ...(typeof brokerMessage.outcomeKnown === "boolean" ? { outcomeKnown: brokerMessage.outcomeKnown } : {}),
+          ...(typeof brokerMessage.channelId === "string" ? { channelId: brokerMessage.channelId } : {}),
+        });
         break;
       }
 
@@ -613,15 +735,180 @@ export class IntercomClient extends EventEmitter {
     });
   }
 
-  send(to: string, options: SendOptions): Promise<SendResult> {
+  private async resolveExactTarget(target: string): Promise<{ id: string; sessions: SessionInfo[] }> {
+    const sessions = await this.listSessions();
+    const byId = sessions.find((session) => session.id === target);
+    if (byId) return { id: byId.id, sessions };
+    const lower = target.toLowerCase();
+    const byName = sessions.filter((session) => session.name?.toLowerCase() === lower);
+    if (byName.length === 1) return { id: byName[0]!.id, sessions };
+    if (byName.length > 1) throw Object.assign(new Error(`Multiple sessions named "${target}"; use an exact session ID.`), { code: "E_TARGET_AMBIGUOUS" });
+    const byPrefix = sessions.filter((session) => session.id.startsWith(target));
+    if (byPrefix.length === 1) return { id: byPrefix[0]!.id, sessions };
+    if (byPrefix.length > 1) throw Object.assign(new Error(`Multiple sessions match ID prefix "${target}"; use a longer ID.`), { code: "E_TARGET_AMBIGUOUS" });
+    // An exact stable ID may refer to a disconnected channel member. The
+    // broker will accept it only when it can prove the prior membership.
+    return { id: target, sessions };
+  }
+
+  private enforceLocalChannelPolicy(targetSessionId: string, sessions: SessionInfo[], intended?: string): void {
+    const registration = this.registration;
+    if (!registration?.cwd) return;
+    const channelFile = findChannelFile(registration.cwd);
+    if (!channelFile) return;
+    const config = loadChannel(channelFile);
+    const selfSession = sessions.find((session) => session.id === this._sessionId) ?? { id: this._sessionId ?? "" };
+    if (!channelMemberFor(config, selfSession)) {
+      const error = new Error(`E_SENDER_NOT_MEMBER: current session is not a member of channel "${config.name}"`) as Error & { code?: string };
+      error.code = "E_SENDER_NOT_MEMBER";
+      throw error;
+    }
+    const targetSession = sessions.find((session) => session.id === targetSessionId) ?? { id: targetSessionId };
+    // For a disconnected member only its exact configured ID is admissible;
+    // a name-only entry cannot be proven against a missing endpoint.
+    const rejection = channelRejectsSession(config, targetSession);
+    if (rejection) {
+      const error = new Error(`E_TARGET_NOT_MEMBER: ${rejection}`) as Error & { code?: string };
+      error.code = "E_TARGET_NOT_MEMBER";
+      throw error;
+    }
+    if (!intended) return;
+    const boundId = resolveBoundId(config, intended);
+    if (boundId && boundId !== targetSessionId) {
+      const error = new Error(`E_BINDING_MISMATCH: intended identity "${intended}" is bound to ${boundId}, not ${targetSessionId}`) as Error & { code?: string };
+      error.code = "E_BINDING_MISMATCH";
+      throw error;
+    }
+    if (!boundId) {
+      const targetMember = channelMemberFor(config, targetSession);
+      if (!targetMember || targetMember.name?.trim().toLowerCase() !== intended.trim().toLowerCase()) {
+        const error = new Error(`E_BINDING_MISMATCH: intended identity "${intended}" does not match the channel target`) as Error & { code?: string };
+        error.code = "E_BINDING_MISMATCH";
+        throw error;
+      }
+    }
+  }
+
+  /**
+   * Open or reuse a broker-owned channel. The target must already be resolved
+   * to an exact session ID; names never cross this handshake boundary.
+   */
+  openChannel(targetSessionId: string, lifecycle: ChannelLifecycle = "ephemeral"): Promise<ChannelBinding> {
     let socket: net.Socket;
     try {
       socket = this.requireActiveSocket();
     } catch (error) {
       return Promise.reject(toError(error));
     }
-    
+    if (!this.supportsFeature(CHANNEL_BUS_FEATURE)) {
+      const error = new Error("E_CHANNEL_REQUIRED: connected broker does not support channel-v1") as Error & { code?: string };
+      error.code = "E_CHANNEL_REQUIRED";
+      return Promise.reject(error);
+    }
+    const requestId = randomUUID();
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        if (!this.pendingChannelOpens.has(requestId)) return;
+        this.pendingChannelOpens.delete(requestId);
+        const error = new Error("Channel open timeout") as Error & { code?: string; retryable?: boolean };
+        error.code = "E_CHANNEL_OPEN_TIMEOUT";
+        error.retryable = true;
+        reject(error);
+      }, 10000);
+      this.pendingChannelOpens.set(requestId, {
+        resolve: (binding) => {
+          clearTimeout(timeout);
+          resolve(binding);
+        },
+        reject: (error) => {
+          clearTimeout(timeout);
+          reject(error);
+        },
+      });
+      try {
+        writeMessage(socket, { type: "channel_open", requestId, targetSessionId, lifecycle });
+      } catch (error) {
+        clearTimeout(timeout);
+        this.pendingChannelOpens.delete(requestId);
+        reject(toError(error));
+      }
+    });
+  }
+
+  closeChannel(binding: ChannelBinding): Promise<void> {
+    let socket: net.Socket;
+    try {
+      socket = this.requireActiveSocket();
+    } catch (error) {
+      return Promise.reject(toError(error));
+    }
+    const requestId = randomUUID();
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        if (!this.pendingChannelCloses.has(requestId)) return;
+        this.pendingChannelCloses.delete(requestId);
+        reject(new Error("Channel close timeout"));
+      }, 5000);
+      this.pendingChannelCloses.set(requestId, {
+        resolve: () => {
+          clearTimeout(timeout);
+          resolve();
+        },
+        reject: (error) => {
+          clearTimeout(timeout);
+          reject(error);
+        },
+      });
+      try {
+        writeMessage(socket, {
+          type: "channel_close",
+          requestId,
+          channelId: binding.channel.channelId,
+          channelEpoch: binding.channel.epoch,
+        });
+      } catch (error) {
+        clearTimeout(timeout);
+        this.pendingChannelCloses.delete(requestId);
+        reject(toError(error));
+      }
+    });
+  }
+
+  async send(to: string, options: SendOptions): Promise<SendResult> {
     const messageId = options.messageId ?? randomUUID();
+    let targetSessionId: string;
+    let binding: ChannelBinding;
+    try {
+      const target = await this.resolveExactTarget(to);
+      targetSessionId = target.id;
+      this.enforceLocalChannelPolicy(targetSessionId, target.sessions, options.intended);
+      binding = await this.openChannel(targetSessionId);
+    } catch (error) {
+      const normalized = error as Error & { code?: string; retryable?: boolean };
+      if (normalized.code?.startsWith("E_")) {
+        return {
+          id: messageId,
+          delivered: false,
+          state: "failed",
+          reason: normalized.message,
+          code: normalized.code,
+          retryable: normalized.retryable,
+          outcomeKnown: true,
+        };
+      }
+      throw error;
+    }
+    const socket = this.requireActiveSocket();
+    const self = binding.channel.members.find((member) => member.memberId === binding.selfMemberId);
+    const target = binding.channel.members.find((member) => member.memberId === binding.targetMemberId);
+    if (!self || !target) throw new Error("E_CHANNEL_NOT_FOUND: channel membership is incomplete");
+    const address: ChannelAddress = {
+      channelId: binding.channel.channelId,
+      channelEpoch: binding.channel.epoch,
+      fromMemberId: self.memberId,
+      toMemberId: target.memberId,
+      targetBindingEpoch: target.bindingEpoch,
+    };
     const message: Message = {
       id: messageId,
       timestamp: Date.now(),
@@ -630,6 +917,7 @@ export class IntercomClient extends EventEmitter {
       retryOf: options.retryOf,
       replyTo: options.replyTo,
       expectsReply: options.expectsReply,
+      channel: address,
       content: {
         text: options.text,
         attachments: options.attachments,
@@ -637,6 +925,10 @@ export class IntercomClient extends EventEmitter {
     };
 
     return new Promise((resolve, reject) => {
+      if (this.pendingSends.has(messageId)) {
+        reject(new Error(`Message ${messageId} is already being sent`));
+        return;
+      }
       const wrappedResolve = (result: SendResult) => {
         clearTimeout(timeout);
         resolve(result);
@@ -648,13 +940,22 @@ export class IntercomClient extends EventEmitter {
       const timeout = setTimeout(() => {
         if (this.pendingSends.has(messageId)) {
           this.pendingSends.delete(messageId);
-          wrappedReject(new Error("Send timeout"));
+          const error = new Error(`E_DELIVERY_TIMEOUT_UNKNOWN: send outcome for ${messageId} is unknown`) as Error & {
+            code?: string;
+            retryable?: boolean;
+            outcomeKnown?: boolean;
+            messageId?: string;
+          };
+          error.code = "E_DELIVERY_TIMEOUT_UNKNOWN";
+          error.retryable = false;
+          error.outcomeKnown = false;
+          error.messageId = messageId;
+          wrappedReject(error);
         }
       }, 10000);
       this.pendingSends.set(messageId, { resolve: wrappedResolve, reject: wrappedReject });
-
       try {
-        writeMessage(socket, { type: "send", to, message });
+        writeMessage(socket, { type: "channel_send", channel: address, message });
       } catch (error) {
         clearTimeout(timeout);
         this.pendingSends.delete(messageId);
