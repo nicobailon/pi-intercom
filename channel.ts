@@ -15,13 +15,13 @@ import { dirname, join } from "node:path";
  * {
  *   "name": "R-ICL 任务组",
  *   "members": [
- *     { "name": "eng-lead", "role": "发起者" },
- *     { "name": "executor", "role": "接受者", "id": "01a0…" }
+ *     { "name": "eng-lead", "role": "发起者", "id": "01a0…" },
+ *     { "name": "executor", "role": "接受者", "id": "01b0…" }
  *   ]
  * }
- * Members match by session name (case-insensitive) and/or by exact session id.
- * An `id` binds the member to a specific session so a runtime alias that has
- * not been `/name`d can still be admitted.
+ * Members are bound by exact session id. Name-only members are rejected by
+ * default; an existing legacy file may opt in explicitly with
+ * `"allowNameOnly": true`, accepting the weaker live-name binding.
  */
 
 export const CHANNEL_FILE_NAME = "intercom-channel.json";
@@ -35,6 +35,8 @@ export interface ChannelMember {
 export interface ChannelConfig {
   name: string;
   members: ChannelMember[];
+  /** Explicit compatibility opt-in for weak, name-only membership. */
+  allowNameOnly?: boolean;
 }
 
 export interface SessionLike {
@@ -79,6 +81,10 @@ export function loadChannel(file: string): ChannelConfig {
   if (!Array.isArray(cfg.members) || cfg.members.length === 0) {
     throw new Error(`Invalid channel file ${file}: missing non-empty "members" array.`);
   }
+  if (cfg.allowNameOnly !== undefined && typeof cfg.allowNameOnly !== "boolean") {
+    throw new Error(`Invalid channel file ${file}: "allowNameOnly" must be a boolean.`);
+  }
+  const allowNameOnly = cfg.allowNameOnly === true;
   const seenNames = new Set<string>();
   const seenIds = new Set<string>();
   const members: ChannelMember[] = cfg.members.map((member, index) => {
@@ -106,7 +112,10 @@ export function loadChannel(file: string): ChannelConfig {
       ...(typeof m.role === "string" && m.role.trim().length > 0 ? { role: m.role } : {}),
     };
   });
-  return { name: cfg.name, members };
+  if (!allowNameOnly && members.some((member) => !member.id)) {
+    throw new Error(`Invalid channel file ${file}: every member needs a stable "id"; set "allowNameOnly": true only for explicit legacy compatibility.`);
+  }
+  return { name: cfg.name, members, ...(allowNameOnly ? { allowNameOnly: true } : {}) };
 }
 
 /** Human-readable member list, e.g. `a (发起者), b (接受者)`. */
@@ -125,9 +134,8 @@ export function formatChannelMembers(config: ChannelConfig): string {
  * An id-bearing member is bound to the exact runtime endpoint. Its `name` is
  * the channel-local logical identity (and need not equal the session's
  * mutable display name). A same-name session with a different id is rejected.
- * Name-only members are supported for legacy channel files, but generated
- * runtime aliases never satisfy a name-only binding because an alias is not a
- * user identity.
+ * Name-only members are accepted only when the config explicitly opts into
+ * `allowNameOnly`; generated runtime aliases never satisfy that weak binding.
  */
 export function channelMemberFor(
   config: ChannelConfig,
@@ -144,7 +152,7 @@ export function channelMemberFor(
       if (member.id === session.id) return member;
       continue;
     }
-    if (nameMatches) {
+    if (config.allowNameOnly && nameMatches) {
       return member;
     }
   }
@@ -154,7 +162,7 @@ export function channelMemberFor(
 /**
  * Returns null when `session` is allowed to receive messages in the channel,
  * otherwise a rejection reason. ID-bearing members require exact ID; name-only
- * members are a legacy weaker binding.
+ * members are available only through the explicit legacy opt-in.
  */
 export function channelRejectsSession(
   config: ChannelConfig,

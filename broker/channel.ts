@@ -10,6 +10,11 @@ import type {
 export const DEFAULT_EPHEMERAL_CHANNEL_TTL_MS = 30 * 60 * 1000;
 export const CHANNEL_STATE_FILE_VERSION = 1;
 
+function ephemeralChannelTtlMs(): number {
+  const configured = Number.parseInt(process.env.PI_INTERCOM_EPHEMERAL_CHANNEL_TTL_MS ?? "", 10);
+  return Number.isSafeInteger(configured) && configured > 0 ? configured : DEFAULT_EPHEMERAL_CHANNEL_TTL_MS;
+}
+
 export function cloneChannel(channel: ChannelInfo): ChannelInfo {
   return {
     ...channel,
@@ -91,7 +96,7 @@ export function createPairChannel(
     state: "active",
     createdAt: now,
     lastActivityAt: now,
-    ...(lifecycle === "ephemeral" ? { expiresAt: now + DEFAULT_EPHEMERAL_CHANNEL_TTL_MS } : {}),
+    ...(lifecycle === "ephemeral" ? { expiresAt: now + ephemeralChannelTtlMs() } : {}),
     members: [],
   };
   channel.members.push(allocateChannelMember(channel, sender, 1, now));
@@ -116,7 +121,7 @@ export function channelAddress(
 export function touchChannel(channel: ChannelInfo, now = Date.now()): void {
   channel.lastActivityAt = now;
   if (channel.lifecycle === "ephemeral") {
-    channel.expiresAt = now + DEFAULT_EPHEMERAL_CHANNEL_TTL_MS;
+    channel.expiresAt = now + ephemeralChannelTtlMs();
   }
 }
 

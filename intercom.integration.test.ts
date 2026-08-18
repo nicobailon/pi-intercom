@@ -257,7 +257,7 @@ test("opt-in TCP broker requires endpoint state for health and registration", { 
   const broker = spawn(process.execPath, [
     getTsxCliPath(),
     "-e",
-    "Object.defineProperty(process, 'platform', { value: 'win32' }); import('./broker/broker.ts').catch((error) => { console.error(error); process.exit(1); });",
+    "Object.defineProperty(process, 'platform', { value: 'win32' }); import('./broker/broker.ts').then(({ IntercomBroker }) => new IntercomBroker().start()).catch((error) => { console.error(error); process.exit(1); });",
   ], {
     cwd: repoDir,
     env: {

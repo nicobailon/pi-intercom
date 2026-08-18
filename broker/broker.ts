@@ -63,6 +63,11 @@ const MESSAGE_RECEIPT_ROUTE_RETENTION_MS = 60 * 60 * 1000;
 const DISCONNECTED_SESSION_RETENTION_MS = 24 * 60 * 60 * 1000;
 const MAILBOX_MESSAGE_RETENTION_MS = 24 * 60 * 60 * 1000;
 const MAX_MAILBOX_MESSAGES = 256;
+
+function mailboxMessageRetentionMs(): number {
+  const configured = Number.parseInt(process.env.PI_INTERCOM_MAILBOX_MESSAGE_RETENTION_MS ?? "", 10);
+  return Number.isSafeInteger(configured) && configured > 0 ? configured : MAILBOX_MESSAGE_RETENTION_MS;
+}
 const MAX_CHANNELS = 1024;
 const MAX_CHANNEL_MESSAGE_RECORDS = 4096;
 
@@ -130,12 +135,14 @@ interface MailboxMessage {
   channel?: ChannelAddress;
 }
 
+type ChannelMessageState = DeliveryState | "cancelled" | "expired" | "superseded";
+
 interface ChannelMessageRecord {
   fingerprint: string;
   channelId: string;
   fromMemberId: string;
   toMemberId: string;
-  state: DeliveryState;
+  state: ChannelMessageState;
   createdAt: number;
   message: Message;
 }
@@ -171,7 +178,7 @@ function ensurePendingAskRecordDir(): void {
   }
 }
 
-class IntercomBroker {
+export class IntercomBroker {
   private sessions = new Map<string, ConnectedSession>();
   private askEdges = new Map<string, AskEdge>();
   private messageReceiptRoutes = new Map<string, MessageReceiptRoute>();
@@ -433,8 +440,10 @@ class IntercomBroker {
           }
         }
 
-        this.pruneDisconnectedSessions();
-        this.pruneMailboxMessages();
+        const now = Date.now();
+        this.pruneDisconnectedSessions(now);
+        this.pruneChannels(now);
+        this.pruneMailboxMessages(now);
         const previous = this.sessions.get(id);
         if (!previous && this.sessions.size >= MAX_SESSIONS) {
           writeMessage(socket, { type: "error", error: "Too many registered intercom sessions" });
@@ -470,7 +479,7 @@ class IntercomBroker {
         };
         this.sessions.set(id, connectedSession);
         this.disconnectedSessions.delete(id);
-        this.rebindChannelsForSession(connectedSession);
+        this.rebindChannelsForSession(connectedSession, now);
         
         if (this.shutdownTimer) {
           clearTimeout(this.shutdownTimer);
@@ -488,7 +497,7 @@ class IntercomBroker {
         this.broadcast({ type: "session_joined", session: info }, id);
 
         this.recomputeNamespaceOwners();
-        this.flushMailboxForSession(connectedSession);
+        this.flushMailboxForSession(connectedSession, now);
 
         if (extensions) {
           for (const ext of extensions) {
@@ -831,7 +840,8 @@ class IntercomBroker {
         const sender = this.sessions.get(currentId);
         const queuedIndex = this.mailboxMessages.findIndex(entry => entry.message.id === clientMessage.messageId && entry.from.id === currentId);
         if (queuedIndex >= 0 && sender?.socket === socket) {
-          this.mailboxMessages.splice(queuedIndex, 1);
+          const [entry] = this.mailboxMessages.splice(queuedIndex, 1);
+          if (entry) this.terminalizeMailboxEntry(entry, "cancelled");
           const edge = this.askEdges.get(clientMessage.messageId);
           if (edge?.from === currentId) {
             this.askEdges.delete(clientMessage.messageId);
@@ -1097,6 +1107,10 @@ class IntercomBroker {
       ?? null;
   }
 
+  private isCurrentSessionSocket(sessionId: string | null, socket: net.Socket): boolean {
+    return Boolean(sessionId && this.sessions.get(sessionId)?.socket === socket);
+  }
+
   private getOrCreatePairChannel(
     senderId: string,
     targetId: string,
@@ -1145,6 +1159,10 @@ class IntercomBroker {
     if (typeof requestId !== "string" || requestId.length === 0 || typeof targetSessionId !== "string" || targetSessionId.length === 0) {
       throw new Error("Invalid channel_open message");
     }
+    if (!this.isCurrentSessionSocket(currentId, socket)) {
+      this.channelOpenError(socket, requestId, "E_SESSION_REPLACED: this socket is no longer the current session endpoint", "E_SESSION_REPLACED");
+      return;
+    }
     if (targetSessionId === currentId) {
       this.channelOpenError(socket, requestId, "E_TARGET_SELF: a channel needs two different sessions", "E_TARGET_SELF");
       return;
@@ -1182,6 +1200,10 @@ class IntercomBroker {
     if (typeof requestId !== "string" || typeof channelId !== "string" || typeof channelEpoch !== "string") {
       throw new Error("Invalid channel_close message");
     }
+    if (!this.isCurrentSessionSocket(currentId, socket)) {
+      this.channelOpenError(socket, requestId, "E_SESSION_REPLACED: this socket is no longer the current session endpoint", "E_SESSION_REPLACED");
+      return;
+    }
     const channel = this.channels.get(channelId);
     const member = channel ? channelMemberForSession(channel, currentId) : undefined;
     if (!channel || channel.epoch !== channelEpoch || !member) {
@@ -1217,7 +1239,7 @@ class IntercomBroker {
   private pruneChannelMessageRecords(now = Date.now()): void {
     for (const [key, record] of this.channelMessageRecords) {
       const channel = this.channels.get(record.channelId);
-      if (!channel || (channel.expiresAt !== undefined && channel.expiresAt < now - MAILBOX_MESSAGE_RETENTION_MS)) {
+      if (!channel || (channel.expiresAt !== undefined && channel.expiresAt < now - mailboxMessageRetentionMs())) {
         this.channelMessageRecords.delete(key);
       }
     }
@@ -1230,6 +1252,64 @@ class IntercomBroker {
 
   private sendChannelSuccess(socket: net.Socket, messageId: string, state: DeliveryState, channelId: string): void {
     writeMessage(socket, { type: "delivered", messageId, state, channelId });
+  }
+
+  private terminalizeMailboxEntry(entry: MailboxMessage, state: Extract<ChannelMessageState, "cancelled" | "expired" | "superseded">): void {
+    if (entry.channel) {
+      const key = this.messageRecordKey(entry.channel, entry.message.id);
+      const record = this.channelMessageRecords.get(key);
+      if (record && record.state === "queued") {
+        record.state = state;
+      }
+    }
+    if (entry.message.expectsReply) {
+      this.askEdges.delete(entry.message.id);
+      this.removePendingAskRecord(entry.message.id);
+    }
+    this.messageReceiptRoutes.delete(entry.message.id);
+  }
+
+  private removeQueuedChannelMessage(
+    channelId: string,
+    fromMemberId: string,
+    toMemberId: string,
+    messageId: string,
+    state: Extract<ChannelMessageState, "superseded" | "cancelled" | "expired">,
+  ): boolean {
+    const index = this.mailboxMessages.findIndex((entry) => {
+      return entry.message.id === messageId
+        && entry.channel?.channelId === channelId
+        && entry.channel.fromMemberId === fromMemberId
+        && entry.channel.toMemberId === toMemberId;
+    });
+    if (index < 0) return false;
+    const [entry] = this.mailboxMessages.splice(index, 1);
+    if (entry) this.terminalizeMailboxEntry(entry, state);
+    return Boolean(entry);
+  }
+
+  private channelRecordFailure(
+    socket: net.Socket,
+    messageId: string,
+    record: ChannelMessageRecord,
+  ): void {
+    const terminal = record.state === "cancelled" || record.state === "expired" || record.state === "superseded"
+      ? record.state
+      : "failed";
+    const code = terminal === "cancelled"
+      ? "E_MESSAGE_CANCELLED"
+      : terminal === "expired"
+        ? "E_MESSAGE_EXPIRED"
+        : terminal === "superseded"
+          ? "E_MESSAGE_SUPERSEDED"
+          : "E_DELIVERY_FAILED";
+    this.channelError(
+      socket,
+      messageId,
+      `${code}: previous message record is terminal (${terminal})`,
+      code,
+      { channelId: record.channelId },
+    );
   }
 
   private handleChannelSend(socket: net.Socket, currentId: string | null, msg: Record<string, unknown>): void {
@@ -1248,6 +1328,10 @@ class IntercomBroker {
     const message = msg.message;
     const messageId = isMessage(message) ? message.id : "unknown";
     if (!currentId || typeof msg.to !== "string" || !isMessage(message)) return false;
+    if (!this.isCurrentSessionSocket(currentId, socket)) {
+      this.channelError(socket, messageId, "E_SESSION_REPLACED: this socket is no longer the current session endpoint", "E_SESSION_REPLACED");
+      return true;
+    }
     const targetId = msg.to;
     // Legacy wire clients cannot safely express a channel-local name. Exact
     // IDs are upgraded; fuzzy names/prefixes fail closed with a useful code.
@@ -1272,6 +1356,7 @@ class IntercomBroker {
 
   private routeChannelMessage(socket: net.Socket, currentId: string, address: ChannelAddress, message: Message): void {
     this.pruneChannels();
+    this.pruneMailboxMessages();
     this.pruneChannelMessageRecords();
     const channel = this.channels.get(address.channelId);
     const messageId = message.id;
@@ -1307,7 +1392,7 @@ class IntercomBroker {
       } else if (existing.state === "queued" || existing.state === "socket_delivered") {
         this.sendChannelSuccess(socket, messageId, existing.state, channel.channelId);
       } else {
-        this.channelError(socket, messageId, "E_DELIVERY_FAILED: previous delivery failed", "E_DELIVERY_FAILED", { channelId: channel.channelId });
+        this.channelRecordFailure(socket, messageId, existing);
       }
       return;
     }
@@ -1392,6 +1477,15 @@ class IntercomBroker {
       this.channelError(socket, messageId, "E_QUEUE_FULL: channel mailbox is full", "E_QUEUE_FULL", { retryable: true, channelId: channel.channelId });
       return;
     }
+    if (message.supersedes) {
+      this.removeQueuedChannelMessage(
+        channel.channelId,
+        fromMember.memberId,
+        targetMember.memberId,
+        message.supersedes,
+        "superseded",
+      );
+    }
     this.queueMailboxMessage(sender.info, targetMember.sessionId ? (this.disconnectedSessions.get(targetMember.sessionId)?.info ?? { ...sender.info, id: targetMember.sessionId }) : sender.info, deliveredMessage, brokerReceivedAt, address);
     this.messageReceiptRoutes.set(message.id, { from: currentId, to: targetMember.sessionId, createdAt: brokerReceivedAt });
     this.channelMessageRecords.set(recordKey, { fingerprint, channelId: channel.channelId, fromMemberId: fromMember.memberId, toMemberId: targetMember.memberId, state: "queued", createdAt: brokerReceivedAt, message: deliveredMessage });
@@ -1420,12 +1514,8 @@ class IntercomBroker {
   private pruneMailboxMessages(now = Date.now()): void {
     for (let index = this.mailboxMessages.length - 1; index >= 0; index -= 1) {
       const entry = this.mailboxMessages[index]!;
-      if (now - entry.queuedAt > MAILBOX_MESSAGE_RETENTION_MS) {
-        if (entry.message.expectsReply) {
-          this.askEdges.delete(entry.message.id);
-          this.removePendingAskRecord(entry.message.id);
-        }
-        this.messageReceiptRoutes.delete(entry.message.id);
+      if (now - entry.queuedAt > mailboxMessageRetentionMs()) {
+        this.terminalizeMailboxEntry(entry, "expired");
         this.mailboxMessages.splice(index, 1);
       }
     }
@@ -1436,11 +1526,7 @@ class IntercomBroker {
     while (this.mailboxMessages.length >= MAX_MAILBOX_MESSAGES) {
       const evicted = this.mailboxMessages.shift();
       if (!evicted) break;
-      if (evicted.message.expectsReply) {
-        this.askEdges.delete(evicted.message.id);
-        this.removePendingAskRecord(evicted.message.id);
-      }
-      this.messageReceiptRoutes.delete(evicted.message.id);
+      this.terminalizeMailboxEntry(evicted, "expired");
     }
     this.mailboxMessages.push({
       from: { ...from },
@@ -1462,10 +1548,14 @@ class IntercomBroker {
         const channel = this.channels.get(entry.channel.channelId);
         const targetMember = channel ? channelMemberById(channel, entry.channel.toMemberId) : undefined;
         if (!channel || channel.state !== "active" || !targetMember || targetMember.sessionId !== session.info.id) {
+          if (channel && isChannelExpired(channel, now)) {
+            this.terminalizeMailboxEntry(entry, "expired");
+            this.mailboxMessages.splice(index, 1);
+            continue;
+          }
           index += 1;
           continue;
         }
-        this.mailboxMessages.splice(index, 1);
         const edge = this.askEdges.get(entry.message.id);
         if (edge?.to === entry.target.id) edge.to = session.info.id;
         const refreshedAddress = { ...entry.channel, targetBindingEpoch: targetMember.bindingEpoch };
@@ -1476,7 +1566,13 @@ class IntercomBroker {
           channelTargetName: targetMember.agentName,
           brokerDeliveredAt: Date.now(),
         };
-        writeMessage(session.socket, { type: "message", from: entry.from, message: deliveredMessage });
+        try {
+          writeMessage(session.socket, { type: "message", from: entry.from, message: deliveredMessage });
+        } catch {
+          index += 1;
+          continue;
+        }
+        this.mailboxMessages.splice(index, 1);
         const key = this.messageRecordKey(entry.channel, entry.message.id);
         const record = this.channelMessageRecords.get(key);
         if (record) {
@@ -1512,7 +1608,6 @@ class IntercomBroker {
         continue;
       }
 
-      this.mailboxMessages.splice(index, 1);
       const edge = this.askEdges.get(entry.message.id);
       if (edge?.to === entry.target.id) {
         edge.to = session.info.id;
@@ -1521,11 +1616,17 @@ class IntercomBroker {
         ...entry.message,
         brokerDeliveredAt: Date.now(),
       };
-      writeMessage(session.socket, {
-        type: "message",
-        from: entry.from,
-        message: deliveredMessage,
-      });
+      try {
+        writeMessage(session.socket, {
+          type: "message",
+          from: entry.from,
+          message: deliveredMessage,
+        });
+      } catch {
+        index += 1;
+        continue;
+      }
+      this.mailboxMessages.splice(index, 1);
       this.messageReceiptRoutes.set(entry.message.id, {
         from: entry.from.id,
         to: session.info.id,
@@ -2066,4 +2167,10 @@ class IntercomBroker {
   }
 }
 
-new IntercomBroker().start();
+const invokedAsBroker = process.argv.some((argument) => {
+  const normalized = argument.replaceAll("\\", "/");
+  return normalized === "broker.ts" || normalized.endsWith("/broker.ts");
+});
+if (invokedAsBroker) {
+  new IntercomBroker().start();
+}

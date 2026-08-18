@@ -35,6 +35,23 @@ test("registered feature negotiation rejects non-string feature entries", () => 
   );
 });
 
+test("channel-v1 client fails closed on old-broker conversational messages", () => {
+  const client = new IntercomClient();
+  (client as any)._sessionId = "session-1";
+  const from = { id: "session-2", cwd: "/test", model: "test", pid: 2, startedAt: 1, lastActivity: 1 };
+  const message = { id: "legacy-message", timestamp: 1, content: { text: "legacy" } };
+
+  assert.throws(
+    () => (client as any).handleBrokerMessage({ type: "message", from, message }),
+    /E_CHANNEL_REQUIRED/,
+  );
+  (client as any)._features = new Set(["channel-v1"]);
+  assert.throws(
+    () => (client as any).handleBrokerMessage({ type: "message", from, message }),
+    /E_CHANNEL_REQUIRED/,
+  );
+});
+
 test("malformed extension broker messages are rejected", () => {
   const client = new IntercomClient();
   (client as any)._sessionId = "session-1";

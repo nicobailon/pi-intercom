@@ -468,6 +468,9 @@ export class IntercomClient extends EventEmitter {
         if (!isSessionInfo(from) || !isMessage(message)) {
           throw new Error("Invalid message event");
         }
+        if (!this.supportsFeature(CHANNEL_BUS_FEATURE) || !message.channel) {
+          throw new Error("E_CHANNEL_REQUIRED: conversational messages require channel-v1");
+        }
 
         this.emit("message", from, message);
         break;
@@ -780,8 +783,15 @@ export class IntercomClient extends EventEmitter {
       throw error;
     }
     if (!boundId) {
+      const intendedName = intended.trim().toLowerCase();
+      const configuredMember = config.members.find((member) => member.name?.trim().toLowerCase() === intendedName);
+      if (!configuredMember || !configuredMember.id || !config.allowNameOnly) {
+        const error = new Error(`E_BINDING_REQUIRED: intended identity "${intended}" must have an exact configured session ID`) as Error & { code?: string };
+        error.code = "E_BINDING_REQUIRED";
+        throw error;
+      }
       const targetMember = channelMemberFor(config, targetSession);
-      if (!targetMember || targetMember.name?.trim().toLowerCase() !== intended.trim().toLowerCase()) {
+      if (!targetMember || targetMember.name?.trim().toLowerCase() !== intendedName) {
         const error = new Error(`E_BINDING_MISMATCH: intended identity "${intended}" does not match the channel target`) as Error & { code?: string };
         error.code = "E_BINDING_MISMATCH";
         throw error;

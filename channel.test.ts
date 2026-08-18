@@ -43,12 +43,15 @@ test("loadChannel validates structure", () => {
   const root = tempDir();
   try {
     const file = join(root, CHANNEL_FILE_NAME);
-    writeFileSync(file, JSON.stringify({ name: "任务组", members: [{ name: "a", role: "发起者" }, { name: "b" }] }));
+    writeFileSync(file, JSON.stringify({ name: "任务组", allowNameOnly: true, members: [{ name: "a", role: "发起者" }, { name: "b" }] }));
     const config = loadChannel(file);
     assert.equal(config.name, "任务组");
     assert.equal(config.members.length, 2);
     assert.equal(config.members[0]!.role, "发起者");
     assert.equal(config.members[1]!.role, undefined);
+    assert.equal(config.allowNameOnly, true);
+    writeFileSync(file, JSON.stringify({ name: "strict", members: [{ name: "a" }] }));
+    assert.throws(() => loadChannel(file), /stable "id"/);
 
     writeFileSync(file, "not json");
     assert.throws(() => loadChannel(file), /Invalid channel file/);
@@ -73,7 +76,7 @@ test("loadChannel validates structure", () => {
 });
 
 test("channelRejectsSession allows members, rejects outsiders", () => {
-  const config = { name: "任务组", members: [{ name: "eng-lead", role: "发起者" }, { name: "Executor" }] };
+  const config = { name: "任务组", allowNameOnly: true, members: [{ name: "eng-lead", role: "发起者" }, { name: "Executor" }] };
 
   assert.equal(channelRejectsSession(config, { id: "1", name: "eng-lead" }), null);
   assert.equal(channelRejectsSession(config, { id: "2", name: "executor" }), null); // case-insensitive
@@ -85,6 +88,7 @@ test("channelRejectsSession allows members, rejects outsiders", () => {
 test("resolveBoundId maps identity names to bound session ids", () => {
   const config = {
     name: "任务组",
+    allowNameOnly: true,
     members: [
       { name: "导师", id: "01a000c6-0bba-7254-bc23-dadfdbf32552" },
       { name: "秘书", id: "01a000ad-7617-7bb8-9933-8e9bf9fc0b27" },
@@ -100,6 +104,7 @@ test("resolveBoundId maps identity names to bound session ids", () => {
 test("channelMemberFor resolves member by name or bound id", () => {
   const config = {
     name: "任务组",
+    allowNameOnly: true,
     members: [
       { name: "导师", role: "导师", id: "01a000c6-0bba-7254-bc23-dadfdbf32552" },
       { name: "秘书", role: "秘书" },
@@ -127,7 +132,7 @@ test("formatTargetLabel prefers identity label over runtime alias", () => {
 test("channelRejectsSession binds members by exact id", () => {
 
   const tutorId = "01a000c6-0bba-7254-bc23-dadfdbf32552";
-  const config = { name: "任务组", members: [{ name: "导师", role: "导师", id: tutorId }, { name: "秘书" }] };
+  const config = { name: "任务组", allowNameOnly: true, members: [{ name: "导师", role: "导师", id: tutorId }, { name: "秘书" }] };
 
   // Runtime alias (no /name) matches by id.
   assert.equal(channelRejectsSession(config, { id: tutorId, name: `subagent-chat-${tutorId}`, runtimeFallbackAlias: true }), null);

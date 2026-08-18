@@ -348,9 +348,10 @@ The supervisor can reply with plain JSON or a fenced `json` block. If the reply 
 | `intended` | string | Optional channel-local identity declaration. A configured identity must resolve to the same exact endpoint as `to`. |
 
 Every send/ask is one recipient and establishes or reuses one broker channel. A
-reconnect that should receive queued channel mail must reuse the same stable
-session ID; a same-name session with a new ID is intentionally not treated as
-the old member.
+reconnect that should receive queued channel mail within the same broker
+lifetime must reuse the same stable session ID; a same-name session with a new
+ID is intentionally not treated as the old member. Broker restart preserves
+channel membership only, not queued mail or old message-ID records.
 
 ### contact_supervisor
 
@@ -549,20 +550,26 @@ known failure includes an error code, retryability, and whether the outcome is
 known. A send timeout is reported as `E_DELIVERY_TIMEOUT_UNKNOWN`; callers
 should not blindly create a second message. Reusing a message ID with the same
 authored payload is idempotent, while changing its payload or recipient returns
-`E_MESSAGE_ID_REUSE`. There is no automatic unbounded retry.
+`E_MESSAGE_ID_REUSE`. A queued message that was cancelled, expired, or
+superseded is terminal and returns `E_MESSAGE_CANCELLED`, `E_MESSAGE_EXPIRED`,
+or `E_MESSAGE_SUPERSEDED` on same-ID retry. There is no automatic unbounded
+retry.
 
 Projects may additionally place `.pi/intercom-channel.json` above their cwd to
-restrict the local extension to configured members. Members with an `id` are
-matched by exact ID; their `name` is the channel-local identity. The optional
-`intended` tool field checks that a declared identity resolves to the same
-configured ID. This file is a policy guard, not a substitute for broker
-channel authorization.
+restrict the local extension to configured members. Every member must have a
+stable `id` (the session ID); `name` is only the channel-local identity. The
+optional `allowNameOnly: true` is an explicit legacy compatibility opt-in and
+uses a weaker live-name binding. The optional `intended` tool field checks that
+a declared identity resolves to the same configured ID. This file is a policy
+guard, not a substitute for broker channel authorization.
 
 Channel membership state is retained in the local intercom runtime directory
 (`channels.json`) so a broker restart does not silently create a new identity.
-A reconnect must use the same stable session ID to resume a queued channel
-message; a same-name process with a different ID is never treated as the same
-member.
+The in-memory mailbox and idempotency records are not persisted: broker restart
+can discard queued messages and does not preserve the old broker's message-ID
+knowledge. Within one broker lifetime, a reconnect must use the same stable
+session ID to resume a queued channel message; a same-name process with a
+different ID is never treated as the same member.
 
 ## Design Decisions
 
@@ -619,4 +626,4 @@ Use pi-messenger for multi-agent swarms working on a shared task. Use pi-interco
 - **Only connected sessions appear** — The list shows Pi sessions that have loaded `pi-intercom` and successfully registered with the broker, not every open Pi process on the machine
 - **Broker lifecycle** — The broker auto-spawns on first use and exits when idle; sessions reconnect automatically if the broker restarts
 - **Single-recipient first round** — There is intentionally no broadcast or transactional multi-recipient message; callers must send separately so every recipient has an independent message ID and delivery state
-- **Bounded runtime mailbox** — Channel membership is persisted, but queued message records and idempotency records are currently bounded broker runtime state; a future iteration can add durable replay across broker replacement
+- **Bounded runtime mailbox** — Channel membership is persisted, but queued messages and idempotency records are broker-runtime state only. A broker restart may discard queued messages and forget prior message IDs; durable replay/status is a future iteration

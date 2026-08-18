@@ -94,7 +94,7 @@ test("channel guard refuses outside-member delivery end-to-end", { timeout: 30_0
     // --- Scenario 1: a tries to send to e while a channel {c, d} exists ---
     // (The tool layer calls these exact functions before calling client.send.)
     assert.equal(findChannelFile(agentDir), null, "no channel file yet");
-    const channel = { name: "任务组", members: [{ name: "c", role: "发起者" }, { name: "d", role: "接受者" }] };
+    const channel = { name: "任务组", allowNameOnly: true, members: [{ name: "c", role: "发起者" }, { name: "d", role: "接受者" }] };
     const rejection = channelRejectsSession(channel, e);
     assert.match(rejection!, /is not a member/);
     // Guarded: message must NOT be sent. We assert the guard decision, then

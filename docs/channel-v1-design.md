@@ -12,7 +12,7 @@
 - `memberId` 是信道内稳定身份；`sessionId` 只是当前运行端点。
 - 显式 agent 名称保留；未命名成员按加入成功顺序生成 `执行者-1`、`执行者-2`……，序号不回收。
 - 默认信道为 `ephemeral`，空闲 TTL 到期；重新打开仍复用活动信道。`reusable` 可通过 `IntercomClient.openChannel()` 使用。
-- broker 重启后恢复 channel membership；要恢复离线队列，重连必须使用相同稳定 `sessionId`，同名新会话不继承旧成员。
+- broker 重启后只恢复 channel membership；当前 mailbox、message receipt route 与幂等记录不持久化，重启可能丢弃离线队列，也不会保留旧 broker 的 messageId 知识。单个 broker 生命周期内重连要使用相同稳定 `sessionId`，同名新会话不继承旧成员。
 - 发送失败不自动无限重试。结果区分 `socket_delivered`、`queued`、`failed`；超时返回 `E_DELIVERY_TIMEOUT_UNKNOWN`，模型应先检查状态再决定是否用原 `messageId` 补发。
 - 相同 `(channelId, fromMemberId, messageId)` 与相同 authored payload 幂等；内容/收件人改变返回 `E_MESSAGE_ID_REUSE`。
 
@@ -34,7 +34,7 @@ broker 在实际投递前检查：
 
 ## 项目静态策略
 
-`.pi/intercom-channel.json` 是可选的项目级 ACL。带 `id` 的成员按精确 ID 匹配，`name` 是信道逻辑身份；`intended` 参数用于验证声明的身份是否绑定到同一 ID。该文件是客户端策略护栏，不取代 broker channel authorization。
+`.pi/intercom-channel.json` 是可选的项目级 ACL。成员默认必须带稳定 `id`（session ID），按精确 ID 匹配；`name` 是信道逻辑身份。旧配置若明确写入 `allowNameOnly: true` 才启用较弱的在线同名匹配；`intended` 参数用于验证声明的身份是否绑定到同一 ID。该文件是客户端策略护栏，不取代 broker channel authorization。
 
 ## 第一轮非目标
 
