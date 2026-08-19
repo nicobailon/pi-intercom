@@ -14,11 +14,14 @@ import type { Attachment, BrokerMessage, Message, MessageControl, MessageReceipt
 import {
   INTERCOM_EXTENSION_REGISTER_EVENT,
   INTERCOM_EXTENSION_REGISTRY_READY_EVENT,
+  INTERCOM_EXTENSION_SEND_EVENT,
+  INTERCOM_EXTENSION_SEND_RESULT_EVENT,
   type IntercomExtensionChannel,
   type IntercomExtensionEvent,
   type IntercomExtensionOwner,
   type IntercomExtensionRegistration,
   type IntercomExtensionState,
+  type IntercomExtensionSendRequest,
 } from "./extension-api.ts";
 import { ReplyTracker } from "./reply-tracker.ts";
 import { resolve as resolvePath } from "node:path";
@@ -1408,6 +1411,50 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       acknowledge: true,
     });
   });
+
+  // ── General "send as the current session" channel ──────────────
+  //
+  // Any extension can emit INTERCOM_EXTENSION_SEND_EVENT with
+  // { to, message, requestId? } and pi-intercom forwards it through the
+  // current session's own intercom client, so the broker records `from` as
+  // this session (sender identity preserved, replies route back natively).
+  // When requestId is provided, a matching INTERCOM_EXTENSION_SEND_RESULT_EVENT
+  // is emitted so the caller can confirm delivery instead of assuming it.
+  // See extension-api.ts for the public contract.
+  const unsubscribeExtensionSend = pi.events.on(INTERCOM_EXTENSION_SEND_EVENT, (payload) => {
+    if (!payload || typeof payload !== "object") return;
+    const req = payload as Partial<IntercomExtensionSendRequest>;
+    if (typeof req.to !== "string" || typeof req.message !== "string" || req.to.length === 0) return;
+    const requestId = typeof req.requestId === "string" ? req.requestId : undefined;
+    const relayGeneration = runtimeGeneration;
+    const emitResult = (delivered: boolean, reason?: string) => {
+      if (!requestId) return;
+      pi.events.emit(INTERCOM_EXTENSION_SEND_RESULT_EVENT, {
+        requestId,
+        delivered,
+        ...(reason ? { reason } : {}),
+      });
+    };
+    void (async () => {
+      const relayStillLive = () => !runtimeStarted || Boolean(getLiveContext(runtimeContext, relayGeneration));
+      try {
+        const activeClient = await ensureConnected("background");
+        if (!relayStillLive()) return;
+        const target = (await resolveSessionTarget(activeClient, req.to)) ?? req.to;
+        if (!relayStillLive()) return;
+        if (currentSessionTargetMatches(req.to, target, activeClient)) {
+          emitResult(false, "target is the current session");
+          return;
+        }
+        const result = await activeClient.send(target, { text: req.message });
+        if (!relayStillLive()) return;
+        emitResult(result.delivered, result.delivered ? undefined : (result.reason ?? "delivery failed"));
+      } catch (error) {
+        if (!relayStillLive()) return;
+        emitResult(false, getErrorMessage(error));
+      }
+    })();
+  });
   pi.on("session_start", (_event, ctx) => {
     if (!config.enabled) {
       return;
@@ -1419,6 +1466,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     unsubscribeExtensionRegister();
     unsubscribeSubagentControlIntercom();
     unsubscribeSubagentResultIntercom();
+    unsubscribeExtensionSend();
     shuttingDown = true;
     disposed = true;
     runtimeGeneration += 1;
