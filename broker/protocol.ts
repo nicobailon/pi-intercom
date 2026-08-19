@@ -124,6 +124,10 @@ export function isSessionInfo(value: unknown): value is SessionInfo {
     return false;
   }
 
+  if (value.endpointEpoch !== undefined && typeof value.endpointEpoch !== "string") {
+    return false;
+  }
+
   if (value.name !== undefined && typeof value.name !== "string") {
     return false;
   }

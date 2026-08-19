@@ -354,7 +354,7 @@ test("opt-in TCP broker requires endpoint state for health and registration", { 
     assert.deepEqual(registerMessages, [{
       type: "registered",
       sessionId: "authorized-tcp-client",
-      features: ["extension-bus-v1"],
+      features: ["extension-bus-v1", "exact-send-v1"],
     }]);
   } finally {
     if (broker.exitCode === null && broker.signalCode === null) {
@@ -575,6 +575,178 @@ test("broker accepts caller supplied stable IDs across reconnect", { concurrency
     await reconnected.disconnect();
   } finally {
     await worker.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("broker rotates endpoint epochs and replays same message ids without duplicate delivery", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const replacement = new IntercomClient();
+  const received: Message[] = [];
+  orchestrator.on("message", (_from: SessionInfo, message: Message) => received.push(message));
+
+  try {
+    const firstEndpoint = await waitForSessionByName(planner, "orchestrator");
+    assert.equal(typeof firstEndpoint.endpointEpoch, "string");
+
+    const messageId = "endpoint-epoch-replay";
+    const first = await planner.send(orchestrator.sessionId!, { text: "deliver once", messageId });
+    const replay = await planner.send(orchestrator.sessionId!, { text: "deliver once", messageId });
+    assert.deepEqual([first.delivery, replay.delivery], ["socket_delivered", "socket_delivered"]);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(received.filter((message) => message.id === messageId).length, 1);
+
+    await replacement.connect({
+      name: "orchestrator-replacement",
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    }, orchestrator.sessionId!);
+    const replacedEndpoint = await waitForSessionId(planner, orchestrator.sessionId!);
+    assert.notEqual(replacedEndpoint.endpointEpoch, firstEndpoint.endpointEpoch);
+  } finally {
+    await replacement.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("delivery records keep colon-containing sender and message IDs distinct", { concurrency: false }, async () => {
+  const { orchestrator, cleanup } = await setupClients();
+  const first = new IntercomClient();
+  const second = new IntercomClient();
+  const received: Message[] = [];
+  orchestrator.on("message", (_from: SessionInfo, message: Message) => received.push(message));
+
+  try {
+    await first.connect({ name: "record-key-first", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, "a:b");
+    await second.connect({ name: "record-key-second", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, "a");
+
+    assert.equal((await first.send(orchestrator.sessionId!, { messageId: "c", text: "same fingerprint" })).delivered, true);
+    assert.equal((await second.send(orchestrator.sessionId!, { messageId: "b:c", text: "same fingerprint" })).delivered, true);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(received.map((message) => message.id).sort(), ["b:c", "c"]);
+  } finally {
+    await first.disconnect().catch(() => undefined);
+    await second.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("client re-resolves a rebound exact target once with the same message id", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const replacement = new IntercomClient();
+  const replacementReceived = once(replacement, "message") as Promise<[SessionInfo, Message]>;
+  const listSessions = planner.listSessions.bind(planner);
+  let listCalls = 0;
+
+  try {
+    (planner as unknown as { listSessions: () => Promise<SessionInfo[]> }).listSessions = async () => {
+      const sessions = await listSessions();
+      listCalls += 1;
+      if (listCalls === 1) {
+        await replacement.connect({
+          name: "orchestrator-replacement",
+          cwd: repoDir,
+          model: "test-model",
+          pid: process.pid,
+          startedAt: Date.now(),
+          lastActivity: Date.now(),
+        }, orchestrator.sessionId!);
+      }
+      return sessions;
+    };
+
+    const result = await planner.send(orchestrator.sessionId!, { text: "retry after rebound", messageId: "endpoint-rebound-retry" });
+    assert.equal(result.delivered, true);
+    assert.equal(result.delivery, "socket_delivered");
+    const [, message] = await replacementReceived;
+    assert.equal(message.id, "endpoint-rebound-retry");
+    assert.equal(listCalls, 2);
+  } finally {
+    await replacement.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("broker rejects malformed exact target fields instead of falling back to name routing", { concurrency: false }, async () => {
+  const { orchestrator, cleanup } = await setupClients();
+  const raw = await connectRawRegistered("malformed-exact-sender", "malformed-exact-sender");
+  const { createMessageReader } = await import("./broker/framing.ts");
+
+  try {
+    const delivery = new Promise<Record<string, unknown>>((resolve, reject) => {
+      const reader = createMessageReader((received) => {
+        if (typeof received === "object" && received !== null && "type" in received && received.type === "delivery_failed") {
+          raw.socket.off("data", reader);
+          resolve(received as Record<string, unknown>);
+        }
+      }, reject);
+      raw.socket.on("data", reader);
+    });
+    raw.writeMessage(raw.socket, {
+      type: "send",
+      to: orchestrator.sessionId,
+      targetId: "",
+      targetEpoch: "",
+      message: {
+        id: "malformed-exact-target",
+        timestamp: Date.now(),
+        content: { text: "must not reach orchestrator" },
+      },
+    });
+    const result = await delivery;
+    assert.equal(result.code, "E_INVALID_TARGET");
+  } finally {
+    raw.socket.destroy();
+    await cleanup();
+  }
+});
+
+test("broker rejects changed message content after a rebound exact-target failure", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const raw = await connectRawRegistered("rebound-reuse-sender", "rebound-reuse-sender");
+  const replacement = new IntercomClient();
+  const { createMessageReader } = await import("./broker/framing.ts");
+
+  try {
+    const targetId = orchestrator.sessionId!;
+    const oldTarget = await waitForSessionId(planner, targetId);
+    await replacement.connect({
+      name: "rebound-reuse-replacement",
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    }, targetId);
+    const receiveDelivery = () => new Promise<Record<string, unknown>>((resolve, reject) => {
+      const reader = createMessageReader((received) => {
+        if (typeof received === "object" && received !== null && "type" in received && (received.type === "delivered" || received.type === "delivery_failed")) {
+          raw.socket.off("data", reader);
+          resolve(received as Record<string, unknown>);
+        }
+      }, reject);
+      raw.socket.on("data", reader);
+    });
+    const send = (text: string) => raw.writeMessage(raw.socket, {
+      type: "send",
+      to: targetId,
+      targetId,
+      targetEpoch: oldTarget.endpointEpoch,
+      message: { id: "rebound-id-reuse", timestamp: Date.now(), content: { text } },
+    });
+
+    const firstDelivery = receiveDelivery();
+    send("first content");
+    assert.equal((await firstDelivery).code, "E_TARGET_REBOUND");
+    const secondDelivery = receiveDelivery();
+    send("changed content");
+    assert.equal((await secondDelivery).code, "E_MESSAGE_ID_REUSE");
+  } finally {
+    raw.socket.destroy();
+    await replacement.disconnect().catch(() => undefined);
     await cleanup();
   }
 });
@@ -832,7 +1004,7 @@ test("old stable-ID socket cannot mutate the replacement session", { concurrency
   }
 });
 
-test("stable-ID replacement clears old ask edges and ignores stale cancels", { concurrency: false }, async () => {
+test("stable-ID replacement preserves old ask edges and ignores stale cancels", { concurrency: false }, async () => {
   const { orchestrator, cleanup } = await setupClients();
   const first = await connectRawRegistered("replaceable-asker-id", "replaceable-asker-old");
   const replacement = new IntercomClient();
@@ -853,6 +1025,13 @@ test("stable-ID replacement clears old ask edges and ignores stale cancels", { c
       startedAt: Date.now(),
       lastActivity: Date.now(),
     }, "replaceable-asker-id");
+
+    const oldReply = once(replacement, "message") as Promise<[SessionInfo, Message]>;
+    assert.equal((await orchestrator.send("replaceable-asker-id", {
+      text: "Old ask answered after replacement.",
+      replyTo: "old-ask-edge",
+    })).delivered, true);
+    assert.equal((await oldReply)[1].replyTo, "old-ask-edge");
 
     const reverseAfterReplace = await orchestrator.send("replaceable-asker-id", {
       messageId: "reverse-after-replace",
@@ -940,6 +1119,9 @@ test("intercom tool prefers exact names over ID prefixes", { concurrency: false 
     ]);
     const result = await intercomTool.execute("send-exact-name", { action: "send", to: "orchestrator", message: "exact name wins" }, new AbortController().signal, undefined, harness.ctx);
     assert.notEqual(result.details?.error, true);
+    assert.equal(result.details?.delivery, "socket_delivered");
+    assert.equal(result.details?.retryable, false);
+    assert.equal(result.details?.outcomeKnown, true);
 
     const received = await exactNameReceived;
     assert.notEqual(received, null);
@@ -1371,7 +1553,7 @@ test("idle interactive sessions trigger a new turn immediately", { concurrency: 
 	}
 });
 
-test("duplicate inbound message IDs inject once with visible delivery metadata", { concurrency: false }, async () => {
+test("broker rejects changed duplicate message IDs and replays identical sends without reinjection", { concurrency: false }, async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const { planner, cleanup } = await setupClients();
   const harness = createExtensionHarness("dedupe-worker", { hasUI: true });
@@ -1386,8 +1568,13 @@ test("duplicate inbound message IDs inject once with visible delivery metadata",
     });
 
     try {
-      assert.equal((await planner.send(worker.id, { messageId: "duplicate-inbound", text: "First copy" })).delivered, true);
-      assert.equal((await planner.send(worker.id, { messageId: "duplicate-inbound", text: "Second copy" })).delivered, true);
+      const first = await planner.send(worker.id, { messageId: "duplicate-inbound", text: "First copy" });
+      const changed = await planner.send(worker.id, { messageId: "duplicate-inbound", text: "Second copy" });
+      const replay = await planner.send(worker.id, { messageId: "duplicate-inbound", text: "First copy" });
+      assert.equal(first.delivered, true);
+      assert.equal(changed.delivered, false);
+      assert.equal(changed.code, "E_MESSAGE_ID_REUSE");
+      assert.equal(replay.delivered, true);
       await new Promise((resolve) => setTimeout(resolve, 100));
     } finally {
       unsubscribeReceipts();
@@ -1397,7 +1584,6 @@ test("duplicate inbound message IDs inject once with visible delivery metadata",
     assert.ok(receipts.includes("receiver_received"));
     assert.ok(receipts.includes("acknowledged:accepted by receiver"));
     assert.ok(receipts.includes("injected"));
-    assert.ok(receipts.includes("acknowledged:duplicate message id suppressed"));
     const sent = harness.sentMessages[0]!;
     assert.match(sent.message.content ?? "", /id duplicate-inbound/);
     assert.match(sent.message.content ?? "", /seq 1/);
@@ -3620,6 +3806,10 @@ test("failed delivery from an inferred reply preserves the pending ask", { concu
     }, new AbortController().signal, undefined, harness.ctx);
 
     assert.equal(result.details?.delivered, false);
+    assert.equal(result.details?.delivery, "failed");
+    assert.equal(result.details?.code, "E_AMBIGUOUS_TARGET");
+    assert.equal(result.details?.retryable, false);
+    assert.equal(result.details?.outcomeKnown, true);
     assert.match(result.content[0]?.text ?? "", /Multiple disconnected sessions named/);
 
     const pending = await intercomTool.execute("pending-after-failure", { action: "pending" }, new AbortController().signal, undefined, harness.ctx);

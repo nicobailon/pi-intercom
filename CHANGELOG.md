@@ -5,6 +5,7 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 ## [Unreleased]
 
 ### Added
+- Added endpoint-bound direct delivery with safe rebound retry and bounded same-message replay protection. Thanks to [@xiangbianpangde](https://github.com/xiangbianpangde) for #106.
 - Added local pending-ask observability records for delivered blocking asks. Thanks to [@bcanvural](https://github.com/bcanvural) for issue #104.
 - Added tmux pane IDs to the roster. Thanks to [@odfalik](https://github.com/odfalik) for issue #102 and PR #101.
 

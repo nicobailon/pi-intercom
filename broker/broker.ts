@@ -18,8 +18,8 @@ import {
 } from "./paths.ts";
 import { getAskTimeoutMs } from "../config.ts";
 import { sameCwd } from "../cwd.ts";
-import { EXTENSION_BUS_FEATURE } from "../types.ts";
-import type { SessionInfo, Message, BrokerMessage, ExtensionCapability, MessageControl } from "../types.ts";
+import { EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE } from "../types.ts";
+import type { DeliveryState, SessionInfo, Message, BrokerMessage, ExtensionCapability, MessageControl } from "../types.ts";
 import { ExtensionStateManager } from "./extension-state.ts";
 import { assertNoLiveBroker } from "./runtime-claim.ts";
 
@@ -42,6 +42,8 @@ const MESSAGE_RECEIPT_ROUTE_RETENTION_MS = 60 * 60 * 1000;
 const DISCONNECTED_SESSION_RETENTION_MS = 24 * 60 * 60 * 1000;
 const MAILBOX_MESSAGE_RETENTION_MS = 24 * 60 * 60 * 1000;
 const MAX_MAILBOX_MESSAGES = 256;
+const DELIVERY_RECORD_RETENTION_MS = 60 * 60 * 1000;
+const MAX_DELIVERY_RECORDS = 4096;
 
 function serializedPayloadSize(payload: unknown): number | null {
   try {
@@ -58,6 +60,16 @@ interface ConnectedSession {
   lastPresenceBroadcastAt: number;
   ownerOrder: number;
   extensions?: ExtensionCapability[];
+}
+
+interface DeliveryRecord {
+  fingerprint: string;
+  state: DeliveryState;
+  reason?: string;
+  code?: string;
+  retryable: boolean;
+  outcomeKnown: boolean;
+  createdAt: number;
 }
 
 interface NamespaceOwner {
@@ -143,6 +155,7 @@ class IntercomBroker {
   private messageReceiptRoutes = new Map<string, MessageReceiptRoute>();
   private disconnectedSessions = new Map<string, DisconnectedSession>();
   private mailboxMessages: MailboxMessage[] = [];
+  private deliveryRecords = new Map<string, DeliveryRecord>();
   private connections = new Set<net.Socket>();
   private unregisteredConnections = new Set<net.Socket>();
   private server: net.Server;
@@ -392,13 +405,13 @@ class IntercomBroker {
           break;
         }
         if (previous) {
-          this.clearAskEdgesForSession(id);
           this.clearMessageReceiptRoutesForSession(id);
           previous.socket.end();
         }
         setId(id);
         const info: SessionInfo = {
           id,
+          endpointEpoch: randomUUID(),
           ...(session.name !== undefined ? { name: session.name } : {}),
           ...(session.runtimeFallbackAlias !== undefined ? { runtimeFallbackAlias: session.runtimeFallbackAlias } : {}),
           cwd: session.cwd,
@@ -432,7 +445,7 @@ class IntercomBroker {
         writeMessage(socket, {
           type: "registered",
           sessionId: id,
-          features: [EXTENSION_BUS_FEATURE],
+          features: [EXTENSION_BUS_FEATURE, EXACT_SEND_FEATURE],
         });
         this.broadcast({ type: "session_joined", session: info }, id);
 
@@ -535,11 +548,7 @@ class IntercomBroker {
         const messageId = isMessage(message) ? message.id : "unknown";
 
         if (typeof clientMessage.to !== "string" || !isMessage(message)) {
-          writeMessage(socket, {
-            type: "delivery_failed",
-            messageId,
-            reason: "Invalid message format",
-          });
+          this.writeDeliveryFailure(socket, messageId, "Invalid message format", "E_INVALID_MESSAGE");
           break;
         }
 
@@ -548,53 +557,63 @@ class IntercomBroker {
         this.pruneMessageReceiptRoutes(brokerReceivedAt);
         const replyEdge = message.replyTo ? this.askEdges.get(message.replyTo) : undefined;
 
+        const hasTargetId = clientMessage.targetId !== undefined;
+        const hasTargetEpoch = clientMessage.targetEpoch !== undefined;
+        if (
+          hasTargetId !== hasTargetEpoch
+          || (hasTargetId && (typeof clientMessage.targetId !== "string" || clientMessage.targetId.length === 0))
+          || (hasTargetEpoch && (typeof clientMessage.targetEpoch !== "string" || clientMessage.targetEpoch.length === 0))
+        ) {
+          this.writeDeliveryFailure(socket, message.id, "Exact target requires an id and endpoint epoch", "E_INVALID_TARGET");
+          break;
+        }
+        if (hasTargetId && hasTargetEpoch) {
+          const targetId = clientMessage.targetId as string;
+          const targetEpoch = clientMessage.targetEpoch as string;
+          const fingerprint = this.deliveryFingerprint(message, targetId);
+          if (this.replayOrReject(socket, currentId, message.id, fingerprint)) {
+            break;
+          }
+          const exactTarget = this.sessions.get(targetId);
+          if (!exactTarget || exactTarget.info.endpointEpoch !== targetEpoch) {
+            this.recordDelivery(currentId, message.id, fingerprint, "failed", "Target endpoint changed before delivery", "E_TARGET_REBOUND", true);
+            this.writeDeliveryFailure(socket, message.id, "Target endpoint changed before delivery", "E_TARGET_REBOUND", true);
+            break;
+          }
+          clientMessage.to = targetId;
+        }
+
         const targets = this.findSessions(clientMessage.to);
         if (targets.length === 1) {
           if (message.replyTo && !replyEdge) {
-            writeMessage(socket, {
-              type: "delivery_failed",
-              messageId: message.id,
-              reason: "Reply target does not match a pending ask",
-            });
+            this.writeDeliveryFailure(socket, message.id, "Reply target does not match a pending ask", "E_REPLY_TARGET");
             break;
           }
           const fromSession = this.sessions.get(currentId);
           if (!fromSession || fromSession.socket !== socket) {
-            writeMessage(socket, {
-              type: "delivery_failed",
-              messageId: message.id,
-              reason: "Sender session not found",
-            });
+            this.writeDeliveryFailure(socket, message.id, "Sender session not found", "E_SENDER_NOT_FOUND");
             break;
           }
           const target = targets[0];
+          const fingerprint = this.deliveryFingerprint(message, target.info.id);
+          if (this.replayOrReject(socket, currentId, message.id, fingerprint)) {
+            break;
+          }
           if (message.supersedes) {
             const supersededRoute = this.messageReceiptRoutes.get(message.supersedes);
             if (!supersededRoute || supersededRoute.from !== currentId || supersededRoute.to !== target.info.id) {
-              writeMessage(socket, {
-                type: "delivery_failed",
-                messageId: message.id,
-                reason: "Supersede target does not match a previous message from this sender to this receiver",
-              });
+              this.writeDeliveryFailure(socket, message.id, "Supersede target does not match a previous message from this sender to this receiver", "E_SUPERSEDE_TARGET");
               break;
             }
           }
           if (replyEdge && (replyEdge.to !== currentId || replyEdge.from !== target.info.id)) {
-            writeMessage(socket, {
-              type: "delivery_failed",
-              messageId: message.id,
-              reason: "Reply target does not match the pending ask",
-            });
+            this.writeDeliveryFailure(socket, message.id, "Reply target does not match the pending ask", "E_REPLY_TARGET");
             break;
           }
           if (message.expectsReply) {
             const reverseEdge = Array.from(this.askEdges.entries()).find(([edgeMessageId, edge]) => edgeMessageId !== message.replyTo && edge.from === target.info.id && edge.to === currentId);
             if (reverseEdge) {
-              writeMessage(socket, {
-                type: "delivery_failed",
-                messageId: message.id,
-                reason: "Mutual ask refused: target session is already waiting for a reply from this session.",
-              });
+              this.writeDeliveryFailure(socket, message.id, "Mutual ask refused: target session is already waiting for a reply from this session.", "E_MUTUAL_ASK");
               break;
             }
             this.writePendingAskRecord(message, fromSession.info, target.info, brokerReceivedAt);
@@ -617,6 +636,7 @@ class IntercomBroker {
               from: fromSession.info,
               control,
             });
+            this.updateDeliveryRecord(currentId, message.supersedes, "failed", `Superseded by ${message.id}`, "E_DELIVERY_SUPERSEDED");
           }
           writeMessage(target.socket, {
             type: "message",
@@ -628,61 +648,42 @@ class IntercomBroker {
             this.removePendingAskRecord(message.replyTo);
           }
           this.messageReceiptRoutes.set(message.id, { from: currentId, to: target.info.id, createdAt: brokerReceivedAt });
-          writeMessage(socket, { type: "delivered", messageId: message.id });
+          this.recordDelivery(currentId, message.id, fingerprint, "socket_delivered");
+          this.writeDeliverySuccess(socket, message.id, "socket_delivered");
           break;
         }
 
         if (targets.length > 1) {
-          writeMessage(socket, {
-            type: "delivery_failed",
-            messageId: message.id,
-            reason: `Multiple sessions named \"${clientMessage.to}\" are connected. Use the session ID instead.`,
-          });
+          this.writeDeliveryFailure(socket, message.id, `Multiple sessions named \"${clientMessage.to}\" are connected. Use the session ID instead.`, "E_AMBIGUOUS_TARGET");
           break;
         }
 
         const disconnectedTargets = this.findDisconnectedSessions(clientMessage.to);
         if (disconnectedTargets.length === 1) {
           if (message.replyTo && !replyEdge) {
-            writeMessage(socket, {
-              type: "delivery_failed",
-              messageId: message.id,
-              reason: "Reply target does not match a pending ask",
-            });
+            this.writeDeliveryFailure(socket, message.id, "Reply target does not match a pending ask", "E_REPLY_TARGET");
             break;
           }
           const fromSession = this.sessions.get(currentId);
           if (!fromSession || fromSession.socket !== socket) {
-            writeMessage(socket, {
-              type: "delivery_failed",
-              messageId: message.id,
-              reason: "Sender session not found",
-            });
+            this.writeDeliveryFailure(socket, message.id, "Sender session not found", "E_SENDER_NOT_FOUND");
             break;
           }
           const target = disconnectedTargets[0]!.info;
+          const fingerprint = this.deliveryFingerprint(message, target.id);
+          if (this.replayOrReject(socket, currentId, message.id, fingerprint)) {
+            break;
+          }
           if (message.supersedes) {
-            writeMessage(socket, {
-              type: "delivery_failed",
-              messageId: message.id,
-              reason: "Supersede target is not connected",
-            });
+            this.writeDeliveryFailure(socket, message.id, "Supersede target is not connected", "E_SUPERSEDE_TARGET");
             break;
           }
           if (replyEdge && (replyEdge.to !== currentId || replyEdge.from !== target.id)) {
-            writeMessage(socket, {
-              type: "delivery_failed",
-              messageId: message.id,
-              reason: "Reply target does not match the pending ask",
-            });
+            this.writeDeliveryFailure(socket, message.id, "Reply target does not match the pending ask", "E_REPLY_TARGET");
             break;
           }
           if (message.expectsReply) {
-            writeMessage(socket, {
-              type: "delivery_failed",
-              messageId: message.id,
-              reason: "Target session is not currently connected; blocking asks are not queued",
-            });
+            this.writeDeliveryFailure(socket, message.id, "Target session is not currently connected; blocking asks are not queued", "E_TARGET_DISCONNECTED");
             break;
           }
           const liveMailboxTarget = this.findUniqueLiveSessionForDisconnectedSession(target, currentId);
@@ -705,24 +706,17 @@ class IntercomBroker {
             this.askEdges.delete(message.replyTo);
             this.removePendingAskRecord(message.replyTo);
           }
-          writeMessage(socket, { type: "delivered", messageId: message.id });
+          this.recordDelivery(currentId, message.id, fingerprint, liveMailboxTarget ? "socket_delivered" : "queued");
+          this.writeDeliverySuccess(socket, message.id, liveMailboxTarget ? "socket_delivered" : "queued");
           break;
         }
 
         if (disconnectedTargets.length > 1) {
-          writeMessage(socket, {
-            type: "delivery_failed",
-            messageId: message.id,
-            reason: `Multiple disconnected sessions named \"${clientMessage.to}\" can receive queued mail. Use the session ID instead.`,
-          });
+          this.writeDeliveryFailure(socket, message.id, `Multiple disconnected sessions named \"${clientMessage.to}\" can receive queued mail. Use the session ID instead.`, "E_AMBIGUOUS_TARGET");
           break;
         }
 
-        writeMessage(socket, {
-          type: "delivery_failed",
-          messageId: message.id,
-          reason: "Session not found",
-        });
+        this.writeDeliveryFailure(socket, message.id, "Session not found", "E_TARGET_NOT_FOUND");
         break;
       }
 
@@ -760,6 +754,7 @@ class IntercomBroker {
         const queuedIndex = this.mailboxMessages.findIndex(entry => entry.message.id === clientMessage.messageId && entry.from.id === currentId);
         if (queuedIndex >= 0 && sender?.socket === socket) {
           this.mailboxMessages.splice(queuedIndex, 1);
+          this.updateDeliveryRecord(currentId, clientMessage.messageId, "failed", "Sender cancelled the queued delivery", "E_DELIVERY_CANCELLED");
           const edge = this.askEdges.get(clientMessage.messageId);
           if (edge?.from === currentId) {
             this.askEdges.delete(clientMessage.messageId);
@@ -792,6 +787,7 @@ class IntercomBroker {
           this.askEdges.delete(clientMessage.messageId);
           this.removePendingAskRecord(clientMessage.messageId);
         }
+        this.updateDeliveryRecord(currentId, clientMessage.messageId, "failed", "Sender cancelled the delivery", "E_DELIVERY_CANCELLED");
         writeMessage(socket, { type: "delivered", messageId: clientMessage.messageId });
         break;
       }
@@ -935,6 +931,7 @@ class IntercomBroker {
           this.removePendingAskRecord(entry.message.id);
         }
         this.messageReceiptRoutes.delete(entry.message.id);
+        this.updateDeliveryRecord(entry.from.id, entry.message.id, "failed", "Mailbox delivery expired", "E_DELIVERY_EXPIRED");
         this.mailboxMessages.splice(index, 1);
       }
     }
@@ -950,6 +947,7 @@ class IntercomBroker {
         this.removePendingAskRecord(evicted.message.id);
       }
       this.messageReceiptRoutes.delete(evicted.message.id);
+      this.updateDeliveryRecord(evicted.from.id, evicted.message.id, "failed", "Mailbox capacity evicted the delivery", "E_DELIVERY_EVICTED");
     }
     this.mailboxMessages.push({
       from: { ...from },
@@ -957,6 +955,83 @@ class IntercomBroker {
       message: { ...message, brokerReceivedAt },
       queuedAt: brokerReceivedAt,
     });
+  }
+
+  private writeDeliverySuccess(socket: net.Socket, messageId: string, delivery: "socket_delivered" | "queued"): void {
+    writeMessage(socket, { type: "delivered", messageId, delivery, retryable: false, outcomeKnown: true });
+  }
+
+  private writeDeliveryFailure(socket: net.Socket, messageId: string, reason: string, code: string, retryable = false): void {
+    writeMessage(socket, { type: "delivery_failed", messageId, reason, delivery: "failed", code, retryable, outcomeKnown: true });
+  }
+
+  private deliveryFingerprint(message: Message, targetId: string): string {
+    return JSON.stringify({
+      targetId,
+      text: message.content.text,
+      attachments: message.content.attachments,
+      replyTo: message.replyTo,
+      expectsReply: message.expectsReply,
+      supersedes: message.supersedes,
+      retryOf: message.retryOf,
+    });
+  }
+
+  private deliveryRecordKey(fromSessionId: string, messageId: string): string {
+    return JSON.stringify([fromSessionId, messageId]);
+  }
+
+  private replayOrReject(socket: net.Socket, fromSessionId: string, messageId: string, fingerprint: string): boolean {
+    this.pruneDeliveryRecords();
+    const record = this.deliveryRecords.get(this.deliveryRecordKey(fromSessionId, messageId));
+    if (!record) return false;
+    if (record.fingerprint !== fingerprint) {
+      this.writeDeliveryFailure(socket, messageId, "Message id was reused with different authored content", "E_MESSAGE_ID_REUSE");
+      return true;
+    }
+    if (record.code === "E_TARGET_REBOUND" && record.retryable) {
+      return false;
+    }
+    if (record.state === "socket_delivered" || record.state === "queued") {
+      this.writeDeliverySuccess(socket, messageId, record.state);
+    } else {
+      this.writeDeliveryFailure(socket, messageId, record.reason ?? "Previous delivery failed", record.code ?? "E_DELIVERY_FAILED", record.retryable);
+    }
+    return true;
+  }
+
+  private recordDelivery(fromSessionId: string, messageId: string, fingerprint: string, state: DeliveryState, reason?: string, code?: string, retryable = false): void {
+    this.pruneDeliveryRecords();
+    while (this.deliveryRecords.size >= MAX_DELIVERY_RECORDS) {
+      const oldest = this.deliveryRecords.keys().next().value;
+      if (oldest === undefined) break;
+      this.deliveryRecords.delete(oldest);
+    }
+    this.deliveryRecords.set(this.deliveryRecordKey(fromSessionId, messageId), {
+      fingerprint,
+      state,
+      ...(reason ? { reason } : {}),
+      ...(code ? { code } : {}),
+      retryable,
+      outcomeKnown: true,
+      createdAt: Date.now(),
+    });
+  }
+
+  private pruneDeliveryRecords(now = Date.now()): void {
+    for (const [key, record] of this.deliveryRecords) {
+      if (now - record.createdAt > DELIVERY_RECORD_RETENTION_MS) this.deliveryRecords.delete(key);
+    }
+  }
+
+  private updateDeliveryRecord(fromSessionId: string, messageId: string, state: DeliveryState, reason?: string, code?: string): void {
+    const record = this.deliveryRecords.get(this.deliveryRecordKey(fromSessionId, messageId));
+    if (!record) return;
+    record.state = state;
+    record.reason = reason;
+    record.code = code;
+    record.retryable = false;
+    record.outcomeKnown = true;
   }
 
   private flushMailboxForSession(session: ConnectedSession, now = Date.now()): void {
@@ -1003,6 +1078,7 @@ class IntercomBroker {
         to: session.info.id,
         createdAt: entry.message.brokerReceivedAt ?? entry.queuedAt,
       });
+      this.updateDeliveryRecord(entry.from.id, entry.message.id, "socket_delivered");
     }
   }
 

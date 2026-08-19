@@ -3,7 +3,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { randomUUID } from "crypto";
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
-import { IntercomClient } from "./broker/client.ts";
+import { IntercomClient, type SendResult } from "./broker/client.ts";
 import { spawnBrokerIfNeeded } from "./broker/spawn.ts";
 import { SessionListOverlay } from "./ui/session-list.ts";
 import { ComposeOverlay, type ComposeResult } from "./ui/compose.ts";
@@ -86,6 +86,18 @@ interface SupervisorInterviewReply {
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function deliveryDetails(result: SendResult): Record<string, unknown> {
+  return {
+    messageId: result.id,
+    delivered: result.delivered,
+    delivery: result.delivery,
+    retryable: result.retryable,
+    outcomeKnown: result.outcomeKnown,
+    ...(result.code ? { code: result.code } : {}),
+    ...(result.reason ? { reason: result.reason } : {}),
+  };
 }
 
 function toError(error: unknown): Error {
@@ -1632,7 +1644,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
               const errorText = result.reason ?? "Session may not exist or has disconnected.";
               return {
                 content: [{ type: "text", text: `Message to "${metadata.orchestratorTarget}" was not delivered: ${errorText}` }],
-                details: { messageId: result.id, delivered: false, reason: result.reason },
+                details: deliveryDetails(result),
               };
             }
             pi.appendEntry("intercom_sent", {
@@ -2044,7 +2056,7 @@ Usage:
               const errorText = result.reason ?? "Session may not exist or has disconnected.";
               return {
                 content: [{ type: "text", text: `Message to "${targetDisplay}" was not delivered: ${errorText}` }],
-                details: { messageId: result.id, delivered: false, reason: result.reason },
+                details: deliveryDetails(result),
               };
             }
             pi.appendEntry("intercom_sent", {
@@ -2064,8 +2076,7 @@ Usage:
                   : inferredAsk ? `Reply sent to ${targetDisplay} (inferred from pending ask)` : `Message sent to ${targetDisplay}`,
               }],
               details: {
-                messageId: result.id,
-                delivered: true,
+                ...deliveryDetails(result),
                 ...(effectiveReplyTo ? { replyTo: effectiveReplyTo } : {}),
                 ...(target.projectPane ? { openedProjectPane: true, paneId: target.projectPane.paneId, projectRoot: target.projectPane.projectRoot } : {}),
               },
@@ -2156,7 +2167,7 @@ Usage:
               retryOf,
             });
 
-            deliveryState = sendResult.delivered ? "socket_delivered" : "delivery_failed";
+            deliveryState = sendResult.delivery;
             if (!sendResult.delivered) {
               const errorText = sendResult.reason ?? "Session may not exist or has disconnected.";
               rejectReplyWaiter(new Error(`Message to "${targetDisplay}" was not delivered: ${errorText}`));
@@ -2169,7 +2180,7 @@ Usage:
               }
               return {
                 content: [{ type: "text", text: `Message to "${targetDisplay}" was not delivered: ${errorText}` }],
-                details: { error: true },
+                details: { error: true, ...deliveryDetails(sendResult) },
               };
             }
             pi.appendEntry("intercom_sent", {
@@ -2237,7 +2248,7 @@ Usage:
               }
               return {
                 content: [{ type: "text", text: `Reply to "${target.from.name || target.from.id}" was not delivered: ${errorText}` }],
-                details: { messageId: result.id, delivered: false, reason: result.reason },
+                details: deliveryDetails(result),
               };
             }
             dismissIncomingAsk(target.message.id);
@@ -2249,7 +2260,7 @@ Usage:
             });
             return {
               content: [{ type: "text", text: `Reply sent to ${target.from.name || target.from.id}` }],
-              details: { messageId: result.id, delivered: true, replyTo: target.message.id },
+              details: { ...deliveryDetails(result), replyTo: target.message.id },
             };
           } catch (error) {
             return {
