@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { EventEmitter, once } from "node:events";
@@ -28,12 +28,25 @@ process.env.HOME = sharedHomeDir;
 process.env.USERPROFILE = sharedHomeDir;
 const { IntercomClient } = await import("./broker/client.ts");
 const { getTsxCliPath } = await import("./broker/spawn.ts");
-const { getAskTimeoutMs } = await import("./config.ts");
+const { getAskTimeoutMs, getConfigPath } = await import("./config.ts");
 process.on("exit", () => {
   process.env.HOME = previousHome;
   process.env.USERPROFILE = previousUserProfile;
   rmSync(sharedHomeDir, { recursive: true, force: true });
 });
+
+async function withIntercomConfig<T>(config: Record<string, unknown>, fn: () => T | Promise<T>): Promise<T> {
+  const configPath = getConfigPath();
+  const previous = existsSync(configPath) ? readFileSync(configPath, "utf-8") : undefined;
+  mkdirSync(path.dirname(configPath), { recursive: true });
+  writeFileSync(configPath, JSON.stringify(config));
+  try {
+    return await fn();
+  } finally {
+    if (previous === undefined) rmSync(configPath, { force: true });
+    else writeFileSync(configPath, previous);
+  }
+}
 
 async function waitForBrokerReady(broker: ChildProcess): Promise<void> {
   const stdout = broker.stdout;
@@ -146,13 +159,15 @@ function createExtensionHarness(sessionName: string | (() => string) = "child-wo
   mode?: "tui" | "rpc" | "json" | "print";
   ui?: unknown;
   sessionId?: string | (() => string);
+  activeTools?: string[];
 } = {}) {
   const events = new EventEmitter();
   const lifecycleHandlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
   const commands = new Map<string, (args: string, ctx: unknown) => unknown>();
   const tools: CapturedTool[] = [];
+  let activeToolNames = [...(options.activeTools ?? [])];
   const entries: Array<{ type: string; data: unknown }> = [];
-  const sentMessages: Array<{ message: { customType?: string; content?: string; details?: unknown }; options?: { triggerTurn?: boolean; deliverAs?: string } }> = [];
+  const sentMessages: Array<{ message: { customType?: string; content?: string; details?: unknown }; options?: { triggerTurn?: boolean; deliverAs?: string }; activeTools: string[] }> = [];
   const pi = {
     getSessionName: () => typeof sessionName === "function" ? sessionName() : sessionName,
     events: {
@@ -170,13 +185,16 @@ function createExtensionHarness(sessionName: string | (() => string) = "child-wo
     registerMessageRenderer: () => undefined,
     registerTool: (tool: CapturedTool) => {
       tools.push(tool);
+      if (!activeToolNames.includes(tool.name)) activeToolNames.push(tool.name);
     },
+    getActiveTools: () => [...activeToolNames],
+    setActiveTools: (names: string[]) => { activeToolNames = [...names]; },
     registerCommand: (name: string, command: { handler: (args: string, ctx: unknown) => unknown }) => {
       commands.set(name, command.handler);
     },
     registerShortcut: () => undefined,
     sendMessage: (message: { customType?: string; content?: string; details?: unknown }, options?: { triggerTurn?: boolean; deliverAs?: string }) => {
-      sentMessages.push({ message, options });
+      sentMessages.push({ message, options, activeTools: [...activeToolNames] });
     },
     appendEntry: (type: string, data: unknown) => entries.push({ type, data }),
   };
@@ -197,6 +215,7 @@ function createExtensionHarness(sessionName: string | (() => string) = "child-wo
     commands,
     entries,
     sentMessages,
+    getActiveTools: () => pi.getActiveTools(),
     async emitLifecycle(event: string, payload: unknown = {}, eventContext: unknown = ctx) {
       for (const handler of lifecycleHandlers.get(event) ?? []) {
         await handler(payload, eventContext);
@@ -1360,6 +1379,115 @@ test("intercom tool result hook marks failed details as errors", async () => {
     details: { delivered: true },
   });
   assert.deepEqual(okResults.filter(Boolean), []);
+});
+
+test("lazy tool visibility reveals intercom on bundled skill use only", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+
+  await withIntercomConfig({ toolVisibility: "after-first-use" }, () => withChildOrchestratorEnv({
+    orchestratorTarget: "orchestrator",
+    runId: "78f659a3",
+    agent: "worker",
+    index: "0",
+  }, async () => {
+    const harness = createExtensionHarness("lazy-skill-worker", { activeTools: ["read", "bash"] });
+    piIntercomExtension(harness.pi as never);
+
+    try {
+      await harness.emitLifecycle("session_start");
+      assert.deepEqual(harness.getActiveTools(), ["read", "bash", "contact_supervisor"]);
+
+      harness.pi.events.emit("subagent:control-intercom", {
+        to: "session-child-test",
+        message: "Local relay traffic should not reveal the generic tool.",
+      });
+      assert.equal(harness.sentMessages.at(-1)?.activeTools.includes("intercom"), false);
+      assert.equal(harness.getActiveTools().includes("intercom"), false);
+
+      await harness.emitLifecycle("tool_result", {
+        toolName: "read",
+        input: { path: path.join(repoDir, "README.md") },
+        isError: false,
+      });
+      await harness.emitLifecycle("tool_result", {
+        toolName: "read",
+        input: { path: path.join(repoDir, "skills", "pi-intercom", "SKILL.md") },
+        isError: true,
+      });
+      assert.equal(harness.getActiveTools().includes("intercom"), false);
+
+      await harness.emitLifecycle("tool_result", {
+        toolName: "read",
+        input: { path: path.join(repoDir, "skills", "pi-intercom", "SKILL.md") },
+        isError: false,
+      });
+      assert.deepEqual(harness.getActiveTools(), ["read", "bash", "contact_supervisor", "intercom"]);
+
+      await harness.emitLifecycle("session_start");
+      assert.equal(harness.getActiveTools().includes("intercom"), false);
+      await harness.emitLifecycle("input", { text: "  /skill:pi-intercom", source: "user" });
+      assert.equal(harness.getActiveTools().includes("intercom"), true);
+    } finally {
+      await harness.emitLifecycle("session_shutdown");
+    }
+  }));
+});
+
+test("lazy tool visibility reveals intercom before broker injection and after an overlay send", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+
+  await withIntercomConfig({ toolVisibility: "after-first-use" }, async () => {
+    const { planner, cleanup } = await setupClients();
+    let selectedSession: SessionInfo | undefined;
+    let overlayStep = 0;
+    const overlayHarness = createExtensionHarness("lazy-overlay-worker", {
+      hasUI: true,
+      activeTools: ["read"],
+      ui: {
+        notify: () => undefined,
+        custom: async () => {
+          overlayStep += 1;
+          return overlayStep === 1
+            ? selectedSession
+            : { sent: true, messageId: "overlay-message", text: "Hello from the overlay" };
+        },
+      },
+    });
+    const inboundHarness = createExtensionHarness("lazy-inbound-worker", {
+      hasUI: true,
+      activeTools: ["read"],
+    });
+
+    try {
+      piIntercomExtension(overlayHarness.pi as never);
+      piIntercomExtension(inboundHarness.pi as never);
+      await overlayHarness.emitLifecycle("session_start");
+      await inboundHarness.emitLifecycle("session_start");
+      assert.equal(overlayHarness.getActiveTools().includes("intercom"), false);
+      assert.equal(inboundHarness.getActiveTools().includes("intercom"), false);
+
+      selectedSession = await waitForSessionByName(planner, "planner");
+      const inboundSession = await waitForSessionByName(planner, "lazy-inbound-worker");
+      const delivered = await planner.send(inboundSession.id, {
+        messageId: "lazy-inbound-message",
+        text: "Reveal intercom before injecting this message.",
+      });
+      assert.equal(delivered.delivered, true);
+      const deadline = Date.now() + 1000;
+      while (inboundHarness.sentMessages.length === 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      assert.equal(inboundHarness.sentMessages[0]?.activeTools.includes("intercom"), true);
+
+      await overlayHarness.commands.get("intercom")!("", overlayHarness.ctx);
+      assert.equal(overlayStep, 2);
+      assert.equal(overlayHarness.getActiveTools().includes("intercom"), true);
+    } finally {
+      await overlayHarness.emitLifecycle("session_shutdown");
+      await inboundHarness.emitLifecycle("session_shutdown");
+      await cleanup();
+    }
+  });
 });
 
 test("contact supervisor tool renders reason and reply state", async () => {

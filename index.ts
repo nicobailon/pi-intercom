@@ -21,11 +21,15 @@ import {
   type IntercomExtensionState,
 } from "./extension-api.ts";
 import { ReplyTracker } from "./reply-tracker.ts";
+import { realpathSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
+import { fileURLToPath } from "node:url";
 import { sameCwd } from "./cwd.ts";
 import { formatContextUsage } from "./format-context.ts";
 import { openProjectPane, resolveTargetInCwd, waitForProjectSession, type ProjectPaneLaunch } from "./project-agent.ts";
 
+const INTERCOM_TOOL_NAME = "intercom";
+const INTERCOM_SKILL_PATH = realpathSync(fileURLToPath(new URL("./skills/pi-intercom/SKILL.md", import.meta.url)));
 const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
 const SUBAGENT_RESULT_INTERCOM_EVENT = "subagent:result-intercom";
 const SUBAGENT_RESULT_INTERCOM_DELIVERY_EVENT = "subagent:result-intercom-delivery";
@@ -86,6 +90,18 @@ interface SupervisorInterviewReply {
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isIntercomSkillRead(input: unknown, cwd: string): boolean {
+  if (!input || typeof input !== "object") return false;
+  const inputPath = Reflect.get(input, "path");
+  if (typeof inputPath !== "string") return false;
+  const normalizedPath = inputPath.startsWith("@") ? inputPath.slice(1) : inputPath;
+  try {
+    return realpathSync(resolvePath(cwd, normalizedPath)) === INTERCOM_SKILL_PATH;
+  } catch {
+    return false;
+  }
 }
 
 function deliveryDetails(result: SendResult): Record<string, unknown> {
@@ -544,7 +560,24 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   let runtimeGeneration = 0;
   let agentRunning = false;
   const activeTools = new Map<string, string>();
+  let intercomToolHiddenByPolicy = false;
   const replyTracker = new ReplyTracker();
+  function hideIntercomTool(): void {
+    if (config.toolVisibility !== "after-first-use") return;
+    const activeToolNames = pi.getActiveTools();
+    if (!activeToolNames.includes(INTERCOM_TOOL_NAME)) return;
+    pi.setActiveTools(activeToolNames.filter((name) => name !== INTERCOM_TOOL_NAME));
+    intercomToolHiddenByPolicy = true;
+  }
+  function activateIntercomTool(): void {
+    if (!intercomToolHiddenByPolicy) return;
+    const activeToolNames = pi.getActiveTools();
+    if (!activeToolNames.includes(INTERCOM_TOOL_NAME)) {
+      pi.setActiveTools([...activeToolNames, INTERCOM_TOOL_NAME]);
+    }
+    intercomToolHiddenByPolicy = false;
+  }
+
   const seenInboundMessages = new Map<string, number>();
   const latestOutboundReceipts = new Map<string, { status: MessageReceiptStatus; timestamp: number; detail?: string }>();
   function dismissIncomingAsk(messageId: string): void {
@@ -922,6 +955,10 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         : { deliverAs: "steer" }
     );
   }
+  function sendIncomingBrokerMessage(entry: InboundMessageEntry, delivery: "trigger" | "steer", generation = runtimeGeneration): void {
+    activateIntercomTool();
+    sendIncomingMessage(entry, delivery, generation);
+  }
   function handleIncomingMessage(ctx: ExtensionContext, from: SessionInfo, message: Message): void {
     const messageGeneration = runtimeGeneration;
     const liveContext = getLiveContext(ctx, messageGeneration);
@@ -979,11 +1016,11 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
           }
           return;
         }
-        sendIncomingMessage(entry, "steer");
+        sendIncomingBrokerMessage(entry, "steer");
         return;
       }
       if (getLiveContext(liveContext, messageGeneration)) {
-        sendIncomingMessage(entry, "trigger", messageGeneration);
+        sendIncomingBrokerMessage(entry, "trigger", messageGeneration);
       }
     })();
   }
@@ -1270,6 +1307,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     });
   }
   function startSessionRuntime(ctx: ExtensionContext): void {
+    hideIntercomTool();
     const previousClient = client;
     shuttingDown = false;
     disposed = false;
@@ -1511,7 +1549,17 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     return new InlineMessageComponent(details.from, details.message, theme, details.replyCommand, details.bodyText, !options.expanded);
   });
 
-  pi.on("tool_result", (event) => {
+  pi.on("input", (event) => {
+    if (/^\/skill:pi-intercom(?:\s|$)/u.test(event.text.trimStart())) {
+      activateIntercomTool();
+    }
+  });
+
+  pi.on("tool_result", (event, ctx) => {
+    if (event.toolName === "read" && event.isError !== true && isIntercomSkillRead(event.input, ctx.cwd)) {
+      activateIntercomTool();
+      return;
+    }
     if (event.toolName !== "intercom" && event.toolName !== "contact_supervisor") {
       return;
     }
@@ -1863,6 +1911,7 @@ Usage:
     }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      activateIntercomTool();
       let connectedClient: IntercomClient;
       try {
         connectedClient = await ensureConnected("tool");
@@ -2442,6 +2491,7 @@ Usage:
     ).catch(() => undefined);
 
     if (result?.sent && result.messageId && result.text && getLiveContext(ctx, overlayGeneration)) {
+      activateIntercomTool();
       pi.appendEntry("intercom_sent", {
         to: selectedSession.name || selectedSession.id,
         message: { text: result.text },

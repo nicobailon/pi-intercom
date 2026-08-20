@@ -397,6 +397,7 @@ Create `~/.pi/agent/intercom/config.json`:
   "brokerArgs": ["--no-install", "tsx"],
   "confirmSend": false,
   "inboundTrigger": "always",
+  "toolVisibility": "always",
   "enabled": true,
   "replyHint": true,
   "status": "researching"
@@ -409,6 +410,7 @@ Create `~/.pi/agent/intercom/config.json`:
 | `brokerArgs` | `["--no-install", "tsx"]` | Advanced trusted arguments passed to custom `brokerCommand` before the broker script path |
 | `confirmSend` | false | Show a confirmation dialog before ordinary or inferred sends from an interactive session with UI; caller-supplied `replyTo` skips it |
 | `inboundTrigger` | `"always"` | Auto-trigger policy for inbound broker messages: `"always"`, `"replies"`, or `"never"`. Local in-process subagent relay events still trigger the addressed session. |
+| `toolVisibility` | `"always"` | When the generic `intercom` tool enters the active model tool set: `"always"` or `"after-first-use"`. Lazy visibility reveals it after an inbound broker message, a successful overlay send, or loading the bundled skill. It does not hide the child-only `contact_supervisor` tool. |
 | `enabled` | true | Enable/disable intercom entirely |
 | `replyHint` | true | Include reply instruction in incoming messages |
 | `status` | — | Optional custom status suffix shown after the automatic lifecycle status, for example `thinking · researching` |
@@ -509,7 +511,7 @@ Runtime files live at `~/.pi/agent/intercom/` by default, or `$PI_CODING_AGENT_D
 - `broker.port.json` — Dynamic localhost TCP endpoint, only when Windows TCP transport is explicitly enabled
 - `config.json` — User configuration
 
-Supported `config.json` keys include `stableId` for restart-stable addressing, `status` for a custom status suffix, `inboundTrigger` (`always`, `replies`, or `never`), `replyHint`, `confirmSend`, and advanced broker launch overrides.
+Supported `config.json` keys include `stableId` for restart-stable addressing, `status` for a custom status suffix, `inboundTrigger` (`always`, `replies`, or `never`), `toolVisibility` (`always` or `after-first-use`), `replyHint`, `confirmSend`, and advanced broker launch overrides.
 
 ## Design Decisions
 
