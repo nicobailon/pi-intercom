@@ -4,6 +4,7 @@ import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.ts";
 import { getBrokerConnectTarget, type BrokerConnectTarget } from "./paths.ts";
 import { isMessage, isMessageControl, isMessageReceipt, isSessionInfo } from "./protocol.ts";
+import { getIntercomScopeId } from "../config.ts";
 import { EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, type DeliveryDetails } from "../types.ts";
 import type {
   Attachment,
@@ -280,10 +281,12 @@ export class IntercomClient extends EventEmitter {
       this.once("_registered", onRegistered);
       
       try {
+        const scopeId = getIntercomScopeId();
         writeMessage(socket, {
           type: "register",
           session,
           ...(sessionId ? { sessionId } : {}),
+          ...(scopeId ? { scopeId } : {}),
           ...(typeof target === "string" ? {} : { stateId: target.stateId }),
         });
       } catch (error) {

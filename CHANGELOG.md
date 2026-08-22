@@ -5,6 +5,7 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 ## [Unreleased]
 
 ### Added
+- Added opt-in broker-enforced routing scopes through `PI_INTERCOM_SCOPE_ID`. Scoped sessions only see, route, recover mailbox messages, receive presence events, and use extension-bus owner, publish, and state traffic with sessions in the exact same opaque scope. Unscoped sessions keep existing behavior. Thanks to [@YeungKC](https://github.com/YeungKC) for issue #112.
 - Added opt-in `after-first-use` visibility for the generic `intercom` tool, keeping its model schema and prompt out of unused sessions until an inbound message, overlay send, or bundled skill load reveals it. Broker reception and the child-only `contact_supervisor` tool remain available while it is hidden. Thanks to [@XWIlluDelu](https://github.com/XWIlluDelu) for PR #111.
 
 ## [0.11.0] - 2026-08-19

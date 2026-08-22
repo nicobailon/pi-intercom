@@ -66,6 +66,22 @@ async function startBroker(agentDir: string): Promise<ChildProcessWithoutNullStr
   return broker;
 }
 
+async function withIntercomScope<T>(scopeId: string | undefined, fn: () => T | Promise<T>): Promise<T> {
+  const previous = process.env.PI_INTERCOM_SCOPE_ID;
+  if (scopeId === undefined) delete process.env.PI_INTERCOM_SCOPE_ID;
+  else process.env.PI_INTERCOM_SCOPE_ID = scopeId;
+  try {
+    return await fn();
+  } finally {
+    if (previous === undefined) delete process.env.PI_INTERCOM_SCOPE_ID;
+    else process.env.PI_INTERCOM_SCOPE_ID = previous;
+  }
+}
+
+async function connectScoped(client: IntercomClient, scopeId: string | undefined, session: SessionRegistration, sessionId: string): Promise<void> {
+  await withIntercomScope(scopeId, () => client.connect(session, sessionId));
+}
+
 async function stopBroker(broker: ChildProcessWithoutNullStreams): Promise<void> {
   if (broker.exitCode !== null) return;
   broker.kill("SIGTERM");
@@ -328,6 +344,89 @@ test("extension bus negotiates, routes, elects an owner, and persists state", { 
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
     rmSync(agentDir, { recursive: true, force: true });
+  }
+});
+
+test("extension bus owners, publish, and state are scoped", { concurrency: false, timeout: 30_000 }, async () => {
+  const agentDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-extension-scope-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  const broker = await startBroker(agentDir);
+  const clients: IntercomClient[] = [];
+
+  try {
+    const alphaOwner = new IntercomClient();
+    const alphaPeer = new IntercomClient();
+    const betaOwner = new IntercomClient();
+    const betaPeer = new IntercomClient();
+    clients.push(alphaOwner, alphaPeer, betaOwner, betaPeer);
+
+    const alphaOwnerMessages: BrokerMessage[] = [];
+    const alphaPeerMessages: BrokerMessage[] = [];
+    const betaOwnerMessages: BrokerMessage[] = [];
+    const betaPeerMessages: BrokerMessage[] = [];
+    alphaOwner.onBrokerMessage((message) => alphaOwnerMessages.push(message));
+    alphaPeer.onBrokerMessage((message) => alphaPeerMessages.push(message));
+    betaOwner.onBrokerMessage((message) => betaOwnerMessages.push(message));
+    betaPeer.onBrokerMessage((message) => betaPeerMessages.push(message));
+    for (const client of clients) client.on("error", () => {});
+
+    const now = Date.now();
+    await connectScoped(alphaOwner, "alpha", registration("alpha-owner", now, true), "scoped-owner-id");
+    await connectScoped(betaOwner, "beta", registration("beta-owner", now, true), "scoped-owner-id");
+    await connectScoped(alphaPeer, "alpha", registration("alpha-peer", now + 1, false), "alpha-peer-id");
+    await connectScoped(betaPeer, "beta", registration("beta-peer", now + 1, false), "beta-peer-id");
+
+    const alphaOwnerEvent = await waitFor(alphaOwnerMessages, (message) => message.type === "extension_owner" && message.ownerId === "scoped-owner-id");
+    const betaOwnerEvent = await waitFor(betaOwnerMessages, (message) => message.type === "extension_owner" && message.ownerId === "scoped-owner-id");
+    assert.equal(alphaOwnerEvent.type, "extension_owner");
+    assert.equal(betaOwnerEvent.type, "extension_owner");
+    assert.notEqual(alphaOwnerEvent.ownerEpoch, betaOwnerEvent.ownerEpoch);
+
+    alphaOwner.sendExtensionMessage({
+      type: "extension_publish",
+      namespace: "test/v1",
+      audience: "capable",
+      payload: { scope: "alpha" },
+    });
+    const alphaPublish = await waitFor(alphaPeerMessages, (message) => message.type === "extension_message"
+      && (message.payload as { scope?: string }).scope === "alpha");
+    assert.equal(alphaPublish.type, "extension_message");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(betaPeerMessages.some((message) => message.type === "extension_message"
+      && (message.payload as { scope?: string }).scope === "alpha"), false);
+
+    alphaOwner.sendExtensionMessage({
+      type: "extension_state_commit",
+      namespace: "test/v1",
+      ownerEpoch: alphaOwnerEvent.ownerEpoch!,
+      expectedRevision: 0,
+      payload: { scope: "alpha-state" },
+    });
+    const alphaState = await waitFor(alphaPeerMessages, (message) => message.type === "extension_state"
+      && (message.payload as { scope?: string }).scope === "alpha-state");
+    assert.equal(alphaState.type, "extension_state");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(betaPeerMessages.some((message) => message.type === "extension_state"
+      && (message.payload as { scope?: string }).scope === "alpha-state"), false);
+
+    betaOwner.sendExtensionMessage({
+      type: "extension_state_commit",
+      namespace: "test/v1",
+      ownerEpoch: betaOwnerEvent.ownerEpoch!,
+      expectedRevision: 0,
+      payload: { scope: "beta-state" },
+    });
+    const betaCommitted = await waitFor(betaOwnerMessages, (message) => message.type === "extension_state_result"
+      && message.committed === true);
+    assert.equal(betaCommitted.type, "extension_state_result");
+    assert.equal(betaCommitted.revision, 1);
+  } finally {
+    await Promise.all(clients.map((client) => client.disconnect().catch(() => undefined)));
+    await stopBroker(broker);
+    rmSync(agentDir, { recursive: true, force: true });
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
   }
 });
 

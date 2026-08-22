@@ -48,6 +48,18 @@ async function withIntercomConfig<T>(config: Record<string, unknown>, fn: () => 
   }
 }
 
+async function withIntercomScope<T>(scopeId: string | undefined, fn: () => T | Promise<T>): Promise<T> {
+  const previous = process.env.PI_INTERCOM_SCOPE_ID;
+  if (scopeId === undefined) delete process.env.PI_INTERCOM_SCOPE_ID;
+  else process.env.PI_INTERCOM_SCOPE_ID = scopeId;
+  try {
+    return await fn();
+  } finally {
+    if (previous === undefined) delete process.env.PI_INTERCOM_SCOPE_ID;
+    else process.env.PI_INTERCOM_SCOPE_ID = previous;
+  }
+}
+
 async function waitForBrokerReady(broker: ChildProcess): Promise<void> {
   const stdout = broker.stdout;
   if (!stdout) throw new Error("Broker stdout is unavailable");
@@ -430,6 +442,17 @@ async function setupClients() {
   }
 }
 
+async function connectClientWithScope(client: InstanceType<typeof IntercomClient>, scopeId: string | undefined, sessionId: string, name: string): Promise<void> {
+  await withIntercomScope(scopeId, () => client.connect({
+    name,
+    cwd: repoDir,
+    model: "test-model",
+    pid: process.pid,
+    startedAt: Date.now(),
+    lastActivity: Date.now(),
+  }, sessionId));
+}
+
 function waitForReply(client: InstanceType<typeof IntercomClient>, replyTo: string, timeoutMs = 5000): Promise<{ from: SessionInfo; message: Message; }> {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
@@ -446,6 +469,16 @@ function waitForReply(client: InstanceType<typeof IntercomClient>, replyTo: stri
     };
     client.on("message", handler);
   });
+}
+
+async function waitForReplyMessage(messages: Message[], messageId: string, timeoutMs = 3000): Promise<Message> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const message = messages.find((candidate) => candidate.id === messageId);
+    if (message) return message;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for message ${messageId}`);
 }
 
 function pendingAskRecordPath(messageId: string): string {
@@ -595,6 +628,85 @@ test("broker accepts caller supplied stable IDs across reconnect", { concurrency
   } finally {
     await worker.disconnect().catch(() => undefined);
     await cleanup();
+  }
+});
+
+test("broker scopes discovery, routing, mailbox, and presence", { concurrency: false }, async () => {
+  const broker = spawn(process.execPath, [getTsxCliPath(), path.join(repoDir, "broker", "broker.ts")], {
+    cwd: repoDir,
+    env: { ...process.env, HOME: sharedHomeDir, USERPROFILE: sharedHomeDir },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const clients: Array<InstanceType<typeof IntercomClient>> = [];
+  try {
+    await waitForBrokerReady(broker);
+    const unscopedA = new IntercomClient();
+    const unscopedB = new IntercomClient();
+    const alphaSender = new IntercomClient();
+    const alphaTarget = new IntercomClient();
+    const betaTarget = new IntercomClient();
+    clients.push(unscopedA, unscopedB, alphaSender, alphaTarget, betaTarget);
+
+    const alphaEvents: BrokerMessage[] = [];
+    const alphaMessages: Message[] = [];
+    const betaMessages: Message[] = [];
+    alphaSender.onBrokerMessage((message) => alphaEvents.push(message));
+    alphaTarget.on("message", (_from: SessionInfo, message: Message) => alphaMessages.push(message));
+    betaTarget.on("message", (_from: SessionInfo, message: Message) => betaMessages.push(message));
+
+    await connectClientWithScope(unscopedA, undefined, "unscoped-a", "unscoped-a");
+    await connectClientWithScope(unscopedB, undefined, "unscoped-b", "unscoped-b");
+    await connectClientWithScope(alphaSender, "  alpha-scope  ", "alpha-sender", "alpha-sender");
+    await connectClientWithScope(betaTarget, "beta-scope", "shared-target-id", "shared-target");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(alphaEvents.some((message) => message.type === "session_joined" && message.session.id === "shared-target-id"), false);
+
+    await connectClientWithScope(alphaTarget, "alpha-scope", "shared-target-id", "shared-target");
+    await waitForSessionByName(alphaSender, "shared-target");
+    assert.equal((await unscopedA.listSessions()).some((session) => session.id === "shared-target-id"), false);
+    assert.equal((await alphaSender.listSessions()).some((session) => session.id === "unscoped-b"), false);
+    assert.equal((await unscopedA.listSessions()).some((session) => session.id === "unscoped-b"), true);
+    assert.equal((await alphaSender.listSessions()).filter((session) => session.cwd === repoDir && session.name === "shared-target").length, 1);
+
+    betaTarget.updatePresence({ status: "beta-only" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(alphaEvents.some((message) => message.type === "presence_update" && message.session.status === "beta-only"), false);
+    alphaTarget.updatePresence({ status: "alpha-visible" });
+    await waitForSessionStatus(alphaSender, "shared-target", "alpha-visible");
+
+    assert.equal((await unscopedA.send("shared-target-id", { text: "full id must not cross" })).delivered, false);
+    assert.equal((await alphaSender.send("unscoped-b", { text: "unscoped id must not cross" })).delivered, false);
+    assert.equal((await alphaSender.send("shared-target", { messageId: "alpha-name-scope", text: "name stays in scope" })).delivered, true);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(alphaMessages.some((message) => message.id === "alpha-name-scope"), true);
+    assert.equal(betaMessages.some((message) => message.id === "alpha-name-scope"), false);
+
+    await alphaTarget.disconnect();
+    const crossScopeDisconnected = await unscopedA.send("shared-target-id", {
+      messageId: "unscoped-to-scoped-disconnected",
+      text: "must not queue across scope",
+    });
+    assert.equal(crossScopeDisconnected.delivered, false);
+    assert.match(crossScopeDisconnected.reason ?? "", /Session not found/);
+
+    const queued = await alphaSender.send("shared-target-id", {
+      messageId: "alpha-scoped-mailbox",
+      text: "queued only for alpha",
+    });
+    assert.equal(queued.delivery, "queued");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(betaMessages.some((message) => message.id === "alpha-scoped-mailbox"), false);
+
+    const alphaReplacement = new IntercomClient();
+    clients.push(alphaReplacement);
+    const recovered: Message[] = [];
+    alphaReplacement.on("message", (_from: SessionInfo, message: Message) => recovered.push(message));
+    await connectClientWithScope(alphaReplacement, "alpha-scope", "shared-target-id", "shared-target");
+    await waitForReplyMessage(recovered, "alpha-scoped-mailbox");
+  } finally {
+    await Promise.all(clients.map((client) => client.disconnect().catch(() => undefined)));
+    if (broker.exitCode === null && broker.signalCode === null) broker.kill("SIGTERM");
+    await once(broker, "exit").catch(() => undefined);
   }
 });
 
