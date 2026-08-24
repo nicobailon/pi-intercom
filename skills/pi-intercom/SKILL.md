@@ -1,28 +1,36 @@
 ---
 name: pi-intercom
 description: |
-  Streamline session-to-session coordination with pi-intercom. Send messages,
-  delegate tasks, and coordinate work across multiple pi sessions on the same
-  machine. Use for planner-worker workflows, cross-session context sharing,
-  and real-time collaboration between sessions.
+  Coordinate explicit delegation, context handoffs, and blocking decisions
+  across pi sessions on the same machine. Use only after isolating every
+  same-repository writer in its own git worktree. Do not use intercom as a
+  substitute for worktree isolation or merely to announce file ownership.
 ---
 
 # Pi Intercom Skill
 
-Use this skill when you need to coordinate work across multiple pi sessions
-running on the same machine. Pi-intercom enables direct 1:1 messaging between
-sessions for delegation, context sharing, and collaborative workflows.
+Use this skill for direct 1:1 messaging when separate pi sessions need to
+exchange context or decisions. Isolation comes first: every session that writes
+to the same repository must use its own branch and git worktree.
 
 When you are supervising `pi-subagents`, delegated child agents can escalate to
 you via `contact_supervisor` if `pi-subagents` supplied child bridge metadata.
 This skill covers how to handle those orchestrator-side escalations.
 
+## Isolation Before Coordination
+
+- Give each same-repository writer a separate git worktree before it edits files.
+- Keep the original checkout single-writer or read-only while parallel work runs.
+- Use intercom after isolation only when sessions need a decision, handoff, or shared context.
+- Do not send routine ownership announcements or acknowledgements to avoid collisions; worktree boundaries provide that safety.
+- When a peer reports that it already uses an isolated worktree, honor the boundary. Reply only if it asks for a decision or handoff.
+
 ## When to Use
 
-- **Task delegation**: Split work between a planner session and worker sessions
+- **Task delegation**: Split work between an orchestrator and already-isolated workers
 - **Context handoffs**: Send findings from a research session to an execution session
 - **Clarification loops**: Worker asks questions, planner answers, work continues
-- **Multi-session workflows**: Coordinate between specialized sessions (frontend/backend, research/implementation)
+- **Cross-repository workflows**: Coordinate specialized sessions that need shared context
 
 ## Core Patterns
 
@@ -212,20 +220,21 @@ Prefer `cmux new-split right` over new surfaces or workspaces so both sessions a
 If `cmux` is unavailable, `tmux` is an optional fallback when it is installed and relevant. Use it with a private socket so the session is isolated and observable.
 
 Use spawned peer sessions only for:
-- same-codebase worker/planner splits
+- same-codebase worker/planner splits where every writer has an isolated worktree
 - reference-codebase scouting
 - long-lived visible conversations where the user benefits from watching both sides
 
-Do not use this for unrelated repos, trivial questions, or work you can finish cleanly in the current session.
+Do not use this for unrelated repos, trivial questions, work you can finish cleanly in the current session, or collision avoidance that a worktree already solves.
 
 ### Preferred: cmux Worker or Scout Session
 
-Same codebase:
+Same codebase writer:
 
 ```bash
+git -C /path/to/repo worktree add -b worker-branch /path/to/worktrees/worker origin/main
 cmux new-split right
 sleep 0.5
-cmux send --surface right 'cd /path/to/current/repo && pi\n'
+cmux send --surface right 'cd /path/to/worktrees/worker && pi\n'
 ```
 
 Reference codebase:
@@ -238,14 +247,15 @@ cmux send --surface right 'cd /path/to/reference/repo && pi\n'
 
 ### Optional Fallback: tmux Worker or Scout Session
 
-Same codebase:
+Same codebase writer:
 
 ```bash
+git -C /path/to/repo worktree add -b worker-branch /path/to/worktrees/worker origin/main
 SOCKET_DIR=${TMPDIR:-/tmp}/pi-tmux-sockets
 mkdir -p "$SOCKET_DIR"
 SOCKET="$SOCKET_DIR/pi.sock"
 SESSION=pi-worker
-tmux -S "$SOCKET" new -d -s "$SESSION" -c "/path/to/current/repo" 'pi'
+tmux -S "$SOCKET" new -d -s "$SESSION" -c "/path/to/worktrees/worker" 'pi'
 ```
 
 Reference codebase:
@@ -292,10 +302,10 @@ intercom({
 Spawn a visible peer session only when all of these are true:
 - no existing intercom-connected session already fits the need
 - the work benefits from a long-lived visible peer session
-- the peer session is either in the same codebase or in an intentional reference codebase
+- a same-codebase writer has its own worktree, or the peer is read-only in an intentional reference codebase
 - `cmux` is available, or `tmux` is available as an intentional fallback
 
-If neither `cmux` nor `tmux` is available, skip this path and use normal `intercom` workflows.
+If neither `cmux` nor `tmux` is available, skip this path and use normal `intercom` workflows. Intercom never replaces worktree isolation.
 
 ## Important Constraints
 
@@ -320,6 +330,10 @@ if (result.isError && result.content[0].text.includes("Already waiting")) {
 - **Replies skip confirmation**: Messages with `replyTo` never show confirmation dialogs
 
 ## Best Practices
+
+### Isolate writers instead of coordinating file ownership
+
+Create a worktree for each same-repository writer. Do not use intercom messages, file reservations, or acknowledgements as the primary protection against overlapping edits.
 
 ### Use `ask` for blocking workflows
 
