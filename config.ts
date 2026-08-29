@@ -24,7 +24,6 @@ export function getIntercomScopeId(env: NodeJS.ProcessEnv = process.env): string
 }
 
 export type InboundTriggerPolicy = "always" | "replies" | "never";
-export type IntercomToolVisibility = "always" | "after-first-use";
 
 export interface IntercomConfig {
   /** Broker command used to spawn the broker process (e.g. "npx" or "bun") */
@@ -38,9 +37,6 @@ export interface IntercomConfig {
 
   /** Controls whether inbound broker messages may automatically trigger a model turn */
   inboundTrigger: InboundTriggerPolicy;
-
-  /** Controls when the intercom tool enters the active model tool set */
-  toolVisibility: IntercomToolVisibility;
 
   /** Optional custom status suffix shown after automatic lifecycle status */
   status?: string;
@@ -64,7 +60,6 @@ const defaults: IntercomConfig = {
   brokerArgs: ["--no-install", "tsx"],
   confirmSend: false,
   inboundTrigger: "always",
-  toolVisibility: "always",
   enabled: true,
   replyHint: true,
 };
@@ -133,16 +128,6 @@ export function loadConfig(): IntercomConfig {
         throw new Error(`"inboundTrigger" must be "always", "replies", or "never"`);
       }
       config.inboundTrigger = parsedConfig.inboundTrigger;
-    }
-
-    if (Object.hasOwn(parsedConfig, "toolVisibility")) {
-      if (
-        parsedConfig.toolVisibility !== "always"
-        && parsedConfig.toolVisibility !== "after-first-use"
-      ) {
-        throw new Error(`"toolVisibility" must be "always" or "after-first-use"`);
-      }
-      config.toolVisibility = parsedConfig.toolVisibility;
     }
 
     if (Object.hasOwn(parsedConfig, "replyHint")) {

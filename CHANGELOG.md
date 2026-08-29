@@ -7,6 +7,9 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 ### Fixed
 - Refuse non-reply `send` calls to a different target during a turn triggered by an inbound ask, preventing CWD hierarchy or roster guesses from misdirecting replies. Thanks to [@yceachan](https://github.com/yceachan) for issue #117.
 
+### Removed
+- Removed `toolVisibility` and the `after-first-use` intercom tool reveal path so the generic `intercom` schema and prompt snippet stay stable for provider prompt caches. Existing `toolVisibility` config keys are ignored. Thanks to [@XWIlluDelu](https://github.com/XWIlluDelu) for issue #118.
+
 ## [0.12.0] - 2026-08-22
 
 ### Highlights

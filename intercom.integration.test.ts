@@ -1672,59 +1672,7 @@ test("intercom tool result hook marks failed details as errors", async () => {
   assert.deepEqual(okResults.filter(Boolean), []);
 });
 
-test("lazy tool visibility reveals intercom on bundled skill use only", { concurrency: false }, async () => {
-  const { default: piIntercomExtension } = await import("./index.ts");
-
-  await withIntercomConfig({ toolVisibility: "after-first-use" }, () => withChildOrchestratorEnv({
-    orchestratorTarget: "orchestrator",
-    runId: "78f659a3",
-    agent: "worker",
-    index: "0",
-  }, async () => {
-    const harness = createExtensionHarness("lazy-skill-worker", { activeTools: ["read", "bash"] });
-    piIntercomExtension(harness.pi as never);
-
-    try {
-      await harness.emitLifecycle("session_start");
-      assert.deepEqual(harness.getActiveTools(), ["read", "bash", "contact_supervisor"]);
-
-      harness.pi.events.emit("subagent:control-intercom", {
-        to: "session-child-test",
-        message: "Local relay traffic should not reveal the generic tool.",
-      });
-      assert.equal(harness.sentMessages.at(-1)?.activeTools.includes("intercom"), false);
-      assert.equal(harness.getActiveTools().includes("intercom"), false);
-
-      await harness.emitLifecycle("tool_result", {
-        toolName: "read",
-        input: { path: path.join(repoDir, "README.md") },
-        isError: false,
-      });
-      await harness.emitLifecycle("tool_result", {
-        toolName: "read",
-        input: { path: path.join(repoDir, "skills", "pi-intercom", "SKILL.md") },
-        isError: true,
-      });
-      assert.equal(harness.getActiveTools().includes("intercom"), false);
-
-      await harness.emitLifecycle("tool_result", {
-        toolName: "read",
-        input: { path: path.join(repoDir, "skills", "pi-intercom", "SKILL.md") },
-        isError: false,
-      });
-      assert.deepEqual(harness.getActiveTools(), ["read", "bash", "contact_supervisor", "intercom"]);
-
-      await harness.emitLifecycle("session_start");
-      assert.equal(harness.getActiveTools().includes("intercom"), false);
-      await harness.emitLifecycle("input", { text: "  /skill:pi-intercom", source: "user" });
-      assert.equal(harness.getActiveTools().includes("intercom"), true);
-    } finally {
-      await harness.emitLifecycle("session_shutdown");
-    }
-  }));
-});
-
-test("lazy tool visibility reveals intercom before broker injection and after an overlay send", { concurrency: false }, async () => {
+test("obsolete toolVisibility config never hides or reveals the intercom tool", { concurrency: false }, async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
 
   await withIntercomConfig({ toolVisibility: "after-first-use" }, async () => {
@@ -1754,14 +1702,14 @@ test("lazy tool visibility reveals intercom before broker injection and after an
       piIntercomExtension(inboundHarness.pi as never);
       await overlayHarness.emitLifecycle("session_start");
       await inboundHarness.emitLifecycle("session_start");
-      assert.equal(overlayHarness.getActiveTools().includes("intercom"), false);
-      assert.equal(inboundHarness.getActiveTools().includes("intercom"), false);
+      assert.equal(overlayHarness.getActiveTools().includes("intercom"), true);
+      assert.equal(inboundHarness.getActiveTools().includes("intercom"), true);
 
       selectedSession = await waitForSessionByName(planner, "planner");
       const inboundSession = await waitForSessionByName(planner, "lazy-inbound-worker");
       const delivered = await planner.send(inboundSession.id, {
-        messageId: "lazy-inbound-message",
-        text: "Reveal intercom before injecting this message.",
+        messageId: "stable-inbound-message",
+        text: "Keep intercom active before injecting this message.",
       });
       assert.equal(delivered.delivered, true);
       const deadline = Date.now() + 1000;
@@ -1769,6 +1717,13 @@ test("lazy tool visibility reveals intercom before broker injection and after an
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
       assert.equal(inboundHarness.sentMessages[0]?.activeTools.includes("intercom"), true);
+
+      await inboundHarness.emitLifecycle("tool_result", {
+        toolName: "read",
+        input: { path: path.join(repoDir, "skills", "pi-intercom", "SKILL.md") },
+        isError: false,
+      });
+      assert.equal(inboundHarness.getActiveTools().includes("intercom"), true);
 
       await overlayHarness.commands.get("intercom")!("", overlayHarness.ctx);
       assert.equal(overlayStep, 2);
