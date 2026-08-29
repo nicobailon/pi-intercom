@@ -3148,6 +3148,43 @@ test("intercom reply sends attachments", { concurrency: false }, async () => {
   }
 });
 
+test("intercom send refuses a different target during an active inbound ask turn", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("cwd-reply-worker");
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const worker = await waitForSessionByName(planner, "cwd-reply-worker");
+
+    assert.equal((await planner.send(worker.id, {
+      messageId: "cwd-hierarchy-ask",
+      text: "Please answer me, not the repo-root session.",
+      expectsReply: true,
+    })).delivered, true);
+    const deadline = Date.now() + 1000;
+    while (harness.sentMessages.length === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    await harness.emitLifecycle("turn_start");
+
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const result = await intercomTool.execute("misdirected-send", {
+      action: "send",
+      to: "orchestrator",
+      message: "This was meant as the ask answer.",
+    }, new AbortController().signal, undefined, harness.ctx);
+
+    assert.equal(result.details?.error, true);
+    assert.equal(result.details?.replyTo, "cwd-hierarchy-ask");
+    assert.match(result.content[0]?.text ?? "", /Refusing non-reply send to "orchestrator"/);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
 test("intercom reply targets one of multiple pending asks by short session ID", { concurrency: false }, async () => {
   const { planner, orchestrator, cleanup } = await setupClients();
   const { default: piIntercomExtension } = await import("./index.ts");

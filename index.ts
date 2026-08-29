@@ -2350,6 +2350,14 @@ Usage:
                 details: { error: true },
               };
             }
+            const activeReplyMismatch = replyTo ? null : replyTracker.findActiveReplyTargetMismatch(sendTo);
+            if (activeReplyMismatch) {
+              const senderLabel = activeReplyMismatch.from.name || activeReplyMismatch.from.id;
+              return {
+                content: [{ type: "text", text: `This turn is responding to an intercom ask from "${senderLabel}". Use intercom({ action: "reply", message: "..." }) or set replyTo: "${activeReplyMismatch.message.id}". Refusing non-reply send to "${targetDisplay}" to avoid a misdirected reply.` }],
+                details: { error: true, replyTo: activeReplyMismatch.message.id },
+              };
+            }
             const inferredAsk = replyTo ? null : replyTracker.findUniquePendingAskFrom(sendTo);
             const effectiveReplyTo = replyTo ?? inferredAsk?.message.id;
             if (confirmSend && !(cwd && openProjectPaneIfMissing)) {

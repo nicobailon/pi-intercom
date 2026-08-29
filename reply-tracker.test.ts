@@ -93,6 +93,26 @@ test("explicit to overrides the current turn context", () => {
   assert.throws(() => tracker.resolveReplyTarget({ to: "missing" }, 1003), /No pending ask from/);
 });
 
+test("active ask context flags non-reply sends to a different target", () => {
+  const tracker = new ReplyTracker();
+  const current = tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "Need a reply"), 1000);
+  tracker.queueTurnContext(current);
+  tracker.beginTurn(1001);
+
+  assert.equal(tracker.findActiveReplyTargetMismatch("planner-id", 1002), null);
+  assert.equal(tracker.findActiveReplyTargetMismatch("planner", 1002)?.message.id, "ask-1");
+  assert.equal(tracker.findActiveReplyTargetMismatch("repo-root", 1002)?.message.id, "ask-1");
+});
+
+test("active ask context does not trust sender names as destination identity", () => {
+  const tracker = new ReplyTracker();
+  const current = tracker.recordIncomingMessage(createSession("asker-session", "root-session"), createMessage("ask-1", "Need a reply"), 1000);
+  tracker.queueTurnContext(current);
+  tracker.beginTurn(1001);
+
+  assert.equal(tracker.findActiveReplyTargetMismatch("root-session", 1002)?.message.id, "ask-1");
+});
+
 test("replyTo resolves the exact pending ask", () => {
   const tracker = new ReplyTracker();
   tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "First"), 1000);

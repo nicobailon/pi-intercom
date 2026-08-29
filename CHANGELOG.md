@@ -4,6 +4,9 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+### Fixed
+- Refuse non-reply `send` calls to a different target during a turn triggered by an inbound ask, preventing CWD hierarchy or roster guesses from misdirecting replies. Thanks to [@yceachan](https://github.com/yceachan) for issue #117.
+
 ## [0.12.0] - 2026-08-22
 
 ### Highlights
