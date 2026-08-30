@@ -183,11 +183,13 @@ function createExtensionHarness(sessionName: string | (() => string) = "child-wo
   const lifecycleHandlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
   const commands = new Map<string, (args: string, ctx: unknown) => unknown>();
   const tools: CapturedTool[] = [];
+  let currentSessionName = typeof sessionName === "function" ? sessionName() : sessionName;
   let activeToolNames = [...(options.activeTools ?? [])];
   const entries: Array<{ type: string; data: unknown }> = [];
   const sentMessages: Array<{ message: { customType?: string; content?: string; details?: unknown }; options?: { triggerTurn?: boolean; deliverAs?: string }; activeTools: string[] }> = [];
   const pi = {
-    getSessionName: () => typeof sessionName === "function" ? sessionName() : sessionName,
+    getSessionName: () => typeof sessionName === "function" ? sessionName() : currentSessionName,
+    setSessionName: (name: string) => { currentSessionName = name; },
     events: {
       on: (channel: string, handler: (payload: unknown) => void) => {
         events.on(channel, handler);
@@ -1334,6 +1336,123 @@ test("intercom-id inserts a stable handoff snippet into the editor", { concurren
     assert.match(notifications.at(-1) ?? "", /Inserted intercom contact target: session-child-test/);
     await harness.emitLifecycle("session_shutdown");
   } finally {
+    await cleanup();
+  }
+});
+
+test("alias names the current session, opens the local input menu, and appears in intercom displays", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const inputCalls: Array<[string, string | undefined]> = [];
+  const inputValues = ["menu-worker", "no-arg-worker"];
+  const harness = createExtensionHarness("alias-worker", {
+    hasUI: true,
+    ui: {
+      input: async (title: string, placeholder?: string) => {
+        inputCalls.push([title, placeholder]);
+        return inputValues.shift();
+      },
+      notify: () => undefined,
+    },
+  });
+
+  try {
+    // Disable the background name poll for this test so the broker update
+    // proves that /alias synchronizes presence directly.
+    await withChildOrchestratorEnv({ namePollMs: "60000" }, async () => {
+      piIntercomExtension(harness.pi as never);
+      await harness.emitLifecycle("session_start");
+      const initial = await waitForSessionByName(planner, "alias-worker");
+      const aliasCommand = harness.commands.get("alias")!;
+
+      await aliasCommand("direct-worker", harness.ctx);
+      const direct = await waitForSessionByName(planner, "direct-worker");
+      assert.equal(direct.id, initial.id);
+      assert.equal(harness.pi.getSessionName(), "direct-worker");
+      assert.equal(inputCalls.length, 0);
+
+      await aliasCommand("menu", harness.ctx);
+      await waitForSessionByName(planner, "menu-worker");
+      await aliasCommand("", harness.ctx);
+      const current = await waitForSessionByName(planner, "no-arg-worker");
+      assert.equal(current.id, initial.id);
+      assert.deepEqual(inputCalls, [
+        ["Set session alias", "Current alias: direct-worker"],
+        ["Set session alias", "Current alias: menu-worker"],
+      ]);
+
+      const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+      const listed = await intercomTool.execute("alias-list", { action: "list" }, new AbortController().signal, undefined, harness.ctx);
+      assert.match(listed.content[0]?.text ?? "", /no-arg-worker/);
+
+      orchestrator.updatePresence({ name: "alias-orchestrator" });
+      await waitForSessionByName(planner, "alias-orchestrator");
+      const outgoing = once(orchestrator, "message") as Promise<[SessionInfo, Message]>;
+      const sendResult = await intercomTool.execute("alias-send", {
+        action: "send",
+        to: "alias-orchestrator",
+        message: "Alias display check.",
+      }, new AbortController().signal, undefined, harness.ctx);
+      assert.equal(sendResult.content[0]?.text, "Message sent to alias-orchestrator");
+      assert.equal((await outgoing)[1].content.text, "Alias display check.");
+
+      const askId = "alias-reply-ask";
+      assert.equal((await orchestrator.send(initial.id, {
+        messageId: askId,
+        text: "Reply using the alias.",
+        expectsReply: true,
+      })).delivered, true);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      const replyReceived = waitForReply(orchestrator, askId);
+      const replyResult = await intercomTool.execute("alias-reply", {
+        action: "reply",
+        replyTo: askId,
+        message: "Alias reply display check.",
+      }, new AbortController().signal, undefined, harness.ctx);
+      assert.equal(replyResult.content[0]?.text, "Reply sent to alias-orchestrator");
+      assert.equal((await replyReceived).message.content.text, "Alias reply display check.");
+    });
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("alias reports no-UI usage and current alias without hanging", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const output: string[] = [];
+  const previousConsoleError = console.error;
+  console.error = (...args: unknown[]) => {
+    output.push(args.map((value) => String(value)).join(" "));
+  };
+  const harness = createExtensionHarness("no-ui-worker");
+
+  try {
+    await withChildOrchestratorEnv({ namePollMs: "60000" }, async () => {
+      piIntercomExtension(harness.pi as never);
+      await harness.emitLifecycle("session_start");
+      const initial = await waitForSessionByName(planner, "no-ui-worker");
+      const aliasCommand = harness.commands.get("alias")!;
+
+      await aliasCommand("no-ui-renamed", harness.ctx);
+      const renamed = await waitForSessionByName(planner, "no-ui-renamed");
+      assert.equal(renamed.id, initial.id);
+      assert.equal(harness.pi.getSessionName(), "no-ui-renamed");
+      assert.deepEqual(output, ["Session alias set: no-ui-renamed"]);
+
+      output.length = 0;
+      await aliasCommand("", harness.ctx);
+      assert.deepEqual(output, ["Session alias: no-ui-renamed"]);
+
+      output.length = 0;
+      await aliasCommand("menu", harness.ctx);
+      assert.deepEqual(output, ["The alias menu requires an interactive UI; use /alias <name>."]);
+      assert.equal(harness.pi.getSessionName(), "no-ui-renamed");
+    });
+  } finally {
+    console.error = previousConsoleError;
+    await harness.emitLifecycle("session_shutdown");
     await cleanup();
   }
 });

@@ -756,6 +756,17 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       // The UI can disappear during session shutdown/reload while async overlay work is settling.
     }
   }
+  function notifyAliasCommand(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error", generation = runtimeGeneration): void {
+    const liveContext = getLiveContext(ctx, generation);
+    if (!liveContext) return;
+    if (!liveContext.hasUI) {
+      // Command handlers return void and print mode supplies a no-op UI. Keep
+      // alias guidance visible without injecting a synthetic Pi message.
+      console.error(message);
+      return;
+    }
+    notifyIfLive(liveContext, message, level, generation);
+  }
   function getReconnectDelayMs(): number {
     const backoffMs = [1000, 2000, 5000, 10000, 30000];
     return backoffMs[Math.min(reconnectAttempt, backoffMs.length - 1)]!;
@@ -2666,6 +2677,59 @@ Usage:
     notifyIfLive(liveContext, `Intercom contact target: ${sessionId}`, "info", commandGeneration);
   }
 
+  async function setIntercomAlias(args: string, ctx: ExtensionContext): Promise<void> {
+    const commandGeneration = runtimeGeneration;
+    const liveContext = getLiveContext(ctx, commandGeneration);
+    if (!liveContext) return;
+
+    let alias = args.trim();
+    const opensAliasInput = !alias || alias.toLowerCase() === "menu";
+    if (opensAliasInput) {
+      if (!liveContext.hasUI) {
+        const currentAlias = pi.getSessionName()?.trim();
+        notifyAliasCommand(
+          liveContext,
+          alias ? "The alias menu requires an interactive UI; use /alias <name>." : currentAlias ? `Session alias: ${currentAlias}` : "No session alias set. Use /alias <name>.",
+          alias ? "warning" : "info",
+          commandGeneration,
+        );
+        return;
+      }
+
+      const currentAlias = pi.getSessionName()?.trim();
+      let entered: string | undefined;
+      try {
+        entered = await liveContext.ui.input(
+          "Set session alias",
+          currentAlias ? `Current alias: ${currentAlias}` : "Enter an alias",
+        );
+      } catch (error) {
+        notifyAliasCommand(liveContext, `Unable to set session alias: ${getErrorMessage(error)}`, "error", commandGeneration);
+        return;
+      }
+      if (entered === undefined) return;
+      alias = entered.trim();
+      if (!alias) {
+        notifyAliasCommand(liveContext, "Session alias cannot be empty.", "warning", commandGeneration);
+        return;
+      }
+    }
+
+    if (!getLiveContext(liveContext, commandGeneration)) return;
+    try {
+      pi.setSessionName(alias);
+    } catch (error) {
+      notifyAliasCommand(liveContext, `Unable to set session alias: ${getErrorMessage(error)}`, "error", commandGeneration);
+      return;
+    }
+
+    // Pi's session_info_changed event updates the built-in UI, but it is not
+    // an ExtensionAPI event. Push the new identity directly so broker peers
+    // see the alias without waiting for the idle name poll.
+    syncPresenceIdentity(liveContext.sessionManager.getSessionId());
+    notifyAliasCommand(liveContext, `Session alias set: ${alias}`, "info", commandGeneration);
+  }
+
   async function openIntercomOverlay(ctx: ExtensionContext): Promise<void> {
     const overlayGeneration = runtimeGeneration;
     const liveContext = getLiveContext(ctx, overlayGeneration);
@@ -2743,6 +2807,11 @@ Usage:
   pi.registerCommand("intercom-id", {
     description: "Insert a stable pi-intercom handoff snippet for this session into the editor",
     handler: async (_args, ctx) => insertIntercomId(ctx),
+  });
+
+  pi.registerCommand("alias", {
+    description: "Set the current session alias (usage: /alias <name> or /alias menu)",
+    handler: async (args, ctx) => setIntercomAlias(args, ctx),
   });
 
   pi.registerShortcut("alt+m", {

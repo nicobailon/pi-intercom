@@ -33,8 +33,8 @@ The most common pattern. One session holds the big picture, others do hands-on w
 
 **Setup** (in each session):
 ```
-/name planner    # Terminal 1
-/name worker     # Terminal 2
+/alias planner   # Terminal 1
+/alias worker    # Terminal 2
 ```
 
 **Planner delegates a task** (fire-and-forget):
@@ -304,12 +304,13 @@ intercom({
 
 ### Name sessions meaningfully
 
-Use `/name` so others can target you easily:
+Use `/alias` so others can target you easily. It names the current session and
+is shown in intercom lists, send/reply results, overlays, and incoming headers:
 
 ```
-/name api-worker
-/name frontend-dev
-/name planner
+/alias api-worker
+/alias frontend-dev
+/alias planner
 ```
 
 ## Error Handling
