@@ -4,6 +4,9 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+### Fixed
+- Write the hidden Windows broker launcher as UTF-16LE with a BOM and explicitly select the VBScript engine so startup works with non-ASCII paths and WSH configurations that cannot infer `.vbs`. Thanks to [@maelo1028](https://github.com/maelo1028) for issue #121 and [@Agustin-Prieto](https://github.com/Agustin-Prieto) for issue #123.
+
 ## [0.12.1] - 2026-08-29
 
 ### Highlights

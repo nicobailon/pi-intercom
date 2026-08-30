@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
@@ -12,6 +12,7 @@ import {
   getWindowsBrokerCommandLine,
   getWindowsHiddenLauncherPath,
   isBrokerHealthOkMessage,
+  writeWindowsHiddenLauncher,
 } from "./spawn.ts";
 
 test("getTsxCliPath resolves tsx cli via module resolution", () => {
@@ -80,6 +81,21 @@ test("getWindowsHiddenLauncherScript runs the broker command without showing a c
   assert.match(script, /, 0, False/);
 });
 
+test("writeWindowsHiddenLauncher writes a UTF-16LE script with a BOM", () => {
+  const intercomDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-用户-"));
+  const launcherPath = path.join(intercomDir, "broker-launch.vbs");
+  const commandLine = '"C:/Users/用户/node.exe" "C:/repo/用户/broker.ts"';
+
+  try {
+    writeWindowsHiddenLauncher(commandLine, launcherPath);
+    const contents = readFileSync(launcherPath);
+    assert.deepEqual([...contents.subarray(0, 2)], [0xff, 0xfe]);
+    assert.equal(contents.toString("utf16le"), `\uFEFF${getWindowsHiddenLauncherScript(commandLine)}`);
+  } finally {
+    rmSync(intercomDir, { recursive: true, force: true });
+  }
+});
+
 test("getBrokerLaunchSpec uses wscript launcher on Windows without writing files", () => {
   const intercomDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-"));
 
@@ -94,7 +110,7 @@ test("getBrokerLaunchSpec uses wscript launcher on Windows without writing files
       "C:/Program Files/nodejs/node.exe",
     );
     assert.equal(spec.command, "wscript.exe");
-    assert.deepEqual(spec.args, [path.join(intercomDir, "broker-launch.vbs")]);
+    assert.deepEqual(spec.args, ["//E:VBScript", path.join(intercomDir, "broker-launch.vbs")]);
     assert.equal(spec.kind, "windows-launcher");
     const expectedTsxPath = getTsxCliPath("C:/repo");
     assert.equal(spec.launcherCommandLine, `"C:/Program Files/nodejs/node.exe" "${expectedTsxPath}" "C:/repo/broker.ts"`);
@@ -131,6 +147,7 @@ test("getBrokerLaunchSpec uses custom broker command on Windows", () => {
   try {
     const spec = getBrokerLaunchSpec("C:/repo/broker.ts", "bun", ["--smol"], "C:/repo", "win32", intercomDir, "C:/Program Files/nodejs/node.exe");
     assert.equal(spec.command, "wscript.exe");
+    assert.deepEqual(spec.args, ["//E:VBScript", path.join(intercomDir, "broker-launch.vbs")]);
     assert.equal(spec.kind, "windows-launcher");
     assert.equal(spec.launcherCommandLine, `"bun" "--smol" "C:/repo/broker.ts"`);
   } finally {
