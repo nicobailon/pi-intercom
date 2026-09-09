@@ -22,6 +22,7 @@ import { EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE } from "../types.ts";
 import type { DeliveryState, SessionInfo, Message, BrokerMessage, ExtensionCapability, MessageControl } from "../types.ts";
 import { ExtensionStateManager } from "./extension-state.ts";
 import { assertNoLiveBroker } from "./runtime-claim.ts";
+import { resolveHerdrLocations } from "../herdr-location.ts";
 
 const INTERCOM_DIR = getIntercomDirPath();
 const LISTEN_TARGET = getBrokerListenTarget();
@@ -62,6 +63,9 @@ interface ConnectedSession {
   lastPresenceBroadcastAt: number;
   ownerOrder: number;
   extensions?: ExtensionCapability[];
+  /** Stable Pi session identity used only for live Herdr snapshot joins. This
+   * is a self-asserted local-client hint, not authenticated location evidence. */
+  herdrSessionPath?: string;
 }
 
 interface DeliveryRecord {
@@ -473,6 +477,7 @@ class IntercomBroker {
           lastActivity: session.lastActivity,
           ...(session.status !== undefined ? { status: session.status } : {}),
           ...(session.tmuxPane !== undefined ? { tmuxPane: session.tmuxPane } : {}),
+          ...(session.herdrPaneId !== undefined ? { herdrPaneId: session.herdrPaneId } : {}),
           trustedLocal: typeof LISTEN_TARGET === "string" && process.platform !== "win32",
         };
 
@@ -484,6 +489,7 @@ class IntercomBroker {
           lastPresenceBroadcastAt: Date.now(),
           ownerOrder: previous?.ownerOrder ?? this.nextOwnerOrder++,
           extensions,
+          ...(session.herdrSessionPath ? { herdrSessionPath: session.herdrSessionPath } : {}),
         };
         this.sessions.set(key, connectedSession);
         this.disconnectedSessions.delete(key);
@@ -596,7 +602,26 @@ class IntercomBroker {
         const sessions = Array.from(this.sessions.values())
           .filter(session => sameScope(session.scopeId, requester.scopeId))
           .map(s => s.info);
-        writeMessage(socket, { type: "sessions", requestId: clientMessage.requestId, sessions });
+        const requestId = clientMessage.requestId;
+        // Resolve all hosted panes from one bounded live snapshot. Never retain
+        // the result: moved panes must be re-resolved by the next list request.
+        const herdrSessionPaths = new Map(
+          Array.from(this.sessions.values())
+            .filter(session => sameScope(session.scopeId, requester.scopeId) && session.herdrSessionPath)
+            .map(session => [session.info.id, session.herdrSessionPath!] as const),
+        );
+        void resolveHerdrLocations(sessions, { sessionPaths: herdrSessionPaths })
+          .then((resolvedSessions) => writeMessage(socket, { type: "sessions", requestId, sessions: resolvedSessions }))
+          .catch((cause) => {
+            const detail = cause instanceof Error ? cause.message : String(cause);
+            const fallback = sessions.map((session) => ({
+              ...session,
+              herdrLocation: session.herdrPaneId
+                ? { status: "unavailable" as const, paneId: session.herdrPaneId, reason: "command_failed" as const, detail }
+                : { status: "not_hosted" as const },
+            }));
+            writeMessage(socket, { type: "sessions", requestId, sessions: fallback });
+          });
         break;
       }
 

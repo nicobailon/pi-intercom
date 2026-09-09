@@ -519,6 +519,14 @@ function currentTmuxPane(): string | undefined {
   const pane = process.env.TMUX_PANE?.trim();
   return pane ? pane : undefined;
 }
+// Herdr exports a launch-time pane alias to hosted processes. Its visible,
+// workspace-qualified id can change when the pane moves, so registration also
+// carries the stable Pi session file and the broker resolves both against a
+// fresh snapshot. Workspace and tab ids are intentionally never registered.
+function currentHerdrPane(): string | undefined {
+  const pane = process.env.HERDR_PANE_ID?.trim();
+  return pane ? pane : undefined;
+}
 function formatIntercomContactSnippet(sessionId: string): string {
   return `Use pi-intercom: intercom({ action: "send", to: "${sessionId}", message: "..." })`;
 }
@@ -530,13 +538,22 @@ function formatSessionLabel(session: SessionInfo, duplicates: Set<string>): stri
     ? `${session.name} (${session.id.slice(0, 8)})`
     : session.name;
 }
+function formatHerdrLocation(session: SessionInfo): string {
+  const location = session.herdrLocation;
+  if (!location) return "";
+  if (location.status === "not_hosted") return "not under Herdr";
+  if (location.status === "unavailable") return `Herdr location unavailable: ${location.reason} (pane ${location.paneId})`;
+  return `Herdr ${location.workspace.label} [${location.workspace.id}] / ${location.tab.label} [${location.tab.id}] / pane ${location.paneId}`;
+}
 function formatSessionListRow(session: SessionInfo, currentCwd: string, isSelf: boolean, idPrefix: string): string {
   const name = session.name || "Unnamed session";
   const tags = [isSelf ? "self" : session.cwd === currentCwd ? "same cwd" : undefined, session.status]
     .filter((tag): tag is string => Boolean(tag));
   const suffix = tags.length ? ` [${tags.join(", ")}]` : "";
   const pane = session.tmuxPane ? ` · tmux ${session.tmuxPane}` : "";
-  return `• ${name} (${idPrefix}) — ${session.cwd} (${session.model}${formatContextUsage(session)}${pane})${suffix}`;
+  const herdrLocation = formatHerdrLocation(session);
+  const herdr = herdrLocation ? ` · ${herdrLocation}` : "";
+  return `• ${name} (${idPrefix}) — ${session.cwd} (${session.model}${formatContextUsage(session)}${pane})${herdr}${suffix}`;
 }
 function previewText(value: unknown, maxLength = 72): string | undefined {
   if (typeof value !== "string") {
@@ -871,6 +888,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
 
     const identity = buildPresenceIdentity(pi, currentIntercomSessionId ?? currentSessionId);
     const tmuxPane = currentTmuxPane();
+    const herdrPaneId = currentHerdrPane();
+    const herdrSessionPath = herdrPaneId ? liveContext.sessionManager.getSessionFile() : undefined;
     return {
       ...identity,
       cwd: liveContext.cwd,
@@ -880,6 +899,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       lastActivity: Date.now(),
       status: currentStatus(),
       ...(tmuxPane ? { tmuxPane } : {}),
+      ...(herdrPaneId ? { herdrPaneId } : {}),
+      ...(herdrSessionPath ? { herdrSessionPath } : {}),
       ...(localExtensions.size > 0
         ? {
             extensions: currentExtensionCapabilities(),

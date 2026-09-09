@@ -33,6 +33,14 @@ function shortSessionId(sessionId: string): string {
   return sessionId.slice(0, 8);
 }
 
+function herdrLocationText(session: SessionInfo): string | undefined {
+  const location = session.herdrLocation;
+  if (!location) return undefined;
+  if (location.status === "not_hosted") return "not under Herdr";
+  if (location.status === "unavailable") return `Herdr unavailable (${location.reason}, pane ${location.paneId})`;
+  return `${location.workspace.label} [${location.workspace.id}] / ${location.tab.label} [${location.tab.id}] / ${location.paneId}`;
+}
+
 function sessionTitle(session: SessionInfo, options?: { self?: boolean; sameCwd?: boolean }): string {
   const name = session.name || "Unnamed session";
   const tags = [options?.self ? "self" : undefined, options?.sameCwd ? "same cwd" : undefined]
@@ -121,6 +129,8 @@ export class SessionListOverlay implements Component {
     lines.push(row());
     lines.push(row(`  ${this.theme.fg("dim", sessionTitle(this.currentSession, { self: true }))}`));
     lines.push(row(`  ${this.theme.fg("dim", `${middleTruncate(this.currentSession.cwd, Math.max(8, contentWidth - 4))} • ${this.currentSession.model}`)}`));
+    const currentHerdrLocation = herdrLocationText(this.currentSession);
+    if (currentHerdrLocation) lines.push(row(`  ${this.theme.fg("dim", currentHerdrLocation)}`));
     lines.push(row());
     lines.push(border(`├${"─".repeat(contentWidth)}┤`));
     lines.push(row(this.theme.bold(" Other Sessions")));
@@ -145,6 +155,8 @@ export class SessionListOverlay implements Component {
 
         lines.push(row(`${prefix}${isSelected ? this.theme.fg("accent", title) : title}`));
         lines.push(row(`  ${this.theme.fg("dim", pathText)}`));
+        const sessionHerdrLocation = herdrLocationText(session);
+        if (sessionHerdrLocation) lines.push(row(`  ${this.theme.fg("dim", sessionHerdrLocation)}`));
         if (index < endIndex - 1) {
           lines.push(row());
         }

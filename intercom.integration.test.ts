@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { EventEmitter, once } from "node:events";
@@ -32,14 +32,20 @@ const childEnvKeys = [
 const sharedHomeDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-home-"));
 const previousHome = process.env.HOME;
 const previousUserProfile = process.env.USERPROFILE;
+const previousHerdrPaneId = process.env.HERDR_PANE_ID;
 process.env.HOME = sharedHomeDir;
 process.env.USERPROFILE = sharedHomeDir;
+// Synthetic extension harnesses are not running in the parent test runner's
+// Herdr pane. Individual Herdr integration cases register an explicit pane id.
+delete process.env.HERDR_PANE_ID;
 const { IntercomClient } = await import("./broker/client.ts");
 const { getTsxCliPath } = await import("./broker/spawn.ts");
 const { getAskTimeoutMs, getConfigPath } = await import("./config.ts");
 process.on("exit", () => {
   process.env.HOME = previousHome;
   process.env.USERPROFILE = previousUserProfile;
+  if (previousHerdrPaneId === undefined) delete process.env.HERDR_PANE_ID;
+  else process.env.HERDR_PANE_ID = previousHerdrPaneId;
   rmSync(sharedHomeDir, { recursive: true, force: true });
 });
 
@@ -907,6 +913,94 @@ test("broker rejects changed message content after a rebound exact-target failur
     raw.socket.destroy();
     await replacement.disconnect().catch(() => undefined);
     await cleanup();
+  }
+});
+
+test("all-non-Herdr rosters preserve upstream structured and text output without invoking Herdr", { concurrency: false }, async () => {
+  const fixtureDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-no-herdr-"));
+  const marker = path.join(fixtureDir, "invoked");
+  const fixtureBin = path.join(fixtureDir, "herdr-must-not-run");
+  writeFileSync(fixtureBin, `#!/bin/sh\ntouch ${JSON.stringify(marker)}\nexit 99\n`);
+  chmodSync(fixtureBin, 0o755);
+  const previousHerdrBin = process.env.HERDR_BIN;
+  process.env.HERDR_BIN = fixtureBin;
+  let setup: Awaited<ReturnType<typeof setupClients>>;
+  try {
+    setup = await setupClients();
+  } finally {
+    if (previousHerdrBin === undefined) delete process.env.HERDR_BIN;
+    else process.env.HERDR_BIN = previousHerdrBin;
+  }
+  const harness = createExtensionHarness("plain-worker", { sessionId: "plain-worker-session" });
+
+  try {
+    const structured = await setup.planner.listSessions();
+    assert.equal(structured.every((session) => !("herdrLocation" in session)), true);
+    assert.equal(existsSync(marker), false);
+
+    const { default: piIntercomExtension } = await import("./index.ts");
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    await waitForSessionByName(setup.planner, "plain-worker");
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const result = await intercomTool.execute("plain-list", { action: "list" }, new AbortController().signal, undefined, harness.ctx);
+    const text = result.content.map((part) => part.text).join("\n");
+    assert.match(text, /Current session:/);
+    assert.match(text, /Other sessions:/);
+    assert.doesNotMatch(text, /Herdr|not under/);
+    assert.equal(existsSync(marker), false);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await setup.cleanup();
+    rmSync(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("broker resolves a registered Herdr pane through one live snapshot", { concurrency: false }, async () => {
+  const fixtureDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-herdr-"));
+  const fixtureBin = path.join(fixtureDir, "herdr-fixture");
+  writeFileSync(fixtureBin, `#!/usr/bin/env node
+console.log(JSON.stringify({ result: { snapshot: {
+  panes: [{ pane_id: "pane-current", tab_id: "tab-current", workspace_id: "workspace-current", agent_session: { kind: "path", source: "herdr:pi", value: "/sessions/worker.jsonl" } }],
+  tabs: [{ tab_id: "tab-current", workspace_id: "workspace-current", label: "Review" }],
+  workspaces: [{ workspace_id: "workspace-current", label: "Research" }]
+} } }));
+`);
+  chmodSync(fixtureBin, 0o755);
+  const previousHerdrBin = process.env.HERDR_BIN;
+  process.env.HERDR_BIN = fixtureBin;
+  let setup: Awaited<ReturnType<typeof setupClients>>;
+  try {
+    setup = await setupClients();
+  } finally {
+    if (previousHerdrBin === undefined) delete process.env.HERDR_BIN;
+    else process.env.HERDR_BIN = previousHerdrBin;
+  }
+  const worker = new IntercomClient();
+
+  try {
+    await worker.connect({
+      name: "herdr-worker",
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+      herdrPaneId: "pane-at-launch",
+      herdrSessionPath: "/sessions/worker.jsonl",
+    });
+    const session = await waitForSessionByName(setup.planner, "herdr-worker");
+    assert.deepEqual(session.herdrLocation && { ...session.herdrLocation, refreshedAt: 0 }, {
+      status: "current",
+      workspace: { id: "workspace-current", label: "Research" },
+      tab: { id: "tab-current", label: "Review" },
+      paneId: "pane-current",
+      refreshedAt: 0,
+    });
+  } finally {
+    await worker.disconnect().catch(() => undefined);
+    await setup.cleanup();
+    rmSync(fixtureDir, { recursive: true, force: true });
   }
 });
 

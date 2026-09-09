@@ -10,6 +10,23 @@ export interface DeliveryDetails {
   outcomeKnown: boolean;
 }
 
+export type HerdrLocation =
+  | {
+      status: "current";
+      workspace: { id: string; label: string };
+      tab: { id: string; label: string };
+      paneId: string;
+      /** Time when the broker requested the live Herdr snapshot. */
+      refreshedAt: number;
+    }
+  | { status: "not_hosted" }
+  | {
+      status: "unavailable";
+      paneId: string;
+      reason: "herdr_unavailable" | "unsupported" | "command_failed" | "pane_missing" | "invalid_response";
+      detail?: string;
+    };
+
 export interface SessionInfo {
   id: string;
   /** Broker-owned lifetime of this live endpoint. */
@@ -40,6 +57,11 @@ export interface SessionInfo {
    *  name, which is mutable — so a peer can live-resolve the current window
    *  from it via tmux when it needs to introspect or drive that pane. */
   tmuxPane?: string;
+  /** Launch-time Herdr pane alias. It may differ from the current pane id after a move. */
+  herdrPaneId?: string;
+  /** Present on list responses. `current` is freshly resolved for that request;
+   *  other states explicitly distinguish non-Herdr sessions from failures. */
+  herdrLocation?: HerdrLocation;
 }
 
 export interface Message {
@@ -99,8 +121,10 @@ export interface ExtensionCapability {
   ownerEligible: boolean;
 }
 
-export type SessionRegistration = Omit<SessionInfo, "id" | "endpointEpoch" | "peerUid" | "trustedLocal"> & {
+export type SessionRegistration = Omit<SessionInfo, "id" | "endpointEpoch" | "peerUid" | "trustedLocal" | "herdrLocation"> & {
   extensions?: ExtensionCapability[];
+  /** Broker-only join hint; never returned in the public roster. */
+  herdrSessionPath?: string;
 };
 
 export type ClientMessage =

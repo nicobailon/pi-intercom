@@ -13,6 +13,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isHerdrLocation(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (value.status === "not_hosted") return true;
+  if (value.status === "unavailable") {
+    return typeof value.paneId === "string"
+      && (value.reason === "herdr_unavailable"
+        || value.reason === "unsupported"
+        || value.reason === "command_failed"
+        || value.reason === "pane_missing"
+        || value.reason === "invalid_response")
+      && (value.detail === undefined || typeof value.detail === "string");
+  }
+  if (value.status !== "current" || !isRecord(value.workspace) || !isRecord(value.tab)) return false;
+  return typeof value.workspace.id === "string"
+    && typeof value.workspace.label === "string"
+    && typeof value.tab.id === "string"
+    && typeof value.tab.label === "string"
+    && typeof value.paneId === "string"
+    && typeof value.refreshedAt === "number";
+}
+
 function isMessageReceiptStatus(value: unknown): value is MessageReceiptStatus {
   return value === "receiver_received"
     || value === "queued"
@@ -168,6 +189,12 @@ export function isSessionInfo(value: unknown): value is SessionInfo {
   if (value.tmuxPane !== undefined && typeof value.tmuxPane !== "string") {
     return false;
   }
+  if (value.herdrPaneId !== undefined && typeof value.herdrPaneId !== "string") {
+    return false;
+  }
+  if (value.herdrLocation !== undefined && !isHerdrLocation(value.herdrLocation)) {
+    return false;
+  }
 
   return value.trustedLocal === undefined || typeof value.trustedLocal === "boolean";
 }
@@ -201,6 +228,12 @@ export function isSessionRegistration(value: unknown): value is SessionRegistrat
     return false;
   }
   if (value.tmuxPane !== undefined && typeof value.tmuxPane !== "string") {
+    return false;
+  }
+  if (value.herdrPaneId !== undefined && typeof value.herdrPaneId !== "string") {
+    return false;
+  }
+  if (value.herdrSessionPath !== undefined && typeof value.herdrSessionPath !== "string") {
     return false;
   }
 

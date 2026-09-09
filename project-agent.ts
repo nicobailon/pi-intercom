@@ -65,7 +65,7 @@ function normalizeCode(raw: unknown): HerdrErrorCode {
   return "VALIDATION_ERROR";
 }
 
-function createHerdrClient(options: { bin?: string; spawn?: SpawnHerdr } = {}): HerdrClient {
+export function createHerdrClient(options: { bin?: string; spawn?: SpawnHerdr } = {}): HerdrClient {
   const bin = options.bin ?? process.env.HERDR_BIN ?? "herdr";
   const spawnImpl = options.spawn ?? spawn;
   return {
