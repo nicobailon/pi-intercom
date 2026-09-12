@@ -7,6 +7,7 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 ### Added
 - Extensions can claim a session's intercom ID per session through the new `intercom:session-identity` event. This lets pi-subagents route to a child by a fixed ID while the child's session name stays readable. Thanks to [@Q-xuan](https://github.com/Q-xuan) for raising the readable child name problem in nicobailon/pi-subagents#2432.
 - `list` now shows the current Herdr workspace, tab, and pane for Herdr-hosted sessions, read from one fresh `herdr api snapshot` per list. Rosters without Herdr-hosted sessions don't call Herdr and look the same as before. Thanks to [@odfalik](https://github.com/odfalik) for #129.
+- Added `cli.ts`, a minimal scripting client (`list` / `send` / `ask`) for the local broker, including a documented pattern for cross-machine coordination over ssh. Thanks to [@pinion05](https://github.com/pinion05) for issue [#130](https://github.com/nicobailon/pi-intercom/issues/130).
 
 ### Changed
 - `list` and `list-cwd` results now render as one line (`3 other sessions (4 connected)`) in the TUI. Expand the result to see the full roster; the model still receives the full roster. Thanks to [@SiebertLanhove](https://github.com/SiebertLanhove) for #127.
