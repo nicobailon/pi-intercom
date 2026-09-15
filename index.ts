@@ -32,6 +32,48 @@ import { sameCwd } from "./cwd.ts";
 import { formatContextUsage } from "./format-context.ts";
 import { openProjectPane, resolveTargetInCwd, waitForProjectSession, type ProjectPaneLaunch } from "./project-agent.ts";
 
+type HostTheme = { fg(color: string, text: string): string; bold(text: string): string };
+
+const PLAIN_THEME: HostTheme = {
+  fg: (_color, text) => text,
+  bold: text => text,
+};
+
+function isHostTheme(value: unknown): value is HostTheme {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof Reflect.get(value, "fg") === "function" &&
+    typeof Reflect.get(value, "bold") === "function"
+  );
+}
+
+/**
+ * omp >= 18 calls renderCall(args, options, theme); older hosts call
+ * renderCall(args, theme, context). Pick whichever argument carries the theme.
+ */
+function resolveHostTheme(second: unknown, third: unknown): HostTheme | undefined {
+  if (isHostTheme(second)) return second;
+  if (isHostTheme(third)) return third;
+  return undefined;
+}
+
+/** Overlay and message renderers receive the theme directly; degrade to unstyled text instead of crashing. */
+function hostThemeOrPlain<T>(theme: T): T {
+  return (isHostTheme(theme) ? theme : PLAIN_THEME) as T;
+}
+
+/**
+ * omp passes tool args in the fourth renderResult slot; legacy hosts pass the
+ * render context, which carries `expanded`/`isError` that omp moves onto the
+ * options and result arguments instead.
+ */
+function legacyRenderContext(value: unknown): { expanded?: boolean; isError?: boolean } | undefined {
+  if (value === null || typeof value !== "object") return undefined;
+  if (!("showImages" in value) || !("argsComplete" in value)) return undefined;
+  return value as { expanded?: boolean; isError?: boolean };
+}
+
 const INTERCOM_TOOL_NAME = "intercom";
 const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
 const SUBAGENT_RESULT_INTERCOM_EVENT = "subagent:result-intercom";
@@ -1794,7 +1836,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   pi.registerMessageRenderer("intercom_message", (message, options, theme) => {
     const details = message.details as { from: SessionInfo; message: Message; replyCommand?: string; bodyText?: string } | undefined;
     if (!details) return undefined;
-    return new InlineMessageComponent(details.from, details.message, theme, details.replyCommand, details.bodyText, !options.expanded);
+    return new InlineMessageComponent(details.from, details.message, hostThemeOrPlain(theme), details.replyCommand, details.bodyText, !options.expanded);
   });
 
   pi.on("tool_result", (event) => {
@@ -2049,7 +2091,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
           };
         }
       },
-      renderCall(args, theme) {
+      renderCall(args, optionsOrTheme, maybeTheme) {
+        const theme = resolveHostTheme(optionsOrTheme, maybeTheme) ?? PLAIN_THEME;
         const reason = typeof args.reason === "string" ? args.reason : "contact";
         const messagePreview = previewText(args.message, 96);
         const interview = args.interview && typeof args.interview === "object" ? args.interview as { title?: unknown } : undefined;
@@ -2063,13 +2106,15 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         }
         return new Text(text, 0, 0);
       },
-      renderResult(result, { isPartial }, theme, context) {
+      renderResult(result, { isPartial }, theme, fourthArg) {
         if (isPartial) {
           return new Text(theme.fg("warning", "Waiting for supervisor..."), 0, 0);
         }
         const details = result.details as { delivered?: boolean; error?: boolean; messageId?: string; reason?: string; structuredReplyParseError?: string } | undefined;
         const textContent = firstTextContent(result);
-        const failed = Boolean(context.isError || details?.error === true || details?.delivered === false);
+        const legacyContext = legacyRenderContext(fourthArg);
+        const isError = (result as { isError?: boolean }).isError ?? legacyContext?.isError ?? false;
+        const failed = Boolean(isError || details?.error === true || details?.delivered === false);
         const parseWarning = typeof details?.structuredReplyParseError === "string";
         let text = failed
           ? theme.fg("error", "✗ ")
@@ -2611,7 +2656,8 @@ Usage:
           };
       }
     },
-    renderCall(args, theme) {
+    renderCall(args, optionsOrTheme, maybeTheme) {
+      const theme = resolveHostTheme(optionsOrTheme, maybeTheme) ?? PLAIN_THEME;
       const action = typeof args.action === "string" ? args.action : "intercom";
       const target = typeof args.to === "string" && args.to.trim() ? args.to.trim() : undefined;
       const messagePreview = previewText(args.message, 96);
@@ -2629,18 +2675,21 @@ Usage:
       }
       return new Text(text, 0, 0);
     },
-    renderResult(result, { isPartial }, theme, context) {
-      if (isPartial) {
+    renderResult(result, options, theme, fourthArg) {
+      if (options.isPartial) {
         return new Text(theme.fg("warning", "Intercom working..."), 0, 0);
       }
       const details = result.details as { delivered?: boolean; error?: boolean; messageId?: string; reason?: string } | undefined;
-      const failed = Boolean(context.isError || details?.error === true || details?.delivered === false);
+      const legacyContext = legacyRenderContext(fourthArg);
+      const expanded = (options as { expanded?: boolean }).expanded ?? legacyContext?.expanded ?? false;
+      const isError = (result as { isError?: boolean }).isError ?? legacyContext?.isError ?? false;
+      const failed = Boolean(isError || details?.error === true || details?.delivered === false);
       let text = failed ? theme.fg("error", "✗ ") : theme.fg("success", "✓ ");
       text += theme.fg(failed ? "error" : "text", firstTextContent(result));
-      if (details?.messageId && !context.expanded) {
+      if (details?.messageId && !expanded) {
         text += theme.fg("dim", ` (${details.messageId.slice(0, 8)})`);
       }
-      if (details?.reason && context.expanded) {
+      if (details?.reason && expanded) {
         text += "\n" + theme.fg("dim", `Reason: ${details.reason}`);
       }
       return new Text(text, 0, 0);
@@ -2767,7 +2816,7 @@ Usage:
     }
 
     const selectedSession = await ctx.ui.custom<SessionInfo | undefined>(
-      (_tui, theme, keybindings, done) => new SessionListOverlay(theme, keybindings, currentSession, sessions, done),
+      (_tui, theme, keybindings, done) => new SessionListOverlay(hostThemeOrPlain(theme), keybindings, currentSession, sessions, done),
       { overlay: true, overlayOptions: { width: 88 } }
     ).catch(() => undefined);
 
@@ -2784,7 +2833,7 @@ Usage:
     const targetLabel = formatSessionLabel(selectedSession, duplicates);
 
     const result = await ctx.ui.custom<ComposeResult>(
-      (tui, theme, keybindings, done) => new ComposeOverlay(tui, theme, keybindings, selectedSession, targetLabel, overlayClient, done),
+      (tui, theme, keybindings, done) => new ComposeOverlay(tui, hostThemeOrPlain(theme), keybindings, selectedSession, targetLabel, overlayClient, done),
       { overlay: true, overlayOptions: { width: 72 } }
     ).catch(() => undefined);
 
