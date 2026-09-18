@@ -116,7 +116,7 @@ export function isBrokerHealthOkMessage(message: unknown, requestId: string): bo
   const response = message as Record<string, unknown>;
   return response.type === "health_ok"
     && response.requestId === requestId
-    && response.protocol === INTERCOM_PROTOCOL_NAME
+    && (response.protocol === "pi-intercom" || response.protocol === "omp-intercom")
     && response.version === INTERCOM_PROTOCOL_VERSION;
 }
 
