@@ -273,7 +273,7 @@ function interviewOptionLabel(option: unknown): string {
   return typeof option === "string" ? option : (option as { label: string }).label;
 }
 
-function interviewExampleValue(question: SupervisorInterviewQuestion): unknown {
+function interviewExampleValue(question: SupervisorInterviewQuestion): string | string[] {
   if (question.type === "multi") {
     return question.options?.slice(0, 2).map(interviewOptionLabel) ?? [];
   }
@@ -530,11 +530,13 @@ function formatSessionLabel(session: SessionInfo, duplicates: Set<string>): stri
 }
 function formatSessionListRow(session: SessionInfo, currentCwd: string, isSelf: boolean, idPrefix: string): string {
   const name = session.name || "Unnamed session";
+  const badge = session.harness ? `[${session.harness === "opencode" ? "oc" : session.harness}] ` : "";
+  const steerNote = session.capabilities?.steer === false ? " · queues (no steer)" : "";
   const tags = [isSelf ? "self" : session.cwd === currentCwd ? "same cwd" : undefined, session.status]
     .filter((tag): tag is string => Boolean(tag));
   const suffix = tags.length ? ` [${tags.join(", ")}]` : "";
   const pane = session.tmuxPane ? ` · tmux ${session.tmuxPane}` : "";
-  return `• ${name} (${idPrefix}) — ${session.cwd} (${session.model}${formatContextUsage(session)}${pane})${suffix}`;
+  return `• ${badge}${name} (${idPrefix}) — ${session.cwd} (${session.model}${formatContextUsage(session)}${pane}${steerNote})${suffix}`;
 }
 function previewText(value: unknown, maxLength = 72): string | undefined {
   if (typeof value !== "string") {
@@ -877,6 +879,13 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       startedAt: sessionStartedAt,
       lastActivity: Date.now(),
       status: currentStatus(),
+      harness: "pi",
+      capabilities: {
+        steer: true,
+        ask: true,
+        ui: Boolean(liveContext.hasUI),
+        attachments: true,
+      },
       ...(tmuxPane ? { tmuxPane } : {}),
       ...(localExtensions.size > 0
         ? {

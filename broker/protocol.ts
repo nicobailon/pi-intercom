@@ -169,6 +169,22 @@ export function isSessionInfo(value: unknown): value is SessionInfo {
     return false;
   }
 
+  if (value.harness !== undefined && typeof value.harness !== "string") {
+    return false;
+  }
+
+  if (value.capabilities !== undefined) {
+    if (typeof value.capabilities !== "object" || value.capabilities === null) {
+      return false;
+    }
+    for (const key of ["steer", "ask", "ui", "attachments"] as const) {
+      const flag = (value.capabilities as Record<string, unknown>)[key];
+      if (flag !== undefined && typeof flag !== "boolean") {
+        return false;
+      }
+    }
+  }
+
   return value.trustedLocal === undefined || typeof value.trustedLocal === "boolean";
 }
 

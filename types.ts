@@ -40,6 +40,21 @@ export interface SessionInfo {
    *  name, which is mutable — so a peer can live-resolve the current window
    *  from it via tmux when it needs to introspect or drive that pane. */
   tmuxPane?: string;
+  /** Harness this session runs on: "pi", "omp", or "opencode". Lets senders
+   *  pick delivery semantics and renders a harness badge in rosters. Absent
+   *  on older clients. */
+  harness?: string;
+  /** Delivery capabilities advertised by the session. Absent on older clients. */
+  capabilities?: {
+    /** Can steer an in-flight turn (vs. queueing until idle). */
+    steer?: boolean;
+    /** Supports expectsReply / ask flows. */
+    ask?: boolean;
+    /** Attached interactive TUI (false for headless/daemon sessions). */
+    ui?: boolean;
+    /** intercom tool accepts attachments. */
+    attachments?: boolean;
+  };
 }
 
 export interface Message {
