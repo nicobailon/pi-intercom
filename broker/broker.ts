@@ -473,6 +473,8 @@ class IntercomBroker {
           lastActivity: session.lastActivity,
           ...(session.status !== undefined ? { status: session.status } : {}),
           ...(session.tmuxPane !== undefined ? { tmuxPane: session.tmuxPane } : {}),
+          ...(session.harness !== undefined ? { harness: session.harness } : {}),
+          ...(session.capabilities !== undefined ? { capabilities: session.capabilities } : {}),
           trustedLocal: typeof LISTEN_TARGET === "string" && process.platform !== "win32",
         };
 
