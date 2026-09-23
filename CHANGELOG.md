@@ -4,18 +4,26 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
-### Fixed
-- Held messages now report queued and terminal drop receipts when cancelled, superseded, answered, or discarded at shutdown/replacement.
-- Messages that arrive while a session is compacting are now delivered after compaction instead of being lost. Thanks to [@alexjc](https://github.com/alexjc) for #133.
+## [0.14.0] - 2026-09-23
+
+### Highlights
+- Coordinate with other sessions from scripts or over SSH using the new command-line client.
+- Keep messages from interrupting your input with optional human-first delivery.
+- Find sessions more easily with Herdr locations and a shorter session list.
+- Messages arriving during compaction now reach their destination afterward.
 
 ### Added
-- Opt-in `busyDelivery: "human-first"` holds busy interactive peer messages behind pending human input, releasing one per available turn boundary. Default steering remains unchanged. Thanks to [@SiebertLanhove](https://github.com/SiebertLanhove) for #128.
-- Extensions can claim a session's intercom ID per session through the new `intercom:session-identity` event. This lets pi-subagents route to a child by a fixed ID while the child's session name stays readable. Thanks to [@Q-xuan](https://github.com/Q-xuan) for raising the readable child name problem in nicobailon/pi-subagents#2432.
-- `list` now shows the current Herdr workspace, tab, and pane for Herdr-hosted sessions, read from one fresh `herdr api snapshot` per list. Rosters without Herdr-hosted sessions don't call Herdr and look the same as before. Thanks to [@odfalik](https://github.com/odfalik) for #129.
-- Added `cli.ts`, a scripting client (`list` / `send` / `ask`) for the local broker, including cross-machine coordination over ssh. Thanks to [@pinion05](https://github.com/pinion05) for #131 and issue #130.
+- Added a command-line client with `list`, `send`, and `ask` commands for scripts and coordination over SSH. Thanks to [@pinion05](https://github.com/pinion05) for #131 and issue #130.
+- Added opt-in `busyDelivery: "human-first"` to hold peer messages while you're typing and deliver them at turn boundaries. The default behavior is unchanged. Thanks to [@SiebertLanhove](https://github.com/SiebertLanhove) for #128.
+- Extensions can use the `intercom:session-identity` event to give a session a fixed ID without changing its readable name. Thanks to [@Q-xuan](https://github.com/Q-xuan) for raising the readable child name problem in nicobailon/pi-subagents#2432.
+- `list` now shows the workspace, tab, and pane for sessions hosted in Herdr. Thanks to [@odfalik](https://github.com/odfalik) for #129.
 
 ### Changed
-- `list` and `list-cwd` results now render as one line (`3 other sessions (4 connected)`) in the TUI. Expand the result to see the full roster; the model still receives the full roster. Thanks to [@SiebertLanhove](https://github.com/SiebertLanhove) for #127.
+- `list` and `list-cwd` show a one-line summary in the TUI; expand it to see every session. The model still sees the full list. Thanks to [@SiebertLanhove](https://github.com/SiebertLanhove) for #127.
+
+### Fixed
+- Messages held for delivery now report when they're queued or dropped, including after cancellation, supersession, a reply, or session shutdown.
+- Messages arriving during compaction are delivered afterward instead of being lost. Thanks to [@alexjc](https://github.com/alexjc) for #133.
 
 ## [0.13.0] - 2026-09-02
 
