@@ -275,7 +275,7 @@ if (result.isError && result.content[0].text.includes("Already waiting")) {
 
 ## Best Practices
 
-### Treat list location as authoritative
+### Use list location instead of guessing
 
 For a Herdr-hosted session, `list` displays readable workspace and tab labels plus stable opaque IDs and a diagnostic pane ID. The workspace/tab values come from a fresh bounded Herdr snapshot for that list request, joined by the Pi session identity that remains stable when Herdr changes the workspace-qualified pane ID, so use them instead of inferring location from cwd or session name. `not under Herdr` means the session did not register a Herdr pane. `Herdr location unavailable` means it did register one, but the current snapshot failed or no longer contained that pane. Use `herdrLocation.paneId`, not the launch-time `herdrPaneId`, when current diagnostic pane metadata is needed. Do not use pane IDs as intercom addressing handles; target the session name or intercom session ID. If no connected session is Herdr-hosted, `list` does not call Herdr or add location lines.
 
