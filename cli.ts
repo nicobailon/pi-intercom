@@ -3,9 +3,9 @@
  * Minimal CLI for scripted access to the local pi-intercom broker.
  *
  * Commands:
- *   pi-intercom cli.ts list [--json]
- *   pi-intercom cli.ts send --to <name|session-id> --text "..." [--name <bridge-name>] [--json]
- *   pi-intercom cli.ts ask  --to <name|session-id> --text "..." [--timeout-ms N] [--name <bridge-name>] [--json]
+ *   npx --yes tsx ~/.pi/agent/npm/node_modules/pi-intercom/cli.ts list [--json]
+ *   npx --yes tsx ~/.pi/agent/npm/node_modules/pi-intercom/cli.ts send --to worker --text "build failed" [--name <bridge-name>] [--json]
+ *   npx --yes tsx ~/.pi/agent/npm/node_modules/pi-intercom/cli.ts ask --to worker --text "status?" [--timeout-ms N] [--name <bridge-name>] [--json]
  *
  * The CLI registers as a regular session, so it shows up in the roster and
  * replies can be routed back to it while it stays connected (`ask`).
@@ -16,7 +16,7 @@
  * ssh on a remote machine to bridge coordination without opening any network
  * listener:
  *
- *   ssh myserver 'tsx ~/.pi/agent/npm/node_modules/pi-intercom/cli.ts list'
+ *   ssh myserver 'npx --yes tsx ~/.pi/agent/npm/node_modules/pi-intercom/cli.ts list'
  */
 
 import { pathToFileURL } from "node:url";
@@ -72,8 +72,8 @@ export function parseCliArgs(argv: readonly string[]): CliOptions {
     } else if (arg === "--name") {
       opts.name = value;
     } else if (arg === "--timeout-ms") {
-      const parsed = Number.parseInt(value, 10);
-      if (!Number.isFinite(parsed) || parsed <= 0) {
+      const parsed = Number(value);
+      if (!/^[0-9]+$/.test(value) || !Number.isSafeInteger(parsed) || parsed <= 0) {
         throw new CliUsageError(`invalid --timeout-ms value: ${value}`);
       }
       opts.timeoutMs = parsed;
@@ -133,24 +133,28 @@ function sessionRow(session: SessionInfo): { name: string; id: string; model: st
 }
 
 export async function runCli(argv: readonly string[], deps: CliDeps): Promise<number> {
+  const out = deps.out ?? process.stdout;
+  const err = deps.err ?? process.stderr;
+  const reportFailure = (message: string, code = 1, reason?: string): number => {
+    if (argv.includes("--json")) {
+      out.write(`${JSON.stringify({ ok: false, error: message, ...(reason ? { reason } : {}) })}\n`);
+    } else {
+      err.write(`${message}\n`);
+    }
+    return code;
+  };
   let opts: CliOptions;
   try {
     opts = parseCliArgs(argv);
   } catch (error) {
-    deps.err?.write(`${error instanceof Error ? error.message : String(error)}\n`);
-    return 1;
+    return reportFailure(error instanceof Error ? error.message : String(error));
   }
-
-  const out = deps.out ?? process.stdout;
-  const err = deps.err ?? process.stderr;
 
   try {
     await deps.client.connect(buildCliRegistration(opts.name));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    err.write(`cannot reach the local intercom broker: ${message}\n`);
-    err.write("is a pi session with pi-intercom loaded currently running on this machine?\n");
-    return 1;
+    return reportFailure(`cannot reach the local intercom broker: ${message}\nis a pi session with pi-intercom loaded currently running on this machine?`);
   }
 
   try {
@@ -170,12 +174,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
     if (opts.command === "send") {
       const result = await deps.client.send(opts.to as string, { text: opts.text as string });
       if (!result.delivered) {
-        if (opts.json) {
-          out.write(`${JSON.stringify({ ok: false, delivered: false, reason: result.reason }, null, 2)}\n`);
-        } else {
-          err.write(`delivery failed: ${result.reason ?? "unknown reason"}\n`);
-        }
-        return 1;
+        return reportFailure(`delivery failed: ${result.reason ?? "unknown reason"}`);
       }
       if (opts.json) {
         out.write(`${JSON.stringify({ ok: true, delivered: true, id: result.id }, null, 2)}\n`);
@@ -185,15 +184,15 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
       return 0;
     }
 
-    // ask: resolve on the first reply-tagged inbound message. A one-shot CLI
-    // process sends exactly one ask, so any replyTo-tagged message routed to
-    // this connection is the reply we are waiting for.
+    // A reply can arrive before send() returns its message id.
     type AskOutcome =
       | { kind: "timeout" }
       | { kind: "delivery-failure"; reason: string }
       | { kind: "reply"; from: SessionInfo; text: string };
     let settled = false;
     const reply = await new Promise<AskOutcome>((resolve) => {
+      let sentId: string | undefined;
+      const earlyReplies = new Map<string, { from: SessionInfo; text: string }>();
       const settle = (outcome: AskOutcome) => {
         if (settled) {
           return;
@@ -205,8 +204,11 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
       const timer = setTimeout(() => settle({ kind: "timeout" }), opts.timeoutMs);
 
       deps.client.on("message", (from, message) => {
-        if (message.replyTo !== undefined) {
+        if (message.replyTo === undefined || settled) return;
+        if (sentId === message.replyTo) {
           settle({ kind: "reply", from, text: message.content.text });
+        } else if (sentId === undefined) {
+          earlyReplies.set(message.replyTo, { from, text: message.content.text });
         }
       });
 
@@ -214,6 +216,10 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
         (result) => {
           if (!result.delivered) {
             settle({ kind: "delivery-failure", reason: result.reason ?? "unknown reason" });
+          } else {
+            sentId = result.id;
+            const early = earlyReplies.get(sentId);
+            if (early) settle({ kind: "reply", ...early });
           }
         },
         (error: unknown) => {
@@ -223,16 +229,10 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
     });
 
     if (reply.kind === "timeout") {
-      err.write(`ask timed out after ${opts.timeoutMs} ms waiting for a reply from ${opts.to}\n`);
-      return 2;
+      return reportFailure(`ask timed out after ${opts.timeoutMs} ms waiting for a reply from ${opts.to}`, 2, "timeout");
     }
     if (reply.kind === "delivery-failure") {
-      if (opts.json) {
-        out.write(`${JSON.stringify({ ok: false, delivered: false, reason: reply.reason }, null, 2)}\n`);
-      } else {
-        err.write(`delivery failed: ${reply.reason}\n`);
-      }
-      return 1;
+      return reportFailure(`delivery failed: ${reply.reason}`);
     }
     if (opts.json) {
       out.write(`${JSON.stringify({ ok: true, from: reply.from.name ?? reply.from.id, text: reply.text }, null, 2)}\n`);
@@ -240,6 +240,8 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
       out.write(`${reply.text}\n`);
     }
     return 0;
+  } catch (error) {
+    return reportFailure(`intercom request failed: ${error instanceof Error ? error.message : String(error)}`);
   } finally {
     await deps.client.disconnect().catch(() => {});
   }

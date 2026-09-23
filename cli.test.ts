@@ -24,7 +24,10 @@ interface FakeClientOptions {
   sessions?: SessionInfo[];
   sendResult?: { id: string; delivered: boolean; reason?: string };
   replyOnSend?: { from: SessionInfo; text: string };
+  unrelatedReplyOnSend?: boolean;
   sendError?: Error;
+  connectError?: Error;
+  listError?: Error;
 }
 
 class FakeClient implements CliClient {
@@ -40,9 +43,11 @@ class FakeClient implements CliClient {
 
   async connect(session: SessionRegistration): Promise<void> {
     this.registrations.push(session);
+    if (this.options.connectError) throw this.options.connectError;
   }
 
   async listSessions(): Promise<SessionInfo[]> {
+    if (this.options.listError) throw this.options.listError;
     return this.options.sessions ?? [];
   }
 
@@ -50,6 +55,11 @@ class FakeClient implements CliClient {
     this.sends.push({ to, text: options.text, expectsReply: options.expectsReply });
     if (this.options.sendError) {
       throw this.options.sendError;
+    }
+    if (this.options.unrelatedReplyOnSend) {
+      for (const listener of this.listeners) {
+        listener(sessionFixture(), { id: "unrelated", timestamp: Date.now(), replyTo: "other-id", content: { text: "wrong reply" } });
+      }
     }
     if (this.options.replyOnSend) {
       const reply: Message = {
@@ -117,8 +127,9 @@ test("parseCliArgs rejects unknown commands and options", () => {
 });
 
 test("parseCliArgs rejects invalid timeout values", () => {
-  assert.throws(() => parseCliArgs(["ask", "--to", "w", "--text", "?", "--timeout-ms", "0"]), /invalid --timeout-ms/);
-  assert.throws(() => parseCliArgs(["ask", "--to", "w", "--text", "?", "--timeout-ms", "soon"]), /invalid --timeout-ms/);
+  for (const value of ["0", "soon", "50garbage", "1.5", "-1", "9007199254740992"]) {
+    assert.throws(() => parseCliArgs(["ask", "--to", "w", "--text", "?", "--timeout-ms", value]), /invalid --timeout-ms/);
+  }
 });
 
 test("parseCliArgs requires --to and --text for send/ask", () => {
@@ -179,13 +190,45 @@ test("runCli send exits 1 on delivery failure", async () => {
 });
 
 test("runCli ask prints the reply", async () => {
-  const client = new FakeClient({ replyOnSend: { from: sessionFixture(), text: "all good" } });
+  const client = new FakeClient({ unrelatedReplyOnSend: true, replyOnSend: { from: sessionFixture(), text: "all good" } });
   const out = new MemorySink();
   const err = new MemorySink();
   const code = await runCli(["ask", "--to", "worker", "--text", "status?"], { client, out, err });
   assert.equal(code, 0);
   assert.equal(out.text(), "all good\n");
   assert.equal(client.sends[0]?.expectsReply, true);
+});
+
+test("runCli ask ignores unrelated replyTo and times out", async () => {
+  const out = new MemorySink();
+  const code = await runCli(["ask", "--to", "worker", "--text", "?", "--timeout-ms", "5", "--json"], {
+    client: new FakeClient({ unrelatedReplyOnSend: true }), out, err: new MemorySink(),
+  });
+  assert.equal(code, 2);
+  assert.equal(JSON.parse(out.text()).reason, "timeout");
+});
+
+test("runCli --json reports usage, connection, list, send, delivery and timeout failures", async () => {
+  const cases: Array<{ argv: string[]; client: FakeClient; code: number; error: RegExp; reason?: string }> = [
+    { argv: ["send", "--json"], client: new FakeClient(), code: 1, error: /--to is required/ },
+    { argv: ["list", "--json"], client: new FakeClient({ connectError: new Error("offline") }), code: 1, error: /offline/ },
+    { argv: ["list", "--json"], client: new FakeClient({ listError: new Error("broker rejected") }), code: 1, error: /broker rejected/ },
+    { argv: ["send", "--to", "w", "--text", "hi", "--json"], client: new FakeClient({ sendError: new Error("broker rejected") }), code: 1, error: /broker rejected/ },
+    { argv: ["send", "--to", "w", "--text", "hi", "--json"], client: new FakeClient({ sendResult: { id: "sent-1", delivered: false, reason: "not found" } }), code: 1, error: /not found/ },
+    { argv: ["ask", "--to", "w", "--text", "?", "--timeout-ms", "5", "--json"], client: new FakeClient(), code: 2, error: /timed out/, reason: "timeout" },
+  ];
+  for (const { argv, client, code, error, reason } of cases) {
+    const out = new MemorySink();
+    const err = new MemorySink();
+    assert.equal(await runCli(argv, { client, out, err }), code);
+    assert.equal(err.text(), "");
+    const lines = out.text().trim().split("\n");
+    assert.equal(lines.length, 1);
+    const body = JSON.parse(lines[0]) as { ok: boolean; error: string; reason?: string };
+    assert.equal(body.ok, false);
+    assert.match(body.error, error);
+    assert.equal(body.reason, reason);
+  }
 });
 
 test("runCli ask --json prints structured reply", async () => {
