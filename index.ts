@@ -627,6 +627,20 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   let agentRunning = false;
   const heldInboundMessages: InboundMessageEntry[] = [];
   let heldInboundTimer: NodeJS.Timeout | null = null;
+  function dropHeldInboundMessage(messageId: string, receipt: { status: MessageReceiptStatus; detail?: string }): boolean {
+    const index = heldInboundMessages.findIndex((entry) => entry.message.id === messageId);
+    if (index < 0) return false;
+    heldInboundMessages.splice(index, 1);
+    if (heldInboundMessages.length === 0) clearHeldInboundTimer();
+    emitMessageReceipt(messageId, receipt.status, receipt.detail);
+    return true;
+  }
+  function expireHeldInboundMessages(detail: string): void {
+    for (const entry of heldInboundMessages.splice(0)) {
+      emitMessageReceipt(entry.message.id, "expired", detail);
+    }
+    clearHeldInboundTimer();
+  }
   const activeTools = new Map<string, string>();
   const replyTracker = new ReplyTracker();
 
@@ -636,6 +650,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   const pendingOutboxRequests = new Map<string, PendingOutboxRequest>();
   function dismissIncomingAsk(messageId: string): void {
     replyTracker.dismissPendingAsk(messageId);
+    dropHeldInboundMessage(messageId, { status: "acknowledged", detail: "answered before injection" });
   }
   function hasSeenInboundMessage(from: SessionInfo, message: Message, now = Date.now()): boolean {
     for (const [key, seenAt] of seenInboundMessages) {
@@ -669,11 +684,15 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   }
   function handleMessageControl(control: MessageControl): void {
     replyTracker.dismissPendingAsk(control.messageId);
+    const supersededDetail = control.supersededBy ? `superseded by ${control.supersededBy}` : undefined;
+    if (dropHeldInboundMessage(control.messageId, control.action === "cancel"
+      ? { status: "cancelled", detail: "dropped before injection" }
+      : { status: "superseded", detail: supersededDetail })) return;
     if (control.action === "cancel") {
       emitMessageReceipt(control.messageId, "cancellation_requested", "message may already be injected or processed");
       return;
     }
-    emitMessageReceipt(control.messageId, "superseded", control.supersededBy ? `superseded by ${control.supersededBy}` : undefined);
+    emitMessageReceipt(control.messageId, "superseded", supersededDetail);
   }
   function latestDeliveryState(messageId: string | null, fallback: string): string {
     if (!messageId) {
@@ -1256,6 +1275,13 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   }
   function flushHeldInboundMessages(ctx: ExtensionContext, generation: number): void {
     if (!getLiveContext(ctx, generation)) return;
+    if (config.busyDelivery === "human-first" && ctx.hasUI) {
+      if (ctx.isIdle() && heldInboundMessages.length > 0) {
+        deliverIncomingBrokerMessage(heldInboundMessages.shift()!, ctx, generation);
+      }
+      if (heldInboundMessages.length === 0) clearHeldInboundTimer();
+      return;
+    }
     while (heldInboundMessages.length > 0 && (ctx.isIdle() || agentRunning) && getLiveContext(ctx, generation)) {
       deliverIncomingBrokerMessage(heldInboundMessages.shift()!, ctx, generation);
     }
@@ -1267,6 +1293,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   }
   function holdIncomingBrokerMessage(entry: InboundMessageEntry, ctx: ExtensionContext, generation: number): void {
     heldInboundMessages.push(entry);
+    emitMessageReceipt(entry.message.id, "queued", "held until delivery is safe");
     if (!heldInboundTimer) {
       heldInboundTimer = setInterval(() => flushHeldInboundMessages(ctx, generation), 100);
       heldInboundTimer.unref();
@@ -1307,7 +1334,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     emitMessageReceipt(receivedMessage.id, "acknowledged", "accepted by receiver");
     const entry = { from, message: receivedMessage, replyCommand, bodyText };
     // Busy without an agent run cannot steer; manual compaction can discard an appended custom entry.
-    if (heldInboundMessages.length > 0 || (!liveContext.isIdle() && !agentRunning)) {
+    if (heldInboundMessages.length > 0 || (!liveContext.isIdle() && (!agentRunning || (config.busyDelivery === "human-first" && liveContext.hasUI)))) {
       holdIncomingBrokerMessage(entry, liveContext, messageGeneration);
     } else {
       deliverIncomingBrokerMessage(entry, liveContext, messageGeneration);
@@ -1631,8 +1658,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     lastPresenceName = initialPresenceIdentity.name;
     lastPresenceRuntimeFallbackAlias = initialPresenceIdentity.runtimeFallbackAlias;
     agentRunning = false;
-    clearHeldInboundTimer();
-    heldInboundMessages.length = 0;
+    expireHeldInboundMessages("session replaced before injection");
     activeTools.clear();
     startNamePoll();
     const startupGeneration = runtimeGeneration;
@@ -1770,8 +1796,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     rejectReplyWaiter(new Error("Session shutting down"));
     replyTracker.reset();
     agentRunning = false;
-    clearHeldInboundTimer();
-    heldInboundMessages.length = 0;
+    expireHeldInboundMessages("session shut down before injection");
     activeTools.clear();
     if (client) {
       await client.disconnect();
@@ -1782,11 +1807,19 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     currentIntercomSessionId = null;
     sessionStartedAt = null;
   });
-  pi.on("turn_end", () => {
+  pi.on("turn_end", (event, ctx) => {
     if (!getLiveContext()) {
       return;
     }
     replyTracker.endTurn();
+    // Aborted/error turns cannot consume a steer; leave their peers for the idle trigger.
+    if (config.busyDelivery === "human-first" && ctx.hasUI && event.message.role === "assistant"
+      && event.message.stopReason !== "aborted" && event.message.stopReason !== "error"
+      && heldInboundMessages.length > 0 && agentRunning
+      && !ctx.isIdle() && !ctx.hasPendingMessages() && getLiveContext(ctx)) {
+      sendIncomingBrokerMessage(heldInboundMessages.shift()!, "steer", runtimeGeneration);
+      if (heldInboundMessages.length === 0) clearHeldInboundTimer();
+    }
   });
   pi.on("agent_start", () => {
     if (!getLiveContext()) {

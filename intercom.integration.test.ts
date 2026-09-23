@@ -2303,8 +2303,8 @@ for (const outcome of ["success", "failure", "abort", "cancel"]) {
       assert.equal((await planner.send(target.id, { messageId: `${outcome}-2`, text: "Second held" })).delivered, true);
       await waitForCondition(() => receipts.get(`${outcome}-2`)?.includes("acknowledged") === true, "second receipt");
       assert.equal(harness.sentMessages.length, 0);
-      assert.deepEqual(receipts.get(`${outcome}-1`), ["receiver_received", "acknowledged"]);
-      assert.deepEqual(receipts.get(`${outcome}-2`), ["receiver_received", "acknowledged"]);
+      assert.deepEqual(receipts.get(`${outcome}-1`), ["receiver_received", "acknowledged", "queued"]);
+      assert.deepEqual(receipts.get(`${outcome}-2`), ["receiver_received", "acknowledged", "queued"]);
       // No lifecycle event is needed: Pi becomes idle after success, failure, abort or cancellation.
       idle = true;
       await waitForCondition(() => harness.sentMessages.length === 2, "two injected messages");
@@ -2312,8 +2312,8 @@ for (const outcome of ["success", "failure", "abort", "cancel"]) {
       assert.match(harness.sentMessages[0]?.message.content ?? "", /First held/);
       assert.match(harness.sentMessages[1]?.message.content ?? "", /Second held/);
       assert.deepEqual(harness.sentMessages.map(({ options }) => options), [{ triggerTurn: true }, { triggerTurn: true }]);
-      assert.deepEqual(receipts.get(`${outcome}-1`), ["receiver_received", "acknowledged", "injected"]);
-      assert.deepEqual(receipts.get(`${outcome}-2`), ["receiver_received", "acknowledged", "injected"]);
+      assert.deepEqual(receipts.get(`${outcome}-1`), ["receiver_received", "acknowledged", "queued", "injected"]);
+      assert.deepEqual(receipts.get(`${outcome}-2`), ["receiver_received", "acknowledged", "queued", "injected"]);
       unsubscribe();
     } finally {
       await harness.emitLifecycle("session_shutdown");
@@ -2327,18 +2327,53 @@ test("shutdown discards inbound messages held during compaction", { concurrency:
   const { planner, cleanup } = await setupClients();
   let idle = false;
   const harness = createExtensionHarness("compact-shutdown", { hasUI: true, isIdle: () => idle });
+  const receipts: string[] = [];
+  const unsubscribe = planner.onMessageReceipt((_from, receipt) => {
+    if (receipt.messageId === "compact-shutdown-message") receipts.push(receipt.status);
+  });
   try {
     piIntercomExtension(harness.pi as never);
     await harness.emitLifecycle("session_start");
     const target = await waitForSessionByName(planner, "compact-shutdown");
     assert.equal((await planner.send(target.id, { messageId: "compact-shutdown-message", text: "Held" })).delivered, true);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitForCondition(() => receipts.includes("queued"), "compaction queued receipt");
     assert.equal(harness.sentMessages.length, 0);
     await harness.emitLifecycle("session_shutdown");
+    await waitForCondition(() => receipts.includes("expired"), "shutdown expired receipt");
     idle = true;
     await new Promise((resolve) => setTimeout(resolve, 150));
     assert.equal(harness.sentMessages.length, 0);
+    assert.deepEqual(receipts, ["receiver_received", "acknowledged", "queued", "expired"]);
   } finally {
+    unsubscribe();
+    await cleanup();
+  }
+});
+
+test("cancelling a compaction-held message drops it before injection", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+  let idle = false;
+  const harness = createExtensionHarness("compact-cancel", { hasUI: true, isIdle: () => idle });
+  const receipts: string[] = [];
+  const unsubscribe = planner.onMessageReceipt((_from, receipt) => {
+    if (receipt.messageId === "compact-cancel-message") receipts.push(receipt.status);
+  });
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const target = await waitForSessionByName(planner, "compact-cancel");
+    assert.equal((await planner.send(target.id, { messageId: "compact-cancel-message", text: "Held" })).delivered, true);
+    await waitForCondition(() => receipts.includes("queued"), "compaction queued receipt");
+    assert.equal((await planner.cancelMessage("compact-cancel-message")).delivered, true);
+    await waitForCondition(() => receipts.includes("cancelled"), "compaction cancelled receipt");
+    idle = true;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(harness.sentMessages.length, 0);
+    assert.deepEqual(receipts, ["receiver_received", "acknowledged", "queued", "cancelled"]);
+  } finally {
+    unsubscribe();
+    await harness.emitLifecycle("session_shutdown");
     await cleanup();
   }
 });
@@ -2383,6 +2418,30 @@ test("held inbound messages steer when an agent run is busy after compaction", {
     await harness.emitLifecycle("session_shutdown");
     await cleanup();
   }
+});
+
+test("human-first leaves non-UI sessions on the busy auto-reply path after compaction", { concurrency: false }, async () => {
+  await withIntercomConfig({ busyDelivery: "human-first" }, async () => {
+    const { default: piIntercomExtension } = await import("./index.ts");
+    const { planner, cleanup } = await setupClients();
+    const harness = createExtensionHarness("human-first-pipe", { hasUI: false, isIdle: () => false });
+    try {
+      piIntercomExtension(harness.pi as never);
+      await harness.emitLifecycle("session_start");
+      const target = await waitForSessionByName(planner, "human-first-pipe");
+      const askId = "human-first-pipe-ask";
+      const replyPromise = waitForReply(planner, askId, 1000);
+      assert.equal((await planner.send(target.id, { messageId: askId, text: "Still there?", expectsReply: true })).delivered, true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await harness.emitLifecycle("agent_start");
+      const reply = await replyPromise;
+      assert.match(reply.message.content.text, /non-interactive|cannot respond/i);
+      assert.equal(harness.sentMessages.length, 0);
+    } finally {
+      await harness.emitLifecycle("session_shutdown");
+      await cleanup();
+    }
+  });
 });
 
 test("explicit cancel acknowledges that a steered inbound message may already be processed", { concurrency: false }, async () => {

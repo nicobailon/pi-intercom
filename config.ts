@@ -24,6 +24,7 @@ export function getIntercomScopeId(env: NodeJS.ProcessEnv = process.env): string
 }
 
 export type InboundTriggerPolicy = "always" | "replies" | "never";
+export type BusyDeliveryPolicy = "steer" | "human-first";
 
 export interface IntercomConfig {
   /** Broker command used to spawn the broker process (e.g. "npx" or "bun") */
@@ -37,6 +38,9 @@ export interface IntercomConfig {
 
   /** Controls whether inbound broker messages may automatically trigger a model turn */
   inboundTrigger: InboundTriggerPolicy;
+
+  /** Delivery priority for peers arriving during interactive agent runs */
+  busyDelivery: BusyDeliveryPolicy;
 
   /** Optional custom status suffix shown after automatic lifecycle status */
   status?: string;
@@ -60,6 +64,7 @@ const defaults: IntercomConfig = {
   brokerArgs: ["--no-install", "tsx"],
   confirmSend: false,
   inboundTrigger: "always",
+  busyDelivery: "steer",
   enabled: true,
   replyHint: true,
 };
@@ -128,6 +133,13 @@ export function loadConfig(): IntercomConfig {
         throw new Error(`"inboundTrigger" must be "always", "replies", or "never"`);
       }
       config.inboundTrigger = parsedConfig.inboundTrigger;
+    }
+
+    if (Object.hasOwn(parsedConfig, "busyDelivery")) {
+      if (parsedConfig.busyDelivery !== "steer" && parsedConfig.busyDelivery !== "human-first") {
+        throw new Error(`"busyDelivery" must be "steer" or "human-first"`);
+      }
+      config.busyDelivery = parsedConfig.busyDelivery;
     }
 
     if (Object.hasOwn(parsedConfig, "replyHint")) {

@@ -5,9 +5,11 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 ## [Unreleased]
 
 ### Fixed
+- Held messages now report queued and terminal drop receipts when cancelled, superseded, answered, or discarded at shutdown/replacement.
 - Messages that arrive while a session is compacting are now delivered after compaction instead of being lost. Thanks to [@alexjc](https://github.com/alexjc) for #133.
 
 ### Added
+- Opt-in `busyDelivery: "human-first"` holds busy interactive peer messages behind pending human input, releasing one per available turn boundary. Default steering remains unchanged. Thanks to [@SiebertLanhove](https://github.com/SiebertLanhove) for #128.
 - Extensions can claim a session's intercom ID per session through the new `intercom:session-identity` event. This lets pi-subagents route to a child by a fixed ID while the child's session name stays readable. Thanks to [@Q-xuan](https://github.com/Q-xuan) for raising the readable child name problem in nicobailon/pi-subagents#2432.
 - `list` now shows the current Herdr workspace, tab, and pane for Herdr-hosted sessions, read from one fresh `herdr api snapshot` per list. Rosters without Herdr-hosted sessions don't call Herdr and look the same as before. Thanks to [@odfalik](https://github.com/odfalik) for #129.
 - Added `cli.ts`, a scripting client (`list` / `send` / `ask`) for the local broker, including cross-machine coordination over ssh. Thanks to [@pinion05](https://github.com/pinion05) for #131 and issue #130.

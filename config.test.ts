@@ -41,6 +41,7 @@ test("loadConfig defaults inboundTrigger to current auto-trigger behavior", asyn
   try {
     await withAgentDir(root, () => {
       assert.equal(loadConfig().inboundTrigger, "always");
+      assert.equal(loadConfig().busyDelivery, "steer");
     });
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -51,9 +52,10 @@ test("loadConfig accepts inboundTrigger replies policy", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-intercom-config-"));
   try {
     mkdirSync(join(root, "intercom"), { recursive: true });
-    writeFileSync(join(root, "intercom", "config.json"), JSON.stringify({ inboundTrigger: "replies" }));
+    writeFileSync(join(root, "intercom", "config.json"), JSON.stringify({ inboundTrigger: "replies", busyDelivery: "human-first" }));
     await withAgentDir(root, () => {
       assert.equal(loadConfig().inboundTrigger, "replies");
+      assert.equal(loadConfig().busyDelivery, "human-first");
     });
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -97,6 +99,19 @@ test("loadConfig rejects invalid inboundTrigger values", async () => {
         () => loadConfig(),
         /Failed to load intercom config.*"inboundTrigger" must be "always", "replies", or "never"/,
       );
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig rejects invalid busyDelivery values", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-intercom-config-"));
+  try {
+    mkdirSync(join(root, "intercom"), { recursive: true });
+    writeFileSync(join(root, "intercom", "config.json"), JSON.stringify({ busyDelivery: "prompt" }));
+    await withAgentDir(root, () => {
+      assert.throws(() => loadConfig(), /"busyDelivery" must be "steer" or "human-first"/);
     });
   } finally {
     rmSync(root, { recursive: true, force: true });
