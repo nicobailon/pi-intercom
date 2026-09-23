@@ -4,6 +4,20 @@ export const INTERCOM_EXTENSION_REGISTER_EVENT = "intercom:extension-register";
 export const INTERCOM_EXTENSION_REGISTRY_READY_EVENT = "intercom:extension-registry-ready";
 export const INTERCOM_OUTBOX_REQUEST_EVENT = "intercom:outbox-request";
 export const INTERCOM_OUTBOX_RESULT_EVENT = "intercom:outbox-result";
+export const INTERCOM_SESSION_IDENTITY_EVENT = "intercom:session-identity";
+
+/**
+ * Emitted on the session's own event bus at session start, before the intercom
+ * ID is chosen. An extension that owns this session's routing address (for
+ * example a subagent launcher) calls `claim` synchronously; the first non-empty
+ * claim becomes this session's intercom ID and wins over `PI_INTERCOM_STABLE_ID`
+ * and `stableId`, which are process- and machine-wide. The session name stays
+ * free for a human-readable label.
+ */
+export interface IntercomSessionIdentityRequestV1 {
+  version: 1;
+  claim(stableId: string): void;
+}
 
 export type IntercomOutboxResultStatus = "sent" | "rejected" | "blocked" | "failed";
 

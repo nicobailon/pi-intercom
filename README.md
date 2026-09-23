@@ -511,6 +511,18 @@ pi.events.emit(INTERCOM_OUTBOX_REQUEST_EVENT, {
 
 `confirmSend` applies to outbox requests. If confirmation is required and no UI is available, the request fails closed with `confirmation_unavailable`. The outbox resolves the target through the current session's scoped intercom client, so extensions cannot choose the sender, scope, or resolved target ID. Duplicate `requestId` values are rejected and do not deliver again. Receiver messages include structured `extension_outbox` provenance in message details; provenance is not prepended to the message body.
 
+### Session identity claim
+
+At session start, pi-intercom emits `intercom:session-identity` on that session's event bus before it picks the session's intercom ID. An extension that owns the session's routing address can call `claim(id)` synchronously. The first non-empty claim becomes that session's intercom ID, and it wins over `PI_INTERCOM_STABLE_ID` and `stableId`. Because the claim is per session, it works for several sessions running in one process, such as in-process subagent children. The session name stays free for a human-readable label.
+
+```typescript
+import { INTERCOM_SESSION_IDENTITY_EVENT, type IntercomSessionIdentityRequestV1 } from "pi-intercom/extension-api.ts";
+
+pi.events.on(INTERCOM_SESSION_IDENTITY_EVENT, (request: IntercomSessionIdentityRequestV1) => {
+  request.claim("subagent-worker-run1-1");
+});
+```
+
 ## How It Works
 
 ```mermaid

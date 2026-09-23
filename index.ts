@@ -16,6 +16,7 @@ import {
   INTERCOM_EXTENSION_REGISTRY_READY_EVENT,
   INTERCOM_OUTBOX_REQUEST_EVENT,
   INTERCOM_OUTBOX_RESULT_EVENT,
+  INTERCOM_SESSION_IDENTITY_EVENT,
   type IntercomExtensionChannel,
   type IntercomExtensionEvent,
   type IntercomExtensionOwner,
@@ -25,6 +26,7 @@ import {
   type IntercomOutboxResultCode,
   type IntercomOutboxResultStatus,
   type IntercomOutboxResultV1,
+  type IntercomSessionIdentityRequestV1,
 } from "./extension-api.ts";
 import { ReplyTracker } from "./reply-tracker.ts";
 import { resolve as resolvePath } from "node:path";
@@ -1570,7 +1572,15 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     runtimeContext = ctx;
     currentSessionId = ctx.sessionManager.getSessionId();
-    currentIntercomSessionId = resolveConfiguredIntercomSessionId(currentSessionId, config);
+    let claimedIntercomSessionId: string | undefined;
+    const identityRequest: IntercomSessionIdentityRequestV1 = {
+      version: 1,
+      claim: (stableId) => {
+        claimedIntercomSessionId ??= (typeof stableId === "string" && stableId.trim()) || undefined;
+      },
+    };
+    pi.events.emit(INTERCOM_SESSION_IDENTITY_EVENT, identityRequest);
+    currentIntercomSessionId = claimedIntercomSessionId ?? resolveConfiguredIntercomSessionId(currentSessionId, config);
     publishIntercomSessionId(currentIntercomSessionId);
     currentModel = ctx.model?.id ?? "unknown";
     sessionStartedAt = Date.now();

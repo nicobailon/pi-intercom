@@ -11,8 +11,10 @@ import {
   INTERCOM_EXTENSION_REGISTER_EVENT,
   INTERCOM_OUTBOX_REQUEST_EVENT,
   INTERCOM_OUTBOX_RESULT_EVENT,
+  INTERCOM_SESSION_IDENTITY_EVENT,
   type IntercomExtensionChannel,
   type IntercomOutboxResultV1,
+  type IntercomSessionIdentityRequestV1,
 } from "./extension-api.ts";
 
 const repoDir = process.cwd();
@@ -1304,6 +1306,32 @@ test("extension can pin a restart-stable intercom session id", { concurrency: fa
     const session = await waitForSessionId(planner, "pinned-worker-session");
     assert.equal(session.name, "pinned-worker");
     assert.equal(process.env.PI_INTERCOM_SESSION_ID, "pinned-worker-session");
+    await harness.emitLifecycle("session_shutdown");
+  } finally {
+    if (previousStableId === undefined) delete process.env.PI_INTERCOM_STABLE_ID;
+    else process.env.PI_INTERCOM_STABLE_ID = previousStableId;
+    if (previousPublishedId === undefined) delete process.env.PI_INTERCOM_SESSION_ID;
+    else process.env.PI_INTERCOM_SESSION_ID = previousPublishedId;
+    await cleanup();
+  }
+});
+
+test("a session identity claim sets the intercom id and keeps the readable session name", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const previousStableId = process.env.PI_INTERCOM_STABLE_ID;
+  const previousPublishedId = process.env.PI_INTERCOM_SESSION_ID;
+  process.env.PI_INTERCOM_STABLE_ID = "process-wide-id";
+  const harness = createExtensionHarness("worker: fix auth refresh", { sessionId: "transient-pi-session" });
+  harness.pi.events.on(INTERCOM_SESSION_IDENTITY_EVENT, (request) => {
+    (request as IntercomSessionIdentityRequestV1).claim(" subagent-worker-run1-1 ");
+  });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const session = await waitForSessionId(planner, "subagent-worker-run1-1");
+    assert.equal(session.name, "worker: fix auth refresh");
     await harness.emitLifecycle("session_shutdown");
   } finally {
     if (previousStableId === undefined) delete process.env.PI_INTERCOM_STABLE_ID;

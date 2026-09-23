@@ -4,6 +4,9 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+### Added
+- Extensions can claim a session's intercom ID per session through the new `intercom:session-identity` event. This lets pi-subagents route to a child by a fixed ID while the child's session name stays readable. Thanks to [@Q-xuan](https://github.com/Q-xuan) for raising the readable child name problem in nicobailon/pi-subagents#2432.
+
 ## [0.13.0] - 2026-09-02
 
 ### Highlights
