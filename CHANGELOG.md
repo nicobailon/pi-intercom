@@ -4,6 +4,9 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+### Fixed
+- Messages that arrive while a session is compacting are now delivered after compaction instead of being lost. Thanks to [@alexjc](https://github.com/alexjc) for #133.
+
 ### Added
 - Extensions can claim a session's intercom ID per session through the new `intercom:session-identity` event. This lets pi-subagents route to a child by a fixed ID while the child's session name stays readable. Thanks to [@Q-xuan](https://github.com/Q-xuan) for raising the readable child name problem in nicobailon/pi-subagents#2432.
 - `list` now shows the current Herdr workspace, tab, and pane for Herdr-hosted sessions, read from one fresh `herdr api snapshot` per list. Rosters without Herdr-hosted sessions don't call Herdr and look the same as before. Thanks to [@odfalik](https://github.com/odfalik) for #129.

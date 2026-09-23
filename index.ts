@@ -625,6 +625,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   let runtimeStarted = false;
   let runtimeGeneration = 0;
   let agentRunning = false;
+  const heldInboundMessages: InboundMessageEntry[] = [];
+  let heldInboundTimer: NodeJS.Timeout | null = null;
   const activeTools = new Map<string, string>();
   const replyTracker = new ReplyTracker();
 
@@ -1202,7 +1204,6 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       return;
     }
     const injectedMessage = { ...entry.message, injectedAt: Date.now() };
-    emitMessageReceipt(injectedMessage.id, "injected");
     const replyCommand = delivery === "steer" && entry.replyCommand && entry.message.expectsReply
       ? `intercom({ action: "reply", replyTo: ${JSON.stringify(entry.message.id)}, message: "..." })`
       : entry.replyCommand;
@@ -1222,9 +1223,54 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         ? { triggerTurn: true }
         : { deliverAs: "steer" }
     );
+    emitMessageReceipt(injectedMessage.id, "injected");
   }
   function sendIncomingBrokerMessage(entry: InboundMessageEntry, delivery: "trigger" | "steer", generation = runtimeGeneration): void {
     sendIncomingMessage(entry, delivery, generation);
+  }
+  function deliverIncomingBrokerMessage(entry: InboundMessageEntry, ctx: ExtensionContext, generation: number): void {
+    const activeContext = getLiveContext(ctx, generation);
+    if (!activeContext) return;
+    if (!activeContext.isIdle()) {
+      if (!activeContext.hasUI) {
+        const activeClient = client;
+        if (!entry.message.replyTo && activeClient?.isConnected()) {
+          void (async () => {
+            try {
+              const result = await activeClient.send(entry.from.id, {
+                text: "This agent is running in non-interactive mode and cannot respond to intercom messages while it is working. It will continue its current task and exit when done.",
+                replyTo: entry.message.id,
+              });
+              if (result.delivered && getLiveContext(ctx, generation)) dismissIncomingAsk(entry.message.id);
+            } catch {
+              // Best-effort reply; keep the busy non-interactive session running either way.
+            }
+          })();
+        }
+        return;
+      }
+      sendIncomingBrokerMessage(entry, "steer", generation);
+      return;
+    }
+    sendIncomingBrokerMessage(entry, "trigger", generation);
+  }
+  function flushHeldInboundMessages(ctx: ExtensionContext, generation: number): void {
+    if (!getLiveContext(ctx, generation)) return;
+    while (heldInboundMessages.length > 0 && (ctx.isIdle() || agentRunning) && getLiveContext(ctx, generation)) {
+      deliverIncomingBrokerMessage(heldInboundMessages.shift()!, ctx, generation);
+    }
+    if (heldInboundMessages.length === 0) clearHeldInboundTimer();
+  }
+  function clearHeldInboundTimer(): void {
+    if (heldInboundTimer) clearInterval(heldInboundTimer);
+    heldInboundTimer = null;
+  }
+  function holdIncomingBrokerMessage(entry: InboundMessageEntry, ctx: ExtensionContext, generation: number): void {
+    heldInboundMessages.push(entry);
+    if (!heldInboundTimer) {
+      heldInboundTimer = setInterval(() => flushHeldInboundMessages(ctx, generation), 100);
+      heldInboundTimer.unref();
+    }
   }
   function handleIncomingMessage(ctx: ExtensionContext, from: SessionInfo, message: Message): void {
     const messageGeneration = runtimeGeneration;
@@ -1260,36 +1306,12 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     replyTracker.recordIncomingMessage(from, receivedMessage, receiverReceivedAt);
     emitMessageReceipt(receivedMessage.id, "acknowledged", "accepted by receiver");
     const entry = { from, message: receivedMessage, replyCommand, bodyText };
-    void (async () => {
-      const activeContext = getLiveContext(liveContext, messageGeneration);
-      if (!activeContext) {
-        return;
-      }
-      if (!activeContext.isIdle()) {
-        if (!activeContext.hasUI) {
-          const activeClient = client;
-          if (!message.replyTo && activeClient?.isConnected()) {
-            try {
-              const result = await activeClient.send(from.id, {
-                text: "This agent is running in non-interactive mode and cannot respond to intercom messages while it is working. It will continue its current task and exit when done.",
-                replyTo: message.id,
-              });
-              if (result.delivered && getLiveContext(liveContext, messageGeneration)) {
-                dismissIncomingAsk(message.id);
-              }
-            } catch {
-              // Best-effort reply; keep the busy non-interactive session running either way.
-            }
-          }
-          return;
-        }
-        sendIncomingBrokerMessage(entry, "steer");
-        return;
-      }
-      if (getLiveContext(liveContext, messageGeneration)) {
-        sendIncomingBrokerMessage(entry, "trigger", messageGeneration);
-      }
-    })();
+    // Busy without an agent run cannot steer; manual compaction can discard an appended custom entry.
+    if (heldInboundMessages.length > 0 || (!liveContext.isIdle() && !agentRunning)) {
+      holdIncomingBrokerMessage(entry, liveContext, messageGeneration);
+    } else {
+      deliverIncomingBrokerMessage(entry, liveContext, messageGeneration);
+    }
   }
   function attachClientHandlers(nextClient: IntercomClient): void {
     nextClient.onBrokerMessage((message: BrokerMessage) => {
@@ -1609,6 +1631,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     lastPresenceName = initialPresenceIdentity.name;
     lastPresenceRuntimeFallbackAlias = initialPresenceIdentity.runtimeFallbackAlias;
     agentRunning = false;
+    clearHeldInboundTimer();
+    heldInboundMessages.length = 0;
     activeTools.clear();
     startNamePoll();
     const startupGeneration = runtimeGeneration;
@@ -1746,6 +1770,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     rejectReplyWaiter(new Error("Session shutting down"));
     replyTracker.reset();
     agentRunning = false;
+    clearHeldInboundTimer();
+    heldInboundMessages.length = 0;
     activeTools.clear();
     if (client) {
       await client.disconnect();
@@ -1767,6 +1793,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       return;
     }
     agentRunning = true;
+    if (runtimeContext) flushHeldInboundMessages(runtimeContext, runtimeGeneration);
     activeTools.clear();
     syncPresenceStatus();
   });
