@@ -164,10 +164,11 @@ test("runCli list --json emits machine-readable roster", async () => {
   const out = new MemorySink();
   const code = await runCli(["list", "--json"], { client, out, err: new MemorySink() });
   assert.equal(code, 0);
-  const rows = JSON.parse(out.text()) as Array<{ name: string; id: string }>;
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].name, "(unnamed)");
-  assert.equal(rows[0].id, "0123456789abcdef");
+  const result = JSON.parse(out.text()) as { ok: boolean; sessions: Array<{ name: string; id: string }> };
+  assert.equal(result.ok, true);
+  assert.equal(result.sessions.length, 1);
+  assert.equal(result.sessions[0].name, "(unnamed)");
+  assert.equal(result.sessions[0].id, "0123456789abcdef");
 });
 
 test("runCli send reports delivery", async () => {

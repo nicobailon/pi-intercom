@@ -542,7 +542,7 @@ npx --yes tsx ~/.pi/agent/npm/node_modules/pi-intercom/cli.ts ask --to planner -
 npx --yes tsx ~/.pi/agent/npm/node_modules/pi-intercom/cli.ts list --json
 ```
 
-Flags: `--to <name|session-id>`, `--text`, `--name <session-name>` (roster name, default `pi-intercom-cli`), `--timeout-ms` (ask only, default 120000), `--json`. Exit codes: `0` success, `1` usage/connection/delivery failure, `2` ask timeout. With `--json`, failures print one object containing `ok: false` and `error` (plus `reason: "timeout"` on timeout).
+Flags: `--to <name|session-id>`, `--text`, `--name <session-name>` (roster name, default `pi-intercom-cli`), `--timeout-ms` (ask only, default 120000), `--json`. Exit codes: `0` success, `1` usage/connection/delivery failure, `2` ask timeout. With `--json`, every command prints one object with an `ok` field: `list` returns `{ ok: true, sessions: [...] }`, and failures return `ok: false` with `error` (plus `reason: "timeout"` on timeout).
 
 ### Cross-machine coordination over ssh
 

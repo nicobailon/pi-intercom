@@ -161,7 +161,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
     if (opts.command === "list") {
       const sessions = await deps.client.listSessions();
       if (opts.json) {
-        out.write(`${JSON.stringify(sessions.map(sessionRow), null, 2)}\n`);
+        out.write(`${JSON.stringify({ ok: true, sessions: sessions.map(sessionRow) }, null, 2)}\n`);
       } else {
         for (const session of sessions) {
           const row = sessionRow(session);
