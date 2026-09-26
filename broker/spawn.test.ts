@@ -4,6 +4,7 @@ import path from "node:path";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { getIntercomDirPath } from "./paths.ts";
 import {
   getBrokerLaunchSpec,
   getBrokerSpawnOptions,
@@ -192,32 +193,28 @@ test("getBrokerLaunchSpec uses custom broker command on non-Windows", () => {
   assert.equal(spec.captureStartupStderr, false);
 });
 
-test("getBrokerSpawnOptions hides the broker console window on Windows", () => {
-  const options = getBrokerSpawnOptions("C:/repo");
+test("getBrokerSpawnOptions uses the runtime directory instead of the package directory", () => {
+  const options = getBrokerSpawnOptions();
   assert.equal(options.windowsHide, true);
   assert.equal(options.detached, true);
   assert.deepEqual(options.stdio, ["ignore", "ignore", "pipe"]);
-  assert.equal(options.cwd, "C:/repo");
+  assert.equal(options.cwd, getIntercomDirPath());
 });
 
-test("getBrokerSpawnOptions keeps portable defaults on non-Windows platforms", () => {
-  const options = getBrokerSpawnOptions("/repo");
-  assert.equal(options.windowsHide, true);
-  assert.equal(options.detached, true);
-  assert.deepEqual(options.stdio, ["ignore", "ignore", "pipe"]);
-  assert.equal(options.cwd, "/repo");
-});
-
-test("getBrokerSpawnOptions can keep custom broker stderr ignored", () => {
-  const options = getBrokerSpawnOptions("/repo", process.env, false);
+test("getBrokerSpawnOptions honors a custom agent directory with stderr ignored", () => {
+  const agentDir = path.join(tmpdir(), "custom-agent");
+  const options = getBrokerSpawnOptions({ PI_CODING_AGENT_DIR: agentDir }, false);
   assert.equal(options.detached, true);
   assert.equal(options.stdio, "ignore");
-  assert.equal(options.cwd, "/repo");
+  assert.equal(options.cwd, path.join(agentDir, "intercom"));
+  assert.equal(options.env.PI_CODING_AGENT_DIR, agentDir);
 });
 
-test("getBrokerSpawnOptions passes an absolute PI_CODING_AGENT_DIR to the broker", () => {
-  const options = getBrokerSpawnOptions("/repo", { PI_CODING_AGENT_DIR: "relative-agent" });
-  assert.equal(options.env.PI_CODING_AGENT_DIR, path.resolve("relative-agent"));
+test("getBrokerSpawnOptions resolves relative PI_CODING_AGENT_DIR before changing cwd", () => {
+  const options = getBrokerSpawnOptions({ PI_CODING_AGENT_DIR: "relative-agent" });
+  const agentDir = path.resolve("relative-agent");
+  assert.equal(options.cwd, path.join(agentDir, "intercom"));
+  assert.equal(options.env.PI_CODING_AGENT_DIR, agentDir);
 });
 
 test("spawnBrokerIfNeeded includes stderr from default broker startup failures", async () => {
