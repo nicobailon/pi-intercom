@@ -447,6 +447,8 @@ Set `PI_INTERCOM_SCOPE_ID` before starting Pi to opt a session into an opaque br
 
 By default, runtime state and config live under `~/.pi/agent/intercom`. If Pi is launched with `PI_CODING_AGENT_DIR`, pi-intercom uses `$PI_CODING_AGENT_DIR/intercom` instead, including `config.json`, broker PID/lock files, sockets, and launcher state.
 
+The broker also runs from this runtime directory so its working directory does not lock the installed package against updates on Windows. Custom broker commands can use executables on `PATH` or absolute paths; relative file paths in commands and arguments resolve from the runtime directory.
+
 ## Extension channels
 
 Other Pi extensions can use intercom's broker for bounded, non-conversational coordination. Extension-channel traffic never calls `pi.sendMessage()`, never enters a session transcript, and never starts an agent turn.

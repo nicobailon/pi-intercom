@@ -172,7 +172,6 @@ export function getBrokerLaunchSpec(
 }
 
 export function getBrokerSpawnOptions(
-  extensionDir: string = EXTENSION_DIR,
   env: NodeJS.ProcessEnv = process.env,
   captureStderr = true,
 ): {
@@ -182,11 +181,13 @@ export function getBrokerSpawnOptions(
   env: NodeJS.ProcessEnv;
   windowsHide: true;
 } {
+  const agentDir = getAgentDirPath(env);
   return {
     detached: true,
     stdio: captureStderr ? ["ignore", "ignore", "pipe"] : "ignore",
-    cwd: extensionDir,
-    env: { ...env, PI_CODING_AGENT_DIR: getAgentDirPath(env), NODE_NO_WARNINGS: "1" },
+    // Windows locks a process's cwd against renames, so keep it outside the package.
+    cwd: getIntercomDirPath(agentDir),
+    env: { ...env, PI_CODING_AGENT_DIR: agentDir, NODE_NO_WARNINGS: "1" },
     windowsHide: true,
   };
 }
@@ -218,7 +219,7 @@ export async function spawnBrokerIfNeeded(brokerCommand: string, brokerArgs: str
     if (launch.kind === "windows-launcher") {
       writeWindowsHiddenLauncher(launch.launcherCommandLine, launch.launcherPath);
     }
-    const child = spawn(launch.command, launch.args, getBrokerSpawnOptions(EXTENSION_DIR, process.env, launch.captureStartupStderr));
+    const child = spawn(launch.command, launch.args, getBrokerSpawnOptions(process.env, launch.captureStartupStderr));
     let brokerStderr = "";
     const rememberBrokerStderr = (chunk: Buffer | string) => {
       brokerStderr = `${brokerStderr}${chunk.toString()}`.slice(-BROKER_STARTUP_STDERR_LIMIT);
