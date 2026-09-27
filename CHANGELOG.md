@@ -4,6 +4,9 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+### Fixed
+- Run the broker from its runtime directory so open Pi sessions no longer prevent package updates on Windows. Thanks to [@XWIlluDelu](https://github.com/XWIlluDelu) for #139.
+
 ## [0.14.0] - 2026-09-23
 
 ### Highlights
