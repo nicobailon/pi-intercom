@@ -2355,7 +2355,8 @@ for (const outcome of ["success", "failure", "abort", "cancel"]) {
       });
       assert.equal((await planner.send(target.id, { messageId: `${outcome}-1`, text: "First held" })).delivered, true);
       assert.equal((await planner.send(target.id, { messageId: `${outcome}-2`, text: "Second held" })).delivered, true);
-      await waitForCondition(() => receipts.get(`${outcome}-2`)?.includes("acknowledged") === true, "second receipt");
+      await waitForCondition(() => receipts.get(`${outcome}-1`)?.includes("queued") === true, "first queued receipt");
+      await waitForCondition(() => receipts.get(`${outcome}-2`)?.includes("queued") === true, "second queued receipt");
       assert.equal(harness.sentMessages.length, 0);
       assert.deepEqual(receipts.get(`${outcome}-1`), ["receiver_received", "acknowledged", "queued"]);
       assert.deepEqual(receipts.get(`${outcome}-2`), ["receiver_received", "acknowledged", "queued"]);
@@ -2366,6 +2367,8 @@ for (const outcome of ["success", "failure", "abort", "cancel"]) {
       assert.match(harness.sentMessages[0]?.message.content ?? "", /First held/);
       assert.match(harness.sentMessages[1]?.message.content ?? "", /Second held/);
       assert.deepEqual(harness.sentMessages.map(({ options }) => options), [{ triggerTurn: true }, { triggerTurn: true }]);
+      await waitForCondition(() => receipts.get(`${outcome}-1`)?.includes("injected") === true, "first injected receipt");
+      await waitForCondition(() => receipts.get(`${outcome}-2`)?.includes("injected") === true, "second injected receipt");
       assert.deepEqual(receipts.get(`${outcome}-1`), ["receiver_received", "acknowledged", "queued", "injected"]);
       assert.deepEqual(receipts.get(`${outcome}-2`), ["receiver_received", "acknowledged", "queued", "injected"]);
       unsubscribe();
