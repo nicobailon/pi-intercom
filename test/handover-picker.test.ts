@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { HandoverPicker, type HandoverPickerResult, type RemoteSessionLister } from "../ui/handover-picker.ts";
+import { SessionListOverlay, type SessionListSelection } from "../ui/session-list.ts";
 import type { SessionInfo } from "../types.ts";
 
 const theme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
@@ -62,6 +63,20 @@ test("handover picker returns the next task typed in the task field", () => {
   assert.deepEqual(results, [{ target: { kind: "local", session: roster[2] }, goal: "port the fix" }]);
 });
 
+test("handover picker accepts pasted and Kitty-encoded next-task text", () => {
+  const { press, results } = open();
+  press("tui.input.tab", "\x1b[200~port the fix\x1b[201~", "\x1b[32u", "\x1b[97u", "tui.select.confirm");
+  assert.equal(results[0]?.goal, "port the fix a");
+});
+
+test("session list starts a handover on plain or Kitty-encoded h and messages on Enter", () => {
+  for (const [key, action] of [["h", "handover"], ["\x1b[104u", "handover"], ["\r", "message"]] as const) {
+    const selections: Array<SessionListSelection | undefined> = [];
+    new SessionListOverlay(theme as any, keybindings as any, self, [roster[3]!], (selection) => selections.push(selection)).handleInput(key);
+    assert.deepEqual(selections, [{ session: roster[3], action }], key);
+  }
+});
+
 test("handover picker fetches other machines on demand and targets a remote session by id", async () => {
   const sessionId = "00000000-0000-4000-8000-000000000001";
   const lister: RemoteSessionLister = {
@@ -108,8 +123,11 @@ test("handover picker keeps the highlighted remote session when an earlier machi
 });
 
 test("handover picker renders lines at the declared overlay width", () => {
-  const { picker } = open();
-  for (const width of [1, 2, 20, 50, 88, 120]) {
-    for (const line of picker.render(width)) assert.equal(visibleWidth(line), Math.min(width, 88));
+  const { picker, press } = open();
+  for (const focus of ["list", "task"]) {
+    for (const width of [1, 2, 20, 50, 88, 120]) {
+      for (const line of picker.render(width)) assert.equal(visibleWidth(line), Math.min(width, 88), `${focus} ${width}`);
+    }
+    press("tui.input.tab", "a long next task that does not fit in a narrow overlay");
   }
 });

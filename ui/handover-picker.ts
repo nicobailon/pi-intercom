@@ -1,5 +1,5 @@
 import type { Component, TUI } from "@earendil-works/pi-tui";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Input, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import type { RemoteAgent, SavedMachine } from "../cross-machine-discovery.ts";
 import type { SessionInfo } from "../types.ts";
@@ -69,7 +69,7 @@ export class HandoverPicker implements Component {
   private closed = false;
   private selectedIndex = 0;
   private focus: "list" | "task" = "list";
-  private task = "";
+  private readonly taskInput = new Input();
 
   constructor(
     tui: TUI,
@@ -139,17 +139,8 @@ export class HandoverPicker implements Component {
       return;
     }
     if (this.focus !== "task") return;
-    if (this.keybindings.matches(data, "tui.editor.deleteCharBackward")) {
-      this.task = [...this.task].slice(0, -1).join("");
-      this.tui.requestRender();
-      return;
-    }
-    if (data.startsWith("\x1b")) return;
-    const printable = [...data].filter((char) => char >= " ").join("");
-    if (printable) {
-      this.task += printable;
-      this.tui.requestRender();
-    }
+    this.taskInput.handleInput(data);
+    this.tui.requestRender();
   }
 
   private activate(item: Item): void {
@@ -157,7 +148,7 @@ export class HandoverPicker implements Component {
       void this.fetchRemote();
       return;
     }
-    const goal = this.task.trim() || undefined;
+    const goal = this.taskInput.getValue().trim() || undefined;
     const target: HandoverPickerTarget = item.kind === "remote"
       ? { kind: "remote", target: `${item.agent.sessionId ?? item.agent.name}@${item.machine.label}` }
       : item;
@@ -303,10 +294,9 @@ export class HandoverPicker implements Component {
     }
 
     const taskLabel = " Next task (optional): ";
-    const taskRoom = Math.max(1, contentWidth - visibleWidth(taskLabel) - 1);
-    const taskChars = [...this.task];
-    const taskText = taskChars.length > taskRoom ? `…${taskChars.slice(-(taskRoom - 1)).join("")}` : this.task;
-    const taskLine = this.focus === "task" ? `${taskLabel}${taskText}█` : dim(`${taskLabel}${taskText}`);
+    const taskLine = this.focus === "task"
+      ? `${taskLabel}${this.taskInput.render(Math.max(1, contentWidth - visibleWidth(taskLabel)))[0] ?? ""}`
+      : dim(`${taskLabel}${this.taskInput.getValue()}`);
 
     const keys = (id: string) => this.keybindings.getKeys(id as Parameters<KeybindingsManager["getKeys"]>[0]).join("/");
     const footer = `${keys("tui.select.confirm")}: Hand over • ${keys("tui.input.tab")}: ${this.focus === "list" ? "Next task" : "List"} • ${keys("tui.select.cancel")}: Close`;

@@ -1,5 +1,5 @@
 import type { Component } from "@earendil-works/pi-tui";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import type { SessionInfo } from "../types.ts";
 
@@ -104,7 +104,7 @@ export class SessionListOverlay implements Component {
     if (!session) return;
     if (this.keybindings.matches(data, "tui.select.confirm")) {
       this.done({ session, action: "message" });
-    } else if (data === "h") {
+    } else if (matchesKey(data, "h")) {
       this.done({ session, action: "handover" });
     }
   }
