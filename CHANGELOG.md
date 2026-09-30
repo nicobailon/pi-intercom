@@ -4,6 +4,12 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+### Highlights
+- Hand your work to another session with `/handover`. The current model writes up what this session learned, decided, and changed, and the receiving session starts on the next task without rediscovering any of it.
+- Hand over to Pi sessions on your other computers. The `/handover` picker lists this machine's sessions and, when you ask, the Pi sessions on your saved Herdr machines, then sends the handover over SSH.
+- Press `h` in the Alt+M session list to hand over to the highlighted session.
+- The Windows broker starts without the VBScript helper that endpoint security tools flagged.
+
 ### Added
 - Hand your current session's context over to another session with `/handover <target> [next task]` or the intercom tool's `handover` action. The current model summarizes what the session learned, decided, and changed, and the receiving session starts on the next task. `/handover` lets you edit the summary before it is sent, a project path opens a Herdr pane when no session is running there, and `name@machine` targets on saved Herdr machines are supported.
 - Run `/handover` with no arguments to pick the receiving session from a list of this machine's sessions, start a new session in a project, or fetch Pi sessions from your other Herdr machines. Press `h` in the Alt+M session list to hand over to the highlighted session.
