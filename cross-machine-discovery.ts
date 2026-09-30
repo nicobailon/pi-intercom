@@ -92,8 +92,13 @@ export async function listSavedMachines(deps: DiscoveryDeps): Promise<SavedMachi
 export async function listMachineAgents(machine: SavedMachine, deps: DiscoveryDeps): Promise<RemoteAgent[]> {
   const result = await deps.run(deps.herdrBin, ["--machine", machine.label, "agent", "list"], undefined, deps.discoveryTimeoutMs ?? DISCOVERY_TIMEOUT_MS);
   if (result.code !== 0) {
-    const detail = result.timedOut ? "timed out" : result.stderr.trim() || `exit ${result.code}`;
-    throw new Error(`Saved Herdr machine "${machine.label}" is unreachable: ${detail}.`);
+    // Herdr prints Rust debug errors: Error: Custom { kind: …, error: "machine 'x': reason" }.
+    const herdrError = result.stderr.match(/error: "((?:[^"\\]|\\.)*)"/)?.[1]?.replace(/\\(.)/g, "$1").replace(/^machine '[^']*': /, "");
+    const detail = result.timedOut ? "timed out" : herdrError ?? (result.stderr.trim() || `exit ${result.code}`);
+    const hint = /does not support machine API forwarding/.test(detail)
+      ? ` Its running Herdr server is too old; update Herdr there, then run \`herdr --remote ${machine.target}\` in a terminal to replace the server.`
+      : "";
+    throw new Error(`Saved Herdr machine "${machine.label}" is unreachable: ${detail.replace(/\.$/, "")}.${hint}`);
   }
   try {
     return parseRemoteAgents(result.stdout);

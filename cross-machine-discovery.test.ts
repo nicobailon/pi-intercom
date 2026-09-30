@@ -58,6 +58,20 @@ test("parses current Herdr machine and agent list schemas", () => {
   assert.deepEqual(parseRemoteAgents(agents), [{ name: "reviewer", sessionId: fakeSessionId }]);
 });
 
+test("listMachineAgents turns Herdr's debug error into a readable reason with an update hint", async () => {
+  const stderr = `Error: Custom { kind: Unsupported, error: "machine 'workmac': remote Herdr does not support machine API forwarding; update Herdr on this machine" }\n`;
+  const run: CommandRunner = async () => ({ code: 1, stdout: "", stderr });
+  const machine = { label: "workmac", target: "10.0.0.1", enabled: true };
+  await assert.rejects(listMachineAgents(machine, { run, herdrBin: "herdr" }), (error: Error) => {
+    assert.equal(
+      error.message,
+      'Saved Herdr machine "workmac" is unreachable: remote Herdr does not support machine API forwarding; update Herdr on this machine.'
+        + " Its running Herdr server is too old; update Herdr there, then run `herdr --remote 10.0.0.1` in a terminal to replace the server.",
+    );
+    return true;
+  });
+});
+
 test("listMachineAgents reports each Pi session's cwd and status", async () => {
   const run: CommandRunner = async () => ({
     code: 0,

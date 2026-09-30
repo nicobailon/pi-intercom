@@ -1,5 +1,5 @@
 import type { Component, TUI } from "@earendil-works/pi-tui";
-import { Input, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Input, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import type { RemoteAgent, SavedMachine } from "../cross-machine-discovery.ts";
 import type { SessionInfo } from "../types.ts";
@@ -49,9 +49,9 @@ type Item =
   | { kind: "fetch" }
   | { kind: "remote"; machine: SavedMachine; agent: RemoteAgent };
 
-/** Subagent children register as "subagent-…"; unnamed ordinary sessions use a "subagent-chat-…" fallback alias. */
+/** pi-subagents registers children under a "subagent-<agent>-<run>" session id; their name is the task text. */
 function isSubagentChild(session: SessionInfo): boolean {
-  return Boolean(session.name?.startsWith("subagent-")) && session.runtimeFallbackAlias !== true;
+  return session.id.startsWith("subagent-");
 }
 
 function errorMessage(error: unknown): string {
@@ -215,6 +215,8 @@ export class HandoverPicker implements Component {
       return `${border("│")}${clipped}${" ".repeat(Math.max(0, contentWidth - visibleWidth(clipped)))}${border("│")}`;
     };
     const dim = (text: string) => this.theme.fg("dim", text);
+    const errorRows = (text: string) => wrapTextWithAnsi(text, Math.max(1, contentWidth - 2))
+      .map((line) => row(this.theme.fg("error", `  ${line}`)));
     const pathWidth = Math.max(8, contentWidth - 4);
 
     const items = this.items();
@@ -259,14 +261,14 @@ export class HandoverPicker implements Component {
     if (this.remote.state === "listing") {
       body.push(row(dim("  Listing saved Herdr machines…")));
     } else if (this.remote.state === "error") {
-      body.push(row(this.theme.fg("error", `  ${this.remote.error}`)));
+      body.push(...errorRows(this.remote.error));
     } else if (this.remote.state === "machines") {
       if (this.remote.machines.length === 0) body.push(row(dim("  No enabled saved Herdr machines.")));
       for (const entry of this.remote.machines) {
         if (entry.state === "fetching") {
           body.push(row(dim(`  ${entry.machine.label}: fetching…`)));
         } else if (entry.state === "error") {
-          body.push(row(this.theme.fg("error", `  ${entry.machine.label}: ${entry.error}`)));
+          body.push(...errorRows(entry.error));
         } else if (entry.agents.length === 0) {
           body.push(row(dim(`  ${entry.machine.label}: no Pi sessions`)));
         } else {

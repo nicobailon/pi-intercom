@@ -13,6 +13,7 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ### Fixed
 - Cross-machine sends can now reach Pi sessions on another machine that were never renamed in Herdr. Address them as `full-session-uuid@machine`; before, only renamed sessions were found.
+- When another machine can't be reached, the error now shows Herdr's actual reason instead of its raw debug output, and says how to update a remote Herdr server that is too old for cross-machine listing.
 
 ## [0.15.0] - 2026-09-27
 

@@ -27,7 +27,7 @@ function session(id: string, name: string, extra: Partial<SessionInfo> = {}): Se
 const self = session("self-0000", "planner");
 const roster = [
   self,
-  session("child-0000", "subagent-worker-run-1"),
+  session("subagent-worker-run-1", "worker: You are the writer for lane x"),
   session("unnamed-00", "subagent-chat-unnamed", { runtimeFallbackAlias: true, lastActivity: 1 }),
   session("adapter-00", "adapter", { lastActivity: 2 }),
 ];
@@ -51,7 +51,7 @@ function open(options: { lister?: RemoteSessionLister; preselectSessionId?: stri
 
 test("handover picker lists local peers without self or subagent children", () => {
   const { text, press, results } = open();
-  assert.doesNotMatch(text(), /planner|subagent-worker/);
+  assert.doesNotMatch(text(), /planner|You are the writer/);
   assert.match(text(), /adapter \(adapter-\)[\s\S]*subagent-chat-unnamed/);
   press("tui.select.confirm");
   assert.equal(results[0]?.target.kind === "local" && results[0].target.session.id, "adapter-00");
@@ -86,7 +86,7 @@ test("handover picker fetches other machines on demand and targets a remote sess
       { label: "off", target: "10.0.0.3", enabled: false },
     ],
     listAgents: async (machine) => {
-      if (machine.label === "macmini") throw new Error("ssh timed out");
+      if (machine.label === "macmini") throw new Error(`Saved Herdr machine "macmini" is unreachable: ${"slow ".repeat(20)}end-of-error.`);
       return [{ name: sessionId, sessionId, cwd: "/work/remote", status: "idle" }];
     },
   };
@@ -95,7 +95,8 @@ test("handover picker fetches other machines on demand and targets a remote sess
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.match(text(), /00000000@workmac · idle/);
-  assert.match(text(), /macmini: ssh timed out/);
+  assert.match(text(), /Saved Herdr machine "macmini" is unreachable/);
+  assert.match(text(), /end-of-error\./, "long machine errors wrap instead of being cut off");
   assert.doesNotMatch(text(), /off/);
   press("tui.select.down", "tui.select.confirm");
   assert.deepEqual(results, [{ target: { kind: "remote", target: `${sessionId}@workmac` }, goal: undefined }]);
