@@ -57,6 +57,21 @@ test("parses current Herdr machine and agent list schemas", () => {
   assert.deepEqual(parseRemoteAgents(agents), [{ name: "reviewer", sessionId: fakeSessionId }]);
 });
 
+test("unnamed remote Pi sessions are listed and targetable by session id", async () => {
+  // Herdr omits `name` for panes that were never renamed.
+  const unnamed = JSON.stringify({ result: { agents: [
+    { agent: "pi", agent_session: { kind: "path", value: `/home/user/.pi/agent/sessions/x/2026_${fakeSessionId}.jsonl` } },
+    { agent: "pi" },
+  ] } });
+  assert.deepEqual(parseRemoteAgents(unnamed), [{ name: fakeSessionId, sessionId: fakeSessionId }]);
+
+  const run: CommandRunner = async (_command, args) => (
+    args[0] === "machine" ? { code: 0, stdout: machines, stderr: "" } : { code: 0, stdout: unnamed, stderr: "" }
+  );
+  const match = await discoverRemoteAgent(`${fakeSessionId}@workstation`, { run, herdrBin: "herdr" });
+  assert.equal(match.agent.sessionId, fakeSessionId);
+});
+
 test("explicit machine label restricts discovery to the unique known machine", async () => {
   const calls: Array<{ args: string[]; timeoutMs?: number }> = [];
   const run: CommandRunner = async (_command, args, _stdin, timeoutMs) => {

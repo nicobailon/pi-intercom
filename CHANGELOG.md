@@ -10,6 +10,9 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 ### Changed
 - Windows no longer writes and runs a `broker-launch.vbs` helper to start the broker, which endpoint security tools flagged as suspicious. The broker now runs as a single hidden Node process with the bundled `tsx` loader on every platform, and Windows startup failures now include broker stderr. Custom `brokerCommand` values on Windows must name an executable rather than a `.cmd` shim. Thanks to [@jhonruda25](https://github.com/jhonruda25) for issue #142.
 
+### Fixed
+- Cross-machine sends can now reach Pi sessions on another machine that were never renamed in Herdr. Address them as `full-session-uuid@machine`; before, only renamed sessions were found.
+
 ## [0.15.0] - 2026-09-27
 
 ### Highlights

@@ -56,11 +56,14 @@ export function parseRemoteAgents(raw: string): RemoteAgent[] {
   const value = parseJsonOutput(raw, "herdr agent list");
   const rows = isRecord(value) && Array.isArray(value.agents) ? value.agents : [];
   return rows.flatMap((row): RemoteAgent[] => {
-    if (!isRecord(row) || row.agent !== "pi" || typeof row.name !== "string") return [];
+    if (!isRecord(row) || row.agent !== "pi") return [];
     const agentSession = isRecord(row.agent_session) ? row.agent_session : undefined;
     const sessionPath = agentSession?.kind === "path" && typeof agentSession.value === "string" ? agentSession.value : undefined;
     const sessionId = sessionPath?.match(SESSION_ID_IN_PATH)?.[1];
-    return [{ name: row.name, ...(sessionId ? { sessionId } : {}) }];
+    // Herdr only reports a name for renamed panes; an unnamed Pi session is addressed by its session id.
+    const name = typeof row.name === "string" && row.name ? row.name : sessionId;
+    if (!name) return [];
+    return [{ name, ...(sessionId ? { sessionId } : {}) }];
   });
 }
 
