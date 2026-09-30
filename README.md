@@ -82,6 +82,8 @@ Press **Alt+M** or type `/intercom` to open the session list overlay:
 2. **Compose message** — Write your message in the compose overlay
 3. **Send** — Press Enter to send, Escape to cancel
 
+Press **h** on a highlighted session to hand this session over to it instead (see [Workflow: Handing Over a Session](#workflow-handing-over-a-session)).
+
 ### From the Agent
 
 The agent can list sessions and send messages using the `intercom` tool. Tool calls and results render as compact transcript rows so send/ask/reply flows are easy to scan. Use `/intercom-id` to insert a handoff snippet for the current session's stable intercom target into the editor. For common patterns like planner-worker delegation, the bundled `pi-intercom` skill provides copy-paste ready examples:
@@ -251,9 +253,12 @@ The planner typically uses `send`. If you prefer manual approval for outgoing no
 When you move work from one session to another, for example from a session in `pi-intercom` to one already running in `pi-mcp-adapter`, a handover carries what the first session learned so the second one does not have to rediscover it.
 
 ```
+/handover
 /handover mcp-worker port the schema fix to the adapter
 /handover ~/dev/pi-mcp-adapter port the schema fix to the adapter
 ```
+
+`/handover` on its own opens a picker. It lists the other sessions on this machine, most recently active first, with their directory, model, status, and context use; context at 80% or more is highlighted. Your own session and subagent child sessions are hidden. "+ New session in a project path…" asks for a directory and opens a Herdr project pane there. "Fetch sessions from other machines" lists the Pi sessions on your enabled saved Herdr machines; it only runs when you choose it, because each machine is reached over SSH and can take a few seconds. Each machine shows its sessions or the reason it could not be reached. Type the optional next task in the field at the bottom (Tab moves between the list and the field), and press Enter to generate the handover. Pressing **h** on a session in the Alt+M list opens the same picker with that session selected.
 
 The first argument is the target: a session name, ID, ID prefix, or `name@machine`. A target starting with `/`, `./`, `../`, or `~/` is a project path; if no session is running there, pi-intercom opens a Herdr project pane and starts Pi in it. The rest of the line is the next task and is optional. The command generates the handover, opens it in an editor for you to review and change, and sends it when you save.
 
@@ -425,6 +430,7 @@ Only registered in sessions where `pi-subagents` supplied the required child bri
 | Alt+M | Open session list overlay |
 | ↑/↓ | Navigate session list |
 | Enter | Select session / Send message |
+| h | Hand over to the highlighted session (session list) |
 | Escape | Cancel / Close overlay |
 
 ## Config
@@ -677,6 +683,7 @@ Use pi-messenger for multi-agent swarms working on a shared task. Use pi-interco
 │   └── paths.test.ts     # Path resolution tests
 ├── ui/
 │   ├── session-list.ts   # Session selection overlay
+│   ├── handover-picker.ts # /handover session picker
 │   ├── compose.ts        # Message composition overlay
 │   └── inline-message.ts # Received message display
 └── skills/

@@ -5,7 +5,8 @@ import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 import { IntercomClient, type SendResult } from "./broker/client.ts";
 import { spawnBrokerIfNeeded } from "./broker/spawn.ts";
-import { SessionListOverlay } from "./ui/session-list.ts";
+import { SessionListOverlay, type SessionListSelection } from "./ui/session-list.ts";
+import { HandoverPicker, type HandoverPickerResult, type RemoteSessionLister } from "./ui/handover-picker.ts";
 import { ComposeOverlay, type ComposeResult } from "./ui/compose.ts";
 import { InlineMessageComponent } from "./ui/inline-message.ts";
 import { getAskTimeoutMs, loadConfig, type IntercomConfig } from "./config.ts";
@@ -35,8 +36,8 @@ import { sameCwd } from "./cwd.ts";
 import { formatContextUsage } from "./format-context.ts";
 import { openProjectPane, resolveTargetInCwd, waitForProjectSession, type ProjectPaneLaunch } from "./project-agent.ts";
 import { relaySenderName } from "./cross-machine-envelope.ts";
-import { sendCrossMachine } from "./cross-machine-transport.ts";
-import { parseCrossMachineTarget } from "./cross-machine-discovery.ts";
+import { runCommand, sendCrossMachine } from "./cross-machine-transport.ts";
+import { listMachineAgents, listSavedMachines, parseCrossMachineTarget } from "./cross-machine-discovery.ts";
 import { formatHandoverMessage, generateHandoverBody, readGitState } from "./handover.ts";
 
 const INTERCOM_TOOL_NAME = "intercom";
@@ -607,6 +608,9 @@ function previewText(value: unknown, maxLength = 72): string | undefined {
     return undefined;
   }
   return normalized.length > maxLength ? `${normalized.slice(0, maxLength - 1)}…` : normalized;
+}
+function expandHomePath(path: string): string {
+  return path === "~" ? homedir() : path.startsWith("~/") ? joinPath(homedir(), path.slice(2)) : path;
 }
 function firstTextContent(result: { content?: Array<{ type: string; text?: string }> }): string {
   return result.content?.find((item) => item.type === "text" && typeof item.text === "string")?.text?.replace(/\*\*/g, "") ?? "";
@@ -3009,60 +3013,122 @@ Usage:
       return;
     }
     const input = args.trim();
-    const target = input.split(/\s+/, 1)[0] ?? "";
-    if (!target) {
-      notifyIfLive(liveContext, "Usage: /handover <session name, id, name@machine, or project path> [next task]", "error", commandGeneration);
+    if (!input) {
+      await openHandoverPicker(liveContext, commandGeneration);
       return;
     }
+    const target = input.split(/\s+/, 1)[0]!;
     const goal = input.slice(target.length).trim() || undefined;
     const isPath = /^(\/|\.\.?\/|~(\/|$))/.test(target);
-    const cwd = target === "~" ? homedir() : target.startsWith("~/") ? joinPath(homedir(), target.slice(2)) : target;
-    const request = isPath ? { cwd, openProjectPaneIfMissing: true } : { to: target };
+    const request = isPath ? { cwd: expandHomePath(target), openProjectPaneIfMissing: true } : { to: target };
+    await performHandover(liveContext, commandGeneration, request, { goal, crossMachine: !isPath && target.includes("@") });
+  }
 
+  async function openHandoverPicker(ctx: ExtensionContext, generation: number, preselectSessionId?: string): Promise<void> {
+    let pickerClient: IntercomClient;
+    try {
+      pickerClient = await ensureConnected("tool");
+    } catch (error) {
+      notifyIfLive(ctx, `Intercom unavailable: ${getErrorMessage(error)}`, "error", generation);
+      return;
+    }
+    if (!getLiveContext(ctx, generation)) return;
+    syncPresenceIdentity(ctx.sessionManager.getSessionId());
+
+    let sessions: SessionInfo[];
+    try {
+      sessions = await pickerClient.listSessions();
+    } catch (error) {
+      notifyIfLive(ctx, `Failed to list sessions: ${getErrorMessage(error)}`, "error", generation);
+      return;
+    }
+    const currentSession = sessions.find((session) => session.id === pickerClient.sessionId);
+    if (!currentSession) {
+      notifyIfLive(ctx, "Current session is missing from intercom session list", "error", generation);
+      return;
+    }
+    if (!getLiveContext(ctx, generation)) return;
+
+    const discoveryDeps = { run: runCommand, herdrBin: process.env.HERDR_BIN_PATH ?? "herdr" };
+    const lister: RemoteSessionLister = {
+      listMachines: () => listSavedMachines(discoveryDeps),
+      listAgents: (machine) => listMachineAgents(machine, discoveryDeps),
+    };
+    const picked = await ctx.ui.custom<HandoverPickerResult | undefined>(
+      (tui, theme, keybindings, done) => new HandoverPicker(tui, theme, keybindings, { currentSession, sessions, lister, preselectSessionId }, done),
+      { overlay: true, overlayOptions: { width: 88 } },
+    ).catch(() => undefined);
+    if (!picked || !getLiveContext(ctx, generation)) return;
+
+    const { target, goal } = picked;
+    if (target.kind === "local") {
+      await performHandover(ctx, generation, { to: target.session.id }, { goal, crossMachine: false });
+      return;
+    }
+    if (target.kind === "remote") {
+      await performHandover(ctx, generation, { to: target.target }, { goal, crossMachine: true });
+      return;
+    }
+    const path = (await ctx.ui.input("Project path for the new session", "~/dev/project"))?.trim();
+    if (!getLiveContext(ctx, generation)) return;
+    if (!path) {
+      notifyIfLive(ctx, "Handover cancelled", "info", generation);
+      return;
+    }
+    await performHandover(ctx, generation, { cwd: expandHomePath(path), openProjectPaneIfMissing: true }, { goal, crossMachine: false });
+  }
+
+  /** Generate the handover behind a loader, let the user edit it, then deliver it. */
+  async function performHandover(
+    ctx: ExtensionContext,
+    generation: number,
+    request: Pick<DeliveryRequest, "to" | "cwd" | "openProjectPaneIfMissing">,
+    options: { goal?: string; crossMachine: boolean },
+  ): Promise<void> {
     let handoverClient: IntercomClient;
     try {
       handoverClient = await ensureConnected("tool");
     } catch (error) {
-      notifyIfLive(liveContext, `Intercom unavailable: ${getErrorMessage(error)}`, "error", commandGeneration);
+      notifyIfLive(ctx, `Intercom unavailable: ${getErrorMessage(error)}`, "error", generation);
       return;
     }
-    if (!getLiveContext(liveContext, commandGeneration)) return;
+    if (!getLiveContext(ctx, generation)) return;
 
-    const generated = await liveContext.ui.custom<{ text: string } | { error: string } | null>((tui, theme, _keybindings, done) => {
+    const generated = await ctx.ui.custom<{ text: string } | { error: string } | null>((tui, theme, _keybindings, done) => {
       const loader = new BorderedLoader(tui, theme, "Generating handover...");
       loader.onAbort = () => done(null);
-      buildHandoverText(handoverClient, liveContext, { goal, crossMachine: !isPath && target.includes("@") }, loader.signal).then(
+      buildHandoverText(handoverClient, ctx, options, loader.signal).then(
         (text) => done({ text }),
         (error) => done(loader.signal.aborted ? null : { error: getErrorMessage(error) }),
       );
       return loader;
     });
-    if (!getLiveContext(liveContext, commandGeneration)) return;
+    if (!getLiveContext(ctx, generation)) return;
     if (!generated) {
-      notifyIfLive(liveContext, "Handover cancelled", "info", commandGeneration);
+      notifyIfLive(ctx, "Handover cancelled", "info", generation);
       return;
     }
     if ("error" in generated) {
-      notifyIfLive(liveContext, `Handover failed: ${generated.error}`, "error", commandGeneration);
+      notifyIfLive(ctx, `Handover failed: ${generated.error}`, "error", generation);
       return;
     }
 
-    const edited = await liveContext.ui.editor("Edit handover", generated.text);
-    if (!getLiveContext(liveContext, commandGeneration)) return;
+    const edited = await ctx.ui.editor("Edit handover", generated.text);
+    if (!getLiveContext(ctx, generation)) return;
     if (edited === undefined || !edited.trim()) {
-      notifyIfLive(liveContext, "Handover cancelled", "info", commandGeneration);
+      notifyIfLive(ctx, "Handover cancelled", "info", generation);
       return;
     }
 
     try {
       handoverClient = await ensureConnected("tool");
     } catch (error) {
-      notifyIfLive(liveContext, `Intercom unavailable: ${getErrorMessage(error)}`, "error", commandGeneration);
+      notifyIfLive(ctx, `Intercom unavailable: ${getErrorMessage(error)}`, "error", generation);
       return;
     }
-    const result = await deliverMessage(handoverClient, liveContext, undefined, { ...request, message: edited, handover: true });
+    const result = await deliverMessage(handoverClient, ctx, undefined, { ...request, message: edited, handover: true });
     const failed = result.details.error === true || result.details.delivered === false;
-    notifyIfLive(liveContext, failed ? firstTextContent(result) : `Handover: ${firstTextContent(result)}`, failed ? "error" : "info", commandGeneration);
+    notifyIfLive(ctx, failed ? firstTextContent(result) : `Handover: ${firstTextContent(result)}`, failed ? "error" : "info", generation);
   }
 
   async function openIntercomOverlay(ctx: ExtensionContext): Promise<void> {
@@ -3101,12 +3167,17 @@ Usage:
       return;
     }
 
-    const selectedSession = await ctx.ui.custom<SessionInfo | undefined>(
+    const selection = await ctx.ui.custom<SessionListSelection | undefined>(
       (_tui, theme, keybindings, done) => new SessionListOverlay(theme, keybindings, currentSession, sessions, done),
       { overlay: true, overlayOptions: { width: 88 } }
     ).catch(() => undefined);
 
-    if (!selectedSession || !getLiveContext(ctx, overlayGeneration)) return;
+    if (!selection || !getLiveContext(ctx, overlayGeneration)) return;
+    if (selection.action === "handover") {
+      await openHandoverPicker(ctx, overlayGeneration, selection.session.id);
+      return;
+    }
+    const selectedSession = selection.session;
 
     try {
       overlayClient = await ensureConnected("overlay");
@@ -3150,7 +3221,7 @@ Usage:
   });
 
   pi.registerCommand("handover", {
-    description: "Summarize this session and hand it over to another session (usage: /handover <target or project path> [next task])",
+    description: "Summarize this session and hand it over to another session (usage: /handover to pick a session, or /handover <target or project path> [next task])",
     handler: async (args, ctx) => runHandoverCommand(args, ctx),
   });
 

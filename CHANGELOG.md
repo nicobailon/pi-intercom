@@ -6,6 +6,7 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ### Added
 - Hand your current session's context over to another session with `/handover <target> [next task]` or the intercom tool's `handover` action. The current model summarizes what the session learned, decided, and changed, and the receiving session starts on the next task. `/handover` lets you edit the summary before it is sent, a project path opens a Herdr pane when no session is running there, and `name@machine` targets on saved Herdr machines are supported.
+- Run `/handover` with no arguments to pick the receiving session from a list of this machine's sessions, start a new session in a project, or fetch Pi sessions from your other Herdr machines. Press `h` in the Alt+M session list to hand over to the highlighted session.
 
 ### Changed
 - Windows no longer writes and runs a `broker-launch.vbs` helper to start the broker, which endpoint security tools flagged as suspicious. The broker now runs as a single hidden Node process with the bundled `tsx` loader on every platform, and Windows startup failures now include broker stderr. Custom `brokerCommand` values on Windows must name an executable rather than a `.cmd` shim. Thanks to [@jhonruda25](https://github.com/jhonruda25) for issue #142.

@@ -1999,7 +1999,7 @@ test("obsolete toolVisibility config never hides or reveals the intercom tool", 
         custom: async () => {
           overlayStep += 1;
           return overlayStep === 1
-            ? selectedSession
+            ? { session: selectedSession, action: "message" }
             : { sent: true, messageId: "overlay-message", text: "Hello from the overlay" };
         },
       },
@@ -2764,7 +2764,7 @@ test("stale overlay work stops after same-session restart", { concurrency: false
     const plannerSession = await waitForSessionByName(planner, "planner");
     await harness.emitLifecycle("session_shutdown");
     await harness.emitLifecycle("session_start");
-    resolveFirstCustom(plannerSession);
+    resolveFirstCustom({ session: plannerSession, action: "message" });
     await overlayPromise;
 
     assert.equal(customCalls, 1);
