@@ -1477,13 +1477,18 @@ test("intercom handover summarizes the session and delivers it to the target", {
     assert.equal(withAttachment.details?.error, true);
     assert.equal(modelRequests.length, 0);
 
+    const sender = await waitForSessionByName(orchestrator, "handover-sender");
+    assert.equal((await orchestrator.send(sender.id, { messageId: "handover-pending-ask", text: "What's next?", expectsReply: true })).delivered, true);
+    await new Promise((resolve) => setTimeout(resolve, 50));
     const received = once(orchestrator, "message") as Promise<[SessionInfo, Message]>;
     const result = await intercomTool.execute("handover", { action: "handover", to: "orchestrator", message: "continue in pi-mcp-adapter" }, new AbortController().signal, undefined, ctx);
     assert.notEqual(result.details?.error, true);
     assert.equal(result.details?.delivery, "socket_delivered");
+    assert.equal(result.details?.replyTo, undefined);
 
     const [, message] = await received;
     assert.match(message.content.text, /^# Handover from handover-sender\n/);
+    assert.equal(message.replyTo, undefined);
     assert.match(message.content.text, /Sender session file: \/sessions\/handover-sender\.jsonl/);
     assert.ok(message.content.text.endsWith("## Next task\nPort the fix"));
     assert.match(modelRequests[0]!.messages[0]!.content[0]!.text, /fix the adapter[\s\S]*continue in pi-mcp-adapter/);

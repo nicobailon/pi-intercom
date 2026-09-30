@@ -89,6 +89,8 @@ interface DeliveryRequest {
   replyTo?: string;
   supersedes?: string;
   retryOf?: string;
+  /** Handovers are always new messages and are not sent once the signal aborts. */
+  handover?: boolean;
 }
 
 interface IntercomToolResult {
@@ -1696,6 +1698,9 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         }
       }
       if (crossMachineTarget) {
+        if (request.handover && signal?.aborted) {
+          return { content: [{ type: "text", text: "Handover was cancelled before delivery." }], details: { error: true } };
+        }
         const identity = buildPresenceIdentity(pi, connectedClient.sessionId ?? ctx.sessionManager.getSessionId());
         try {
           const remote = await sendCrossMachine(to!, message, {
@@ -1742,7 +1747,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
           details: { error: true, replyTo: activeReplyMismatch.message.id },
         };
       }
-      const inferredAsk = replyTo ? null : replyTracker.findUniquePendingAskFrom(sendTo);
+      const inferredAsk = replyTo || request.handover ? null : replyTracker.findUniquePendingAskFrom(sendTo);
       const effectiveReplyTo = replyTo ?? inferredAsk?.message.id;
       if (confirmSend && !(cwd && openProjectPaneIfMissing)) {
         const confirmed = await ctx.ui.confirm(
@@ -1755,6 +1760,9 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
             details: {},
           };
         }
+      }
+      if (request.handover && signal?.aborted) {
+        return { content: [{ type: "text", text: "Handover was cancelled before delivery." }], details: { error: true } };
       }
       const result = await connectedClient.send(sendTo, {
         text: message,
@@ -2634,7 +2642,7 @@ Usage:
               details: { error: true },
             };
           }
-          return deliverMessage(connectedClient, ctx, _signal, { to, cwd, openProjectPaneIfMissing, focus, message: handoverText });
+          return deliverMessage(connectedClient, ctx, _signal, { to, cwd, openProjectPaneIfMissing, focus, message: handoverText, handover: true });
         }
 
         case "ask": {
@@ -3052,7 +3060,7 @@ Usage:
       notifyIfLive(liveContext, `Intercom unavailable: ${getErrorMessage(error)}`, "error", commandGeneration);
       return;
     }
-    const result = await deliverMessage(handoverClient, liveContext, undefined, { ...request, message: edited });
+    const result = await deliverMessage(handoverClient, liveContext, undefined, { ...request, message: edited, handover: true });
     const failed = result.details.error === true || result.details.delivered === false;
     notifyIfLive(liveContext, failed ? firstTextContent(result) : `Handover: ${firstTextContent(result)}`, failed ? "error" : "info", commandGeneration);
   }
