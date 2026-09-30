@@ -160,6 +160,25 @@ intercom({
 If a live session already exists in that `cwd`, intercom reuses it. If multiple
 sessions are active there, pass `to` to select one by name or session ID.
 
+### Pattern 6b: Hand Over Your Session
+
+When the user moves work to another session, `handover` summarizes this
+session (next task, decisions, files, current state, open questions) with the
+current model and sends it. The receiver acts on it like any inbound message.
+Pass the next task as `message`; targeting works exactly like `send`.
+
+```typescript
+intercom({
+  action: "handover",
+  cwd: "/path/to/other-repo",
+  openProjectPaneIfMissing: true,
+  message: "Port the schema fix here and run the adapter tests"
+})
+```
+
+Humans can run `/handover <target> [next task]` to review the summary in an
+editor before it is sent.
+
 ### Pattern 7: Handle Subagent Escalations (Orchestrator Side)
 
 When `pi-subagents` spawns a delegated child and supplies child bridge metadata,

@@ -1446,6 +1446,53 @@ test("a session identity claim sets the intercom id and keeps the readable sessi
   }
 });
 
+test("intercom handover summarizes the session and delivers it to the target", { concurrency: false }, async () => {
+  const { orchestrator, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("handover-sender");
+  const modelRequests: Array<{ systemPrompt?: string; messages: Array<{ content: Array<{ text: string }> }> }> = [];
+  const ctx = {
+    ...harness.ctx,
+    sessionManager: {
+      ...harness.ctx.sessionManager,
+      getSessionFile: () => "/sessions/handover-sender.jsonl",
+      getBranch: () => [{ type: "message", id: "a", parentId: null, timestamp: "2026-09-30T00:00:00.000Z", message: { role: "user", content: "fix the adapter", timestamp: 0 } }],
+    },
+    modelRegistry: {
+      complete: async (_model: unknown, context: (typeof modelRequests)[number]) => {
+        modelRequests.push(context);
+        return { stopReason: "stop", content: [{ type: "text", text: "## Next task\nPort the fix" }] };
+      },
+    },
+  };
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+
+    const rejected = await intercomTool.execute("handover-reply", { action: "handover", to: "orchestrator", replyTo: "m1" }, new AbortController().signal, undefined, ctx);
+    assert.equal(rejected.details?.error, true);
+    const withAttachment = await intercomTool.execute("handover-attach", { action: "handover", to: "orchestrator", attachments: [{ type: "file", name: "a", content: "b" }] }, new AbortController().signal, undefined, ctx);
+    assert.equal(withAttachment.details?.error, true);
+    assert.equal(modelRequests.length, 0);
+
+    const received = once(orchestrator, "message") as Promise<[SessionInfo, Message]>;
+    const result = await intercomTool.execute("handover", { action: "handover", to: "orchestrator", message: "continue in pi-mcp-adapter" }, new AbortController().signal, undefined, ctx);
+    assert.notEqual(result.details?.error, true);
+    assert.equal(result.details?.delivery, "socket_delivered");
+
+    const [, message] = await received;
+    assert.match(message.content.text, /^# Handover from handover-sender\n/);
+    assert.match(message.content.text, /Sender session file: \/sessions\/handover-sender\.jsonl/);
+    assert.ok(message.content.text.endsWith("## Next task\nPort the fix"));
+    assert.match(modelRequests[0]!.messages[0]!.content[0]!.text, /fix the adapter[\s\S]*continue in pi-mcp-adapter/);
+    await harness.emitLifecycle("session_shutdown");
+  } finally {
+    await cleanup();
+  }
+});
+
 test("intercom-id inserts a stable handoff snippet into the editor", { concurrency: false }, async () => {
   const { cleanup } = await setupClients();
   const { default: piIntercomExtension } = await import("./index.ts");

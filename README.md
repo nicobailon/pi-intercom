@@ -246,6 +246,30 @@ Cancellation is explicit: call `intercom({ action: "cancel", messageId })` to re
 
 The planner typically uses `send`. If you prefer manual approval for outgoing non-reply messages, turn on `confirmSend: true`. The worker uses `ask` for everything (no confirmation needed, gets answers inline), so it can operate autonomously either way.
 
+## Workflow: Handing Over a Session
+
+When you move work from one session to another, for example from a session in `pi-intercom` to one already running in `pi-mcp-adapter`, a handover carries what the first session learned so the second one does not have to rediscover it.
+
+```
+/handover mcp-worker port the schema fix to the adapter
+/handover ~/dev/pi-mcp-adapter port the schema fix to the adapter
+```
+
+The first argument is the target: a session name, ID, ID prefix, or `name@machine`. A target starting with `/`, `./`, `../`, or `~/` is a project path; if no session is running there, pi-intercom opens a Herdr project pane and starts Pi in it. The rest of the line is the next task and is optional. The command generates the handover, opens it in an editor for you to review and change, and sends it when you save.
+
+Agents can do the same without the review step:
+
+```typescript
+intercom({ action: "handover", to: "mcp-worker", message: "Port the schema fix to the adapter" })
+intercom({ action: "handover", cwd: "/Users/me/dev/pi-mcp-adapter", openProjectPaneIfMissing: true })
+```
+
+What is sent: the current model reads this session's conversation (the latest compaction summary plus everything after it) and writes a summary with the next task, key decisions and rejected approaches, relevant files and repositories, current state, and open questions. A short header names the sender, its working directory, and its git branch and commit. For a target on the same machine, the header also gives the path of the sender's session file so the receiver can read the full transcript when it needs more detail. For a `name@machine` target the handover is sent as plain text without that path.
+
+The receiver gets the handover as an ordinary intercom message asking it to act on the next task, so its `inboundTrigger` and `busyDelivery` settings decide when it starts: right away when idle, or at the next safe point when busy. The handover tells the receiver to treat it as a peer's report and to check its claims against the repository.
+
+Privacy: the summary is generated from your session transcript by your current model and provider, like compaction. The model is told to leave out secrets, tokens, credentials, and private keys, but review the text with `/handover` when the session handled sensitive material. `confirmSend: true` also applies to agent handovers.
+
 ## Workflow: Subagent-to-Supervisor Escalation
 
 This workflow requires [`pi-subagents`](https://github.com/nicobailon/pi-subagents) to be installed and to supply child bridge metadata. When `pi-subagents` spawns a delegated child with that metadata, the child session gets a subagent-only `contact_supervisor` tool in addition to the regular `intercom` tool. Normal sessions never see `contact_supervisor`.
@@ -348,9 +372,9 @@ The supervisor can reply with plain JSON or a fenced `json` block. If the reply 
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `action` | string | `"list"`, `"list-cwd"`, `"send"`, `"ask"`, `"reply"`, `"pending"`, `"status"`, or `"cancel"` |
+| `action` | string | `"list"`, `"list-cwd"`, `"send"`, `"ask"`, `"handover"`, `"reply"`, `"pending"`, `"status"`, or `"cancel"` |
 | `to` | string | Target session name or ID. Without `cwd`, send/ask resolve it globally. With `cwd`, send/ask require the target to be in that directory. Also disambiguates reply. |
-| `message` | string | Message text (for send/ask/reply) |
+| `message` | string | Message text (for send/ask/reply), or the optional next task for `handover` |
 | `attachments` | array | Optional `file`, `snippet`, or `context` attachments |
 | `replyTo` | string | Optional message ID for threading or replying to an `ask` |
 | `messageId` | string | Optional explicit message ID for send/ask, or required message ID for `cancel` |
@@ -383,6 +407,8 @@ Only registered in sessions where `pi-subagents` supplied the required child bri
 **`send`** — Sends a message to the specified session and returns immediately after delivery. If the destination has exactly one pending inbound ask, `send` infers the message is its answer and returns `Reply sent to <target> (inferred from pending ask)`. During a turn triggered by an inbound ask, a non-reply `send` to a different target is rejected so a guessed parent/root CWD cannot receive an accidental reply. Zero or multiple pending-ask matches remain unthreaded sends outside the active ask turn. Set `confirmSend: true` to confirm ordinary and inferred sends. A caller-supplied `replyTo` skips confirmation. `to` alone resolves globally across all live sessions. `cwd` alone targets the sole live peer in that directory. `to` plus `cwd` requires that peer to be in the directory. With `openProjectPaneIfMissing: true`, pi-intercom opens a visible Herdr project pane, starts Pi there, waits for that session to register, then delivers the message through normal intercom routing.
 
 **`ask`** — Requires a currently connected recipient, sends a message, and waits for the recipient to reply (10-minute timeout by default; configurable with `PI_INTERCOM_ASK_TIMEOUT_MS`). A disconnected target fails immediately rather than queueing a blocking request. The reply is returned as the tool result. No confirmation dialog. Only one pending `ask` is allowed per session at a time. Use this when the agent needs the answer to continue working. The same `to`, `cwd`, and `openProjectPaneIfMissing` targeting rules apply.
+
+**`handover`** — Summarizes the current session with the current model and sends the summary to the target, which acts on it. `message` is the optional next task. Targeting, confirmation, and delivery work exactly like `send`, including `name@machine` targets. `replyTo`, `supersedes`, `retryOf`, and `attachments` are rejected. See [Workflow: Handing Over a Session](#workflow-handing-over-a-session).
 
 **`reply`** — Replies to the current intercom-triggered message if there is one. Otherwise it falls back to the single unresolved inbound ask. If multiple asks are pending, pass `to` or inspect them with `pending` first. Under the hood this is still a normal `send` with the exact `replyTo` value.
 
@@ -639,6 +665,7 @@ Use pi-messenger for multi-agent swarms working on a shared task. Use pi-interco
 ├── index.ts              # Extension entry point
 ├── types.ts              # SessionInfo, Message, protocol types
 ├── config.ts             # Config loading
+├── handover.ts           # Session handover summary and header
 ├── project-agent.ts      # Herdr project-pane launch and cwd target resolution
 ├── broker/
 │   ├── broker.ts         # Broker process

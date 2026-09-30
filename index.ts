@@ -1,4 +1,4 @@
-import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { BorderedLoader, defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { randomUUID } from "crypto";
 import { Type } from "typebox";
@@ -29,13 +29,15 @@ import {
   type IntercomSessionIdentityRequestV1,
 } from "./extension-api.ts";
 import { ReplyTracker } from "./reply-tracker.ts";
-import { resolve as resolvePath } from "node:path";
+import { homedir } from "node:os";
+import { join as joinPath, resolve as resolvePath } from "node:path";
 import { sameCwd } from "./cwd.ts";
 import { formatContextUsage } from "./format-context.ts";
 import { openProjectPane, resolveTargetInCwd, waitForProjectSession, type ProjectPaneLaunch } from "./project-agent.ts";
 import { relaySenderName } from "./cross-machine-envelope.ts";
 import { sendCrossMachine } from "./cross-machine-transport.ts";
 import { parseCrossMachineTarget } from "./cross-machine-discovery.ts";
+import { formatHandoverMessage, generateHandoverBody, readGitState } from "./handover.ts";
 
 const INTERCOM_TOOL_NAME = "intercom";
 const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
@@ -75,6 +77,23 @@ interface DeliveryTarget {
   id: string;
   label: string;
   projectPane?: ProjectPaneLaunch;
+}
+
+interface DeliveryRequest {
+  to?: string;
+  cwd?: string;
+  openProjectPaneIfMissing?: boolean;
+  focus?: boolean;
+  message: string;
+  attachments?: Attachment[];
+  replyTo?: string;
+  supersedes?: string;
+  retryOf?: string;
+}
+
+interface IntercomToolResult {
+  content: Array<{ type: "text"; text: string }>;
+  details: Record<string, unknown>;
 }
 
 interface OutboxTarget {
@@ -1618,6 +1637,188 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     });
     return { id: session.id, label: session.name || session.id, projectPane };
   }
+  /** Deliver one outbound message the way the intercom tool's send action does. Never throws. */
+  async function deliverMessage(
+    connectedClient: IntercomClient,
+    ctx: ExtensionContext,
+    signal: AbortSignal | undefined,
+    request: DeliveryRequest,
+  ): Promise<IntercomToolResult> {
+    const { to, cwd, openProjectPaneIfMissing, focus, message, attachments, replyTo, supersedes, retryOf } = request;
+    try {
+      const crossMachineTarget = Boolean(to?.includes("@"));
+      const crossMachineRestriction = explicitCrossMachineSendRestriction({
+        to, cwd, openProjectPaneIfMissing, attachments, replyTo, supersedes, retryOf,
+      });
+      if (crossMachineRestriction) {
+        return {
+          content: [{ type: "text", text: crossMachineRestriction }],
+          details: { error: true, crossMachine: false },
+        };
+      }
+      if (crossMachineTarget) {
+        try {
+          parseCrossMachineTarget(to!);
+        } catch (error) {
+          return {
+            content: [{ type: "text", text: getErrorMessage(error) }],
+            details: { error: true, crossMachine: false },
+          };
+        }
+      }
+      if (openProjectPaneIfMissing && !cwd) {
+        return {
+          content: [{ type: "text", text: "openProjectPaneIfMissing requires a target cwd." }],
+          details: { error: true },
+        };
+      }
+      const confirmSend = !replyTo && config.confirmSend && ctx.hasUI;
+      const attachmentText = attachments?.length ? formatAttachments(attachments) : "";
+      if (confirmSend && cwd && openProjectPaneIfMissing) {
+        const confirmed = await ctx.ui.confirm(
+          "Send message",
+          `Send to "${to ?? cwd}":\n\n${message}${attachmentText}`,
+        );
+        if (!confirmed) {
+          return {
+            content: [{ type: "text", text: "Message cancelled by user" }],
+            details: {},
+          };
+        }
+      }
+      if (confirmSend && crossMachineTarget) {
+        const confirmed = await ctx.ui.confirm("Send message", `Send to "${to}":\n\n${message}`);
+        if (!confirmed) {
+          return {
+            content: [{ type: "text", text: "Message cancelled by user" }],
+            details: {},
+          };
+        }
+      }
+      if (crossMachineTarget) {
+        const identity = buildPresenceIdentity(pi, connectedClient.sessionId ?? ctx.sessionManager.getSessionId());
+        try {
+          const remote = await sendCrossMachine(to!, message, {
+            name: identity.name,
+            sessionId: connectedClient.sessionId ?? ctx.sessionManager.getSessionId(),
+            machine: config.crossMachine.machineName,
+          }, {
+            remoteCommand: config.crossMachine.remoteCommand,
+          });
+          const remoteTarget = relaySenderName({ name: remote.agent.name, machine: remote.machine.label });
+          pi.appendEntry("intercom_sent", {
+            to: remoteTarget,
+            message: { text: message },
+            timestamp: Date.now(),
+            crossMachine: true,
+          });
+          return {
+            content: [{ type: "text", text: `Message sent to ${remoteTarget} over SSH (origin identity is SSH-asserted)` }],
+            details: { delivered: true, crossMachine: true, machine: remote.machine.label, target: remote.agent.name, trust: "ssh-asserted" },
+          };
+        } catch (remoteError) {
+          return {
+            content: [{ type: "text", text: `Explicit cross-machine message to "${to}" was not delivered: ${getErrorMessage(remoteError)}` }],
+            details: { error: true, crossMachine: false },
+          };
+        }
+      }
+      const target: DeliveryTarget = cwd
+        ? await resolveCwdDeliveryTarget(connectedClient, { to, cwd, openProjectPaneIfMissing, focus, signal })
+        : { id: await resolveSessionTarget(connectedClient, to) ?? to!, label: to! };
+      const sendTo = target.id;
+      const targetDisplay = target.projectPane ? target.label : to ?? target.label;
+      if (sendTo === connectedClient.sessionId) {
+        return {
+          content: [{ type: "text", text: "Cannot message the current session" }],
+          details: { error: true },
+        };
+      }
+      const activeReplyMismatch = replyTo ? null : replyTracker.findActiveReplyTargetMismatch(sendTo);
+      if (activeReplyMismatch) {
+        const senderLabel = activeReplyMismatch.from.name || activeReplyMismatch.from.id;
+        return {
+          content: [{ type: "text", text: `This turn is responding to an intercom ask from "${senderLabel}". Use intercom({ action: "reply", message: "..." }) or set replyTo: "${activeReplyMismatch.message.id}". Refusing non-reply send to "${targetDisplay}" to avoid a misdirected reply.` }],
+          details: { error: true, replyTo: activeReplyMismatch.message.id },
+        };
+      }
+      const inferredAsk = replyTo ? null : replyTracker.findUniquePendingAskFrom(sendTo);
+      const effectiveReplyTo = replyTo ?? inferredAsk?.message.id;
+      if (confirmSend && !(cwd && openProjectPaneIfMissing)) {
+        const confirmed = await ctx.ui.confirm(
+          "Send message",
+          `Send to "${targetDisplay}":\n\n${message}${attachmentText}`,
+        );
+        if (!confirmed) {
+          return {
+            content: [{ type: "text", text: "Message cancelled by user" }],
+            details: {},
+          };
+        }
+      }
+      const result = await connectedClient.send(sendTo, {
+        text: message,
+        attachments,
+        replyTo: effectiveReplyTo,
+        supersedes,
+        retryOf,
+      });
+      if (!result.delivered) {
+        const errorText = result.reason ?? "Session may not exist or has disconnected.";
+        return {
+          content: [{ type: "text", text: `Message to "${targetDisplay}" was not delivered: ${errorText}` }],
+          details: deliveryDetails(result),
+        };
+      }
+      pi.appendEntry("intercom_sent", {
+        to: targetDisplay,
+        message: { text: message, attachments, replyTo: effectiveReplyTo, supersedes, retryOf },
+        messageId: result.id,
+        timestamp: Date.now(),
+      });
+      if (effectiveReplyTo) {
+        dismissIncomingAsk(effectiveReplyTo);
+      }
+      return {
+        content: [{
+          type: "text",
+          text: target.projectPane
+            ? `Opened Herdr project pane ${target.projectPane.paneId} for ${target.projectPane.projectRoot} and sent message to ${targetDisplay}`
+            : inferredAsk ? `Reply sent to ${targetDisplay} (inferred from pending ask)` : `Message sent to ${targetDisplay}`,
+        }],
+        details: {
+          ...deliveryDetails(result),
+          ...(effectiveReplyTo ? { replyTo: effectiveReplyTo } : {}),
+          ...(target.projectPane ? { openedProjectPane: true, paneId: target.projectPane.paneId, projectRoot: target.projectPane.projectRoot } : {}),
+        },
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: `Failed to send: ${getErrorMessage(error)}` }],
+        details: { error: true },
+      };
+    }
+  }
+  /** Generate a handover of this session for another agent. Throws a specific error when generation fails. */
+  async function buildHandoverText(
+    connectedClient: IntercomClient,
+    ctx: ExtensionContext,
+    options: { goal?: string; crossMachine: boolean },
+    signal: AbortSignal | undefined,
+  ): Promise<string> {
+    const [body, git] = await Promise.all([
+      generateHandoverBody(ctx, options.goal, signal),
+      readGitState(ctx.cwd),
+    ]);
+    const sessionId = connectedClient.sessionId ?? ctx.sessionManager.getSessionId();
+    return formatHandoverMessage({
+      senderName: pi.getSessionName()?.trim() || sessionId.slice(0, 8),
+      senderCwd: ctx.cwd,
+      sessionFile: options.crossMachine ? undefined : ctx.sessionManager.getSessionFile(),
+      git,
+      body,
+    });
+  }
   function deliverLocalSubagentRelayMessage(sender: "subagent-control" | "subagent-result", status: string, messageText: string): void {
     const liveContext = getLiveContext();
     const now = Date.now();
@@ -2219,6 +2420,8 @@ Usage:
   intercom({ action: "send", to: "name-or-id", message: "..." })  → Send message
   intercom({ action: "send", cwd: "/path", openProjectPaneIfMissing: true, message: "..." }) → Open a visible Herdr project pane when needed, then send
   intercom({ action: "ask", to: "name-or-id", message: "..." })   → Ask and wait for reply
+  intercom({ action: "handover", to: "name-or-id", message: "next task" }) → Summarize this session and hand it over; the receiver acts on it
+  intercom({ action: "handover", cwd: "/path", openProjectPaneIfMissing: true }) → Hand over to the session in that project, opening a Herdr pane when needed
   intercom({ action: "cancel", messageId: "..." })                 → Request cancellation of a sent message
   intercom({ action: "reply", message: "..." })                      → Reply to the active/single pending ask
   intercom({ action: "pending" })                                      → List unresolved inbound asks
@@ -2227,14 +2430,14 @@ Usage:
       "Use to coordinate with other local pi sessions: list peers, send updates, ask for help, or check intercom connectivity.",
 
     parameters: Type.Object({
-      action: StringEnum(["list", "list-cwd", "send", "ask", "reply", "pending", "status", "cancel"] as const, {
-        description: "Action: 'list', 'list-cwd', 'send', 'ask', 'reply', 'pending', 'status', or 'cancel'",
+      action: StringEnum(["list", "list-cwd", "send", "ask", "handover", "reply", "pending", "status", "cancel"] as const, {
+        description: "Action: 'list', 'list-cwd', 'send', 'ask', 'handover', 'reply', 'pending', 'status', or 'cancel'. 'handover' summarizes this session with the current model and sends it to the target, which acts on it; 'message' is the optional next task.",
       }),
       to: Type.Optional(Type.String({
-        description: "Target session: name, full session ID, or the short id shown in parentheses by 'list' (a leading ID prefix resolves). For send/ask with cwd, omit to target the sole live session in that cwd or the newly opened project-pane session. For 'reply', disambiguates the pending ask.",
+        description: "Target session: name, full session ID, or the short id shown in parentheses by 'list' (a leading ID prefix resolves). For send/ask/handover with cwd, omit to target the sole live session in that cwd or the newly opened project-pane session. For 'reply', disambiguates the pending ask.",
       })),
       message: Type.Optional(Type.String({
-        description: "Message to send (for 'send', 'ask', or 'reply' action)",
+        description: "Message to send (for 'send', 'ask', or 'reply' action). For 'handover', the optional next task for the receiver.",
       })),
       attachments: Type.Optional(Type.Array(Type.Object({
         type: StringEnum(["file", "snippet", "context"] as const),
@@ -2255,10 +2458,10 @@ Usage:
         description: "Previous message ID this send/ask is a user-authored retry of. Retries always send a new message ID.",
       })),
       cwd: Type.Optional(Type.String({
-        description: "Working directory filter for 'list-cwd'. For send/ask, scopes target lookup to that directory; omit 'to' to target the sole live peer there. Absolute, or relative to the current session's cwd; '.' means the current cwd.",
+        description: "Working directory filter for 'list-cwd'. For send/ask/handover, scopes target lookup to that directory; omit 'to' to target the sole live peer there. Absolute, or relative to the current session's cwd; '.' means the current cwd.",
       })),
       openProjectPaneIfMissing: Type.Optional(Type.Boolean({
-        description: "For send/ask with cwd, open a visible Herdr project pane and launch Pi there when no matching live session is connected.",
+        description: "For send/ask/handover with cwd, open a visible Herdr project pane and launch Pi there when no matching live session is connected.",
       })),
       focus: Type.Optional(Type.Boolean({
         description: "For openProjectPaneIfMissing, focus the new Herdr pane. Defaults to true.",
@@ -2402,159 +2605,34 @@ Usage:
               details: { error: true },
             };
           }
-          try {
-            const crossMachineTarget = Boolean(to?.includes("@"));
-            const crossMachineRestriction = explicitCrossMachineSendRestriction({
-              to, cwd, openProjectPaneIfMissing, attachments, replyTo, supersedes, retryOf,
-            });
-            if (crossMachineRestriction) {
-              return {
-                content: [{ type: "text", text: crossMachineRestriction }],
-                details: { error: true, crossMachine: false },
-              };
-            }
-            if (crossMachineTarget) {
-              try {
-                parseCrossMachineTarget(to!);
-              } catch (error) {
-                return {
-                  content: [{ type: "text", text: getErrorMessage(error) }],
-                  details: { error: true, crossMachine: false },
-                };
-              }
-            }
-            if (openProjectPaneIfMissing && !cwd) {
-              return {
-                content: [{ type: "text", text: "openProjectPaneIfMissing requires a target cwd." }],
-                details: { error: true },
-              };
-            }
-            const confirmSend = !replyTo && config.confirmSend && ctx.hasUI;
-            const attachmentText = attachments?.length ? formatAttachments(attachments) : "";
-            if (confirmSend && cwd && openProjectPaneIfMissing) {
-              const confirmed = await ctx.ui.confirm(
-                "Send message",
-                `Send to "${to ?? cwd}":\n\n${message}${attachmentText}`,
-              );
-              if (!confirmed) {
-                return {
-                  content: [{ type: "text", text: "Message cancelled by user" }],
-                  details: {},
-                };
-              }
-            }
-            if (confirmSend && crossMachineTarget) {
-              const confirmed = await ctx.ui.confirm("Send message", `Send to "${to}":\n\n${message}`);
-              if (!confirmed) {
-                return {
-                  content: [{ type: "text", text: "Message cancelled by user" }],
-                  details: {},
-                };
-              }
-            }
-            if (crossMachineTarget) {
-              const identity = buildPresenceIdentity(pi, connectedClient.sessionId ?? ctx.sessionManager.getSessionId());
-              try {
-                const remote = await sendCrossMachine(to!, message, {
-                  name: identity.name,
-                  sessionId: connectedClient.sessionId ?? ctx.sessionManager.getSessionId(),
-                  machine: config.crossMachine.machineName,
-                }, {
-                  remoteCommand: config.crossMachine.remoteCommand,
-                });
-                const remoteTarget = relaySenderName({ name: remote.agent.name, machine: remote.machine.label });
-                pi.appendEntry("intercom_sent", {
-                  to: remoteTarget,
-                  message: { text: message },
-                  timestamp: Date.now(),
-                  crossMachine: true,
-                });
-                return {
-                  content: [{ type: "text", text: `Message sent to ${remoteTarget} over SSH (origin identity is SSH-asserted)` }],
-                  details: { delivered: true, crossMachine: true, machine: remote.machine.label, target: remote.agent.name, trust: "ssh-asserted" },
-                };
-              } catch (remoteError) {
-                return {
-                  content: [{ type: "text", text: `Explicit cross-machine message to "${to}" was not delivered: ${getErrorMessage(remoteError)}` }],
-                  details: { error: true, crossMachine: false },
-                };
-              }
-            }
-            const target: DeliveryTarget = cwd
-              ? await resolveCwdDeliveryTarget(connectedClient, { to, cwd, openProjectPaneIfMissing, focus, signal: _signal })
-              : { id: await resolveSessionTarget(connectedClient, to) ?? to, label: to };
-            const sendTo = target.id;
-            const targetDisplay = target.projectPane ? target.label : to ?? target.label;
-            if (sendTo === connectedClient.sessionId) {
-              return {
-                content: [{ type: "text", text: "Cannot message the current session" }],
-                details: { error: true },
-              };
-            }
-            const activeReplyMismatch = replyTo ? null : replyTracker.findActiveReplyTargetMismatch(sendTo);
-            if (activeReplyMismatch) {
-              const senderLabel = activeReplyMismatch.from.name || activeReplyMismatch.from.id;
-              return {
-                content: [{ type: "text", text: `This turn is responding to an intercom ask from "${senderLabel}". Use intercom({ action: "reply", message: "..." }) or set replyTo: "${activeReplyMismatch.message.id}". Refusing non-reply send to "${targetDisplay}" to avoid a misdirected reply.` }],
-                details: { error: true, replyTo: activeReplyMismatch.message.id },
-              };
-            }
-            const inferredAsk = replyTo ? null : replyTracker.findUniquePendingAskFrom(sendTo);
-            const effectiveReplyTo = replyTo ?? inferredAsk?.message.id;
-            if (confirmSend && !(cwd && openProjectPaneIfMissing)) {
-              const confirmed = await ctx.ui.confirm(
-                "Send message",
-                `Send to "${targetDisplay}":\n\n${message}${attachmentText}`,
-              );
-              if (!confirmed) {
-                return {
-                  content: [{ type: "text", text: "Message cancelled by user" }],
-                  details: {},
-                };
-              }
-            }
-            const result = await connectedClient.send(sendTo, {
-              text: message,
-              attachments,
-              replyTo: effectiveReplyTo,
-              supersedes,
-              retryOf,
-            });
-            if (!result.delivered) {
-              const errorText = result.reason ?? "Session may not exist or has disconnected.";
-              return {
-                content: [{ type: "text", text: `Message to "${targetDisplay}" was not delivered: ${errorText}` }],
-                details: deliveryDetails(result),
-              };
-            }
-            pi.appendEntry("intercom_sent", {
-              to: targetDisplay,
-              message: { text: message, attachments, replyTo: effectiveReplyTo, supersedes, retryOf },
-              messageId: result.id,
-              timestamp: Date.now(),
-            });
-            if (effectiveReplyTo) {
-              dismissIncomingAsk(effectiveReplyTo);
-            }
+          return deliverMessage(connectedClient, ctx, _signal, {
+            to, cwd, openProjectPaneIfMissing, focus, message, attachments, replyTo, supersedes, retryOf,
+          });
+        }
+
+        case "handover": {
+          if (!to && !cwd) {
             return {
-              content: [{
-                type: "text",
-                text: target.projectPane
-                  ? `Opened Herdr project pane ${target.projectPane.paneId} for ${target.projectPane.projectRoot} and sent message to ${targetDisplay}`
-                  : inferredAsk ? `Reply sent to ${targetDisplay} (inferred from pending ask)` : `Message sent to ${targetDisplay}`,
-              }],
-              details: {
-                ...deliveryDetails(result),
-                ...(effectiveReplyTo ? { replyTo: effectiveReplyTo } : {}),
-                ...(target.projectPane ? { openedProjectPane: true, paneId: target.projectPane.paneId, projectRoot: target.projectPane.projectRoot } : {}),
-              },
-            };
-          } catch (error) {
-            return {
-              content: [{ type: "text", text: `Failed to send: ${getErrorMessage(error)}` }],
+              content: [{ type: "text", text: "Missing 'to' or 'cwd' parameter" }],
               details: { error: true },
             };
           }
+          if (replyTo || supersedes || retryOf || attachments?.length) {
+            return {
+              content: [{ type: "text", text: "Handover always sends a new message; replyTo, supersedes, retryOf, and attachments are not supported." }],
+              details: { error: true },
+            };
+          }
+          let handoverText: string;
+          try {
+            handoverText = await buildHandoverText(connectedClient, ctx, { goal: message, crossMachine: Boolean(to?.includes("@")) }, _signal);
+          } catch (error) {
+            return {
+              content: [{ type: "text", text: `Handover failed: ${getErrorMessage(error)}` }],
+              details: { error: true },
+            };
+          }
+          return deliverMessage(connectedClient, ctx, _signal, { to, cwd, openProjectPaneIfMissing, focus, message: handoverText });
         }
 
         case "ask": {
@@ -2912,6 +2990,71 @@ Usage:
     notifyAliasCommand(liveContext, `Session alias set: ${alias}`, "info", commandGeneration);
   }
 
+  async function runHandoverCommand(args: string, ctx: ExtensionContext): Promise<void> {
+    const commandGeneration = runtimeGeneration;
+    const liveContext = getLiveContext(ctx, commandGeneration);
+    if (!liveContext) return;
+    if (!liveContext.hasUI || (liveContext as ExtensionContext & { mode?: string }).mode !== "tui") {
+      notifyAliasCommand(liveContext, "/handover requires the interactive terminal UI; use the intercom tool's handover action instead.", "error", commandGeneration);
+      return;
+    }
+    const input = args.trim();
+    const target = input.split(/\s+/, 1)[0] ?? "";
+    if (!target) {
+      notifyIfLive(liveContext, "Usage: /handover <session name, id, name@machine, or project path> [next task]", "error", commandGeneration);
+      return;
+    }
+    const goal = input.slice(target.length).trim() || undefined;
+    const isPath = /^(\/|\.\.?\/|~(\/|$))/.test(target);
+    const cwd = target === "~" ? homedir() : target.startsWith("~/") ? joinPath(homedir(), target.slice(2)) : target;
+    const request = isPath ? { cwd, openProjectPaneIfMissing: true } : { to: target };
+
+    let handoverClient: IntercomClient;
+    try {
+      handoverClient = await ensureConnected("tool");
+    } catch (error) {
+      notifyIfLive(liveContext, `Intercom unavailable: ${getErrorMessage(error)}`, "error", commandGeneration);
+      return;
+    }
+    if (!getLiveContext(liveContext, commandGeneration)) return;
+
+    const generated = await liveContext.ui.custom<{ text: string } | { error: string } | null>((tui, theme, _keybindings, done) => {
+      const loader = new BorderedLoader(tui, theme, "Generating handover...");
+      loader.onAbort = () => done(null);
+      buildHandoverText(handoverClient, liveContext, { goal, crossMachine: !isPath && target.includes("@") }, loader.signal).then(
+        (text) => done({ text }),
+        (error) => done(loader.signal.aborted ? null : { error: getErrorMessage(error) }),
+      );
+      return loader;
+    });
+    if (!getLiveContext(liveContext, commandGeneration)) return;
+    if (!generated) {
+      notifyIfLive(liveContext, "Handover cancelled", "info", commandGeneration);
+      return;
+    }
+    if ("error" in generated) {
+      notifyIfLive(liveContext, `Handover failed: ${generated.error}`, "error", commandGeneration);
+      return;
+    }
+
+    const edited = await liveContext.ui.editor("Edit handover", generated.text);
+    if (!getLiveContext(liveContext, commandGeneration)) return;
+    if (edited === undefined || !edited.trim()) {
+      notifyIfLive(liveContext, "Handover cancelled", "info", commandGeneration);
+      return;
+    }
+
+    try {
+      handoverClient = await ensureConnected("tool");
+    } catch (error) {
+      notifyIfLive(liveContext, `Intercom unavailable: ${getErrorMessage(error)}`, "error", commandGeneration);
+      return;
+    }
+    const result = await deliverMessage(handoverClient, liveContext, undefined, { ...request, message: edited });
+    const failed = result.details.error === true || result.details.delivered === false;
+    notifyIfLive(liveContext, failed ? firstTextContent(result) : `Handover: ${firstTextContent(result)}`, failed ? "error" : "info", commandGeneration);
+  }
+
   async function openIntercomOverlay(ctx: ExtensionContext): Promise<void> {
     const overlayGeneration = runtimeGeneration;
     const liveContext = getLiveContext(ctx, overlayGeneration);
@@ -2994,6 +3137,11 @@ Usage:
   pi.registerCommand("alias", {
     description: "Set the current session alias (usage: /alias <name> or /alias menu)",
     handler: async (args, ctx) => setIntercomAlias(args, ctx),
+  });
+
+  pi.registerCommand("handover", {
+    description: "Summarize this session and hand it over to another session (usage: /handover <target or project path> [next task])",
+    handler: async (args, ctx) => runHandoverCommand(args, ctx),
   });
 
   pi.registerShortcut("alt+m", {
