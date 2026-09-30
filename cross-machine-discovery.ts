@@ -11,6 +11,9 @@ export interface SavedMachine {
 export interface RemoteAgent {
   name: string;
   sessionId?: string;
+  cwd?: string;
+  /** Herdr agent_status, e.g. "idle" or "working". */
+  status?: string;
 }
 
 export interface DiscoveredRemoteAgent {
@@ -63,7 +66,12 @@ export function parseRemoteAgents(raw: string): RemoteAgent[] {
     // Herdr only reports a name for renamed panes; an unnamed Pi session is addressed by its session id.
     const name = typeof row.name === "string" && row.name ? row.name : sessionId;
     if (!name) return [];
-    return [{ name, ...(sessionId ? { sessionId } : {}) }];
+    return [{
+      name,
+      ...(sessionId ? { sessionId } : {}),
+      ...(typeof row.cwd === "string" ? { cwd: row.cwd } : {}),
+      ...(typeof row.agent_status === "string" ? { status: row.agent_status } : {}),
+    }];
   });
 }
 
@@ -75,12 +83,29 @@ export function parseCrossMachineTarget(target: string): { agentTarget: string; 
   return { agentTarget: parts[0], machineLabel: parts[1] };
 }
 
+export async function listSavedMachines(deps: DiscoveryDeps): Promise<SavedMachine[]> {
+  const listed = await deps.run(deps.herdrBin, ["machine", "list", "--json"], undefined, deps.discoveryTimeoutMs ?? DISCOVERY_TIMEOUT_MS);
+  if (listed.code !== 0) throw new Error(`Could not list Herdr saved machines: ${listed.timedOut ? "timed out" : listed.stderr.trim() || `exit ${listed.code}`}`);
+  return parseSavedMachines(listed.stdout);
+}
+
+export async function listMachineAgents(machine: SavedMachine, deps: DiscoveryDeps): Promise<RemoteAgent[]> {
+  const result = await deps.run(deps.herdrBin, ["--machine", machine.label, "agent", "list"], undefined, deps.discoveryTimeoutMs ?? DISCOVERY_TIMEOUT_MS);
+  if (result.code !== 0) {
+    const detail = result.timedOut ? "timed out" : result.stderr.trim() || `exit ${result.code}`;
+    throw new Error(`Saved Herdr machine "${machine.label}" is unreachable: ${detail}.`);
+  }
+  try {
+    return parseRemoteAgents(result.stdout);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "invalid response";
+    throw new Error(`Saved Herdr machine "${machine.label}" is unreachable: ${detail}`);
+  }
+}
+
 export async function discoverRemoteAgent(target: string, deps: DiscoveryDeps): Promise<DiscoveredRemoteAgent> {
   const explicit = parseCrossMachineTarget(target);
-  const discoveryTimeoutMs = deps.discoveryTimeoutMs ?? DISCOVERY_TIMEOUT_MS;
-  const listed = await deps.run(deps.herdrBin, ["machine", "list", "--json"], undefined, discoveryTimeoutMs);
-  if (listed.code !== 0) throw new Error(`Could not list Herdr saved machines: ${listed.timedOut ? "timed out" : listed.stderr.trim() || `exit ${listed.code}`}`);
-  const selected = parseSavedMachines(listed.stdout).filter((machine) => (
+  const selected = (await listSavedMachines(deps)).filter((machine) => (
     machine.enabled && machine.label.toLowerCase() === explicit.machineLabel.toLowerCase()
   ));
   if (selected.length === 0) {
@@ -91,18 +116,7 @@ export async function discoverRemoteAgent(target: string, deps: DiscoveryDeps): 
   }
 
   const machine = selected[0]!;
-  const result = await deps.run(deps.herdrBin, ["--machine", machine.label, "agent", "list"], undefined, discoveryTimeoutMs);
-  if (result.code !== 0) {
-    const detail = result.timedOut ? "timed out" : result.stderr.trim() || `exit ${result.code}`;
-    throw new Error(`Saved Herdr machine "${machine.label}" is unreachable: ${detail}.`);
-  }
-  let agents: RemoteAgent[];
-  try {
-    agents = parseRemoteAgents(result.stdout);
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : "invalid response";
-    throw new Error(`Saved Herdr machine "${machine.label}" is unreachable: ${detail}`);
-  }
+  const agents = await listMachineAgents(machine, deps);
 
   const bySessionId = FULL_SESSION_UUID.test(explicit.agentTarget);
   const matches = agents

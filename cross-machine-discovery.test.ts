@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   DISCOVERY_TIMEOUT_MS,
   discoverRemoteAgent,
+  listMachineAgents,
   parseCrossMachineTarget,
   parseRemoteAgents,
   parseSavedMachines,
@@ -55,6 +56,21 @@ test("parses current Herdr machine and agent list schemas", () => {
     { label: "disabled", target: "disabled.example", enabled: false },
   ]);
   assert.deepEqual(parseRemoteAgents(agents), [{ name: "reviewer", sessionId: fakeSessionId }]);
+});
+
+test("listMachineAgents reports each Pi session's cwd and status", async () => {
+  const run: CommandRunner = async () => ({
+    code: 0,
+    stdout: JSON.stringify({ result: { agents: [
+      { agent: "pi", name: "adapter", cwd: "/work/pi-mcp-adapter", agent_status: "idle" },
+      { agent: "claude", name: "other", cwd: "/work/x", agent_status: "idle" },
+    ] } }),
+    stderr: "",
+  });
+  const machine = { label: "workstation", target: "workstation.example", enabled: true };
+  assert.deepEqual(await listMachineAgents(machine, { run, herdrBin: "herdr" }), [
+    { name: "adapter", cwd: "/work/pi-mcp-adapter", status: "idle" },
+  ]);
 });
 
 test("unnamed remote Pi sessions are listed and targetable by session id", async () => {
