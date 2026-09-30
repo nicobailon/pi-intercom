@@ -86,6 +86,27 @@ test("handover picker fetches other machines on demand and targets a remote sess
   assert.deepEqual(results, [{ target: { kind: "remote", target: `${sessionId}@workmac` }, goal: undefined }]);
 });
 
+test("handover picker keeps the highlighted remote session when an earlier machine answers later", async () => {
+  let answerSlow: (agents: Array<{ name: string }>) => void = () => {};
+  const lister: RemoteSessionLister = {
+    listMachines: async () => [
+      { label: "slow", target: "10.0.0.1", enabled: true },
+      { label: "fast", target: "10.0.0.2", enabled: true },
+    ],
+    listAgents: (machine) => machine.label === "fast"
+      ? Promise.resolve([{ name: "fast-agent" }])
+      : new Promise((resolve) => { answerSlow = resolve; }),
+  };
+  const { press, results } = open({ lister });
+  press("tui.select.down", "tui.select.down", "tui.select.down", "tui.select.confirm");
+  await new Promise((resolve) => setImmediate(resolve));
+  press("tui.select.down");
+  answerSlow([{ name: "slow-agent" }]);
+  await new Promise((resolve) => setImmediate(resolve));
+  press("tui.select.confirm");
+  assert.deepEqual(results, [{ target: { kind: "remote", target: "fast-agent@fast" }, goal: undefined }]);
+});
+
 test("handover picker renders lines at the declared overlay width", () => {
   const { picker } = open();
   for (const width of [1, 2, 20, 50, 88, 120]) {

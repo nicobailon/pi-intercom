@@ -66,7 +66,6 @@ export class HandoverPicker implements Component {
   private readonly done: (result: HandoverPickerResult | undefined) => void;
   private readonly localSessions: SessionInfo[];
   private remote: RemoteState = { state: "idle" };
-  private fetchGeneration = 0;
   private closed = false;
   private selectedIndex = 0;
   private focus: "list" | "task" = "list";
@@ -135,7 +134,7 @@ export class HandoverPicker implements Component {
       return;
     }
     if (this.keybindings.matches(data, "tui.select.confirm")) {
-      const item = items[Math.min(this.selectedIndex, items.length - 1)];
+      const item = items[this.selectedIndex];
       if (item) this.activate(item);
       return;
     }
@@ -169,22 +168,21 @@ export class HandoverPicker implements Component {
     const busy = this.remote.state === "listing"
       || (this.remote.state === "machines" && this.remote.machines.some((entry) => entry.state === "fetching"));
     if (busy) return;
-    const generation = ++this.fetchGeneration;
-    const stale = () => this.closed || generation !== this.fetchGeneration;
     this.remote = { state: "listing" };
-    this.clampSelection();
+    // A new fetch drops the previous remote rows.
+    this.selectedIndex = Math.min(this.selectedIndex, this.items().length - 1);
     this.tui.requestRender();
 
     let machines: SavedMachine[];
     try {
       machines = (await this.lister.listMachines()).filter((machine) => machine.enabled);
     } catch (error) {
-      if (stale()) return;
+      if (this.closed) return;
       this.remote = { state: "error", error: errorMessage(error) };
       this.tui.requestRender();
       return;
     }
-    if (stale()) return;
+    if (this.closed) return;
     const entries: MachineEntry[] = machines.map((machine) => ({ machine, state: "fetching" }));
     this.remote = { state: "machines", machines: entries };
     this.tui.requestRender();
@@ -196,14 +194,15 @@ export class HandoverPicker implements Component {
       } catch (error) {
         entry = { machine, state: "error", error: errorMessage(error) };
       }
-      if (stale()) return;
+      if (this.closed) return;
+      // Earlier machines can finish later, so keep the highlighted remote session selected.
+      const selected = this.items()[this.selectedIndex];
       entries[index] = entry;
+      if (selected?.kind === "remote") {
+        this.selectedIndex = this.items().findIndex((item) => item.kind === "remote" && item.agent === selected.agent);
+      }
       this.tui.requestRender();
     }));
-  }
-
-  private clampSelection(): void {
-    this.selectedIndex = Math.min(this.selectedIndex, this.items().length - 1);
   }
 
   private remoteLabel(machine: SavedMachine, agent: RemoteAgent): string {
@@ -228,7 +227,6 @@ export class HandoverPicker implements Component {
     const pathWidth = Math.max(8, contentWidth - 4);
 
     const items = this.items();
-    this.selectedIndex = Math.min(this.selectedIndex, items.length - 1);
     const itemIndex = new Map<Item, number>(items.map((item, index) => [item, index]));
     const body: string[] = [];
     let selectedStart = 0;

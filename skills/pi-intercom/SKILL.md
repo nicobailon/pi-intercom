@@ -176,8 +176,8 @@ intercom({
 })
 ```
 
-Humans can run `/handover <target> [next task]`, or `/handover` alone to pick
-the target session, to review the summary in an editor before it is sent.
+Humans can run `/handover <target> [next task]` to review the summary in an
+editor before it is sent. `/handover` alone opens a picker for the target.
 
 ### Pattern 7: Handle Subagent Escalations (Orchestrator Side)
 

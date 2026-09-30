@@ -3078,7 +3078,6 @@ Usage:
     await performHandover(ctx, generation, { cwd: expandHomePath(path), openProjectPaneIfMissing: true }, { goal, crossMachine: false });
   }
 
-  /** Generate the handover behind a loader, let the user edit it, then deliver it. */
   async function performHandover(
     ctx: ExtensionContext,
     generation: number,
