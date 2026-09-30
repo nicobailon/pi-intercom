@@ -1637,7 +1637,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     });
     return { id: session.id, label: session.name || session.id, projectPane };
   }
-  /** Deliver one outbound message the way the intercom tool's send action does. Never throws. */
+  /** Shared by send, handover, and /handover. Never throws; failures are returned as error results. */
   async function deliverMessage(
     connectedClient: IntercomClient,
     ctx: ExtensionContext,
@@ -1799,7 +1799,6 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       };
     }
   }
-  /** Generate a handover of this session for another agent. Throws a specific error when generation fails. */
   async function buildHandoverText(
     connectedClient: IntercomClient,
     ctx: ExtensionContext,
@@ -1810,6 +1809,9 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       generateHandoverBody(ctx, options.goal, signal),
       readGitState(ctx.cwd),
     ]);
+    if (signal?.aborted) {
+      throw new Error("Handover generation was aborted.");
+    }
     const sessionId = connectedClient.sessionId ?? ctx.sessionManager.getSessionId();
     return formatHandoverMessage({
       senderName: pi.getSessionName()?.trim() || sessionId.slice(0, 8),

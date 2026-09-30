@@ -264,7 +264,7 @@ intercom({ action: "handover", to: "mcp-worker", message: "Port the schema fix t
 intercom({ action: "handover", cwd: "/Users/me/dev/pi-mcp-adapter", openProjectPaneIfMissing: true })
 ```
 
-What is sent: the current model reads this session's conversation (the latest compaction summary plus everything after it) and writes a summary with the next task, key decisions and rejected approaches, relevant files and repositories, current state, and open questions. A short header names the sender, its working directory, and its git branch and commit. For a target on the same machine, the header also gives the path of the sender's session file so the receiver can read the full transcript when it needs more detail. For a `name@machine` target the handover is sent as plain text without that path.
+What is sent: the current model reads this session's conversation, as Pi would send it to the model after compaction and context edits, and writes a summary with the next task, key decisions and rejected approaches, relevant files and repositories, current state, and open questions. A short header names the sender, its working directory, and its git branch and commit. For a target on the same machine, the header also gives the path of the sender's session file so the receiver can read the full transcript when it needs more detail. For a `name@machine` target the handover is sent as plain text without that path.
 
 The receiver gets the handover as an ordinary intercom message asking it to act on the next task, so its `inboundTrigger` and `busyDelivery` settings decide when it starts: right away when idle, or at the next safe point when busy. The handover tells the receiver to treat it as a peer's report and to check its claims against the repository.
 

@@ -2,18 +2,16 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { Message } from "@earendil-works/pi-ai";
 import {
+  buildSessionContext,
   convertToLlm,
   serializeConversation,
   type ExtensionContext,
-  type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
-
-type AgentMessage = Parameters<typeof convertToLlm>[0][number];
 
 const HANDOVER_MAX_OUTPUT_TOKENS = 4096;
 const GIT_TIMEOUT_MS = 2_000;
 
-export const HANDOVER_SYSTEM_PROMPT = `You write handovers between coding agents. You receive the conversation of one agent session and must write a handover so that ANOTHER agent, possibly working in a different project directory and without access to this conversation, can continue the work.
+const HANDOVER_SYSTEM_PROMPT = `You write handovers between coding agents. You receive the conversation of one agent session and must write a handover so that ANOTHER agent, possibly working in a different project directory and without access to this conversation, can continue the work.
 
 Write concise markdown with exactly these sections:
 
@@ -37,44 +35,6 @@ Rules:
 - Be concise. Prefer short bullets over prose. Leave out chit-chat and dead ends that do not affect the next task.
 - Do not continue the conversation or answer questions in it. Output only the handover, with no preamble.`;
 
-/** Select the conversation Pi would send to the model: the latest compaction summary, its kept entries, and everything after. */
-export function selectHandoverMessages(branch: SessionEntry[]): AgentMessage[] {
-  let compactionIndex = -1;
-  for (let i = branch.length - 1; i >= 0; i--) {
-    if (branch[i]!.type === "compaction") {
-      compactionIndex = i;
-      break;
-    }
-  }
-  let entries = branch;
-  if (compactionIndex >= 0) {
-    const compaction = branch[compactionIndex]!;
-    const firstKeptIndex = compaction.type === "compaction"
-      ? branch.findIndex((entry) => entry.id === compaction.firstKeptEntryId)
-      : -1;
-    entries = [
-      compaction,
-      ...(firstKeptIndex >= 0 ? branch.slice(firstKeptIndex, compactionIndex) : []),
-      ...branch.slice(compactionIndex + 1),
-    ];
-  }
-  const messages: AgentMessage[] = [];
-  for (const entry of entries) {
-    if (entry.type === "message") {
-      messages.push(entry.message);
-    } else if (entry.type === "compaction") {
-      messages.push({
-        role: "compactionSummary",
-        summary: entry.summary,
-        tokensBefore: entry.tokensBefore,
-        timestamp: new Date(entry.timestamp).getTime(),
-      });
-    }
-  }
-  return messages;
-}
-
-/** Generate the handover body with one separate model call over the sender's conversation. */
 export async function generateHandoverBody(
   ctx: Pick<ExtensionContext, "model" | "modelRegistry" | "sessionManager">,
   goal: string | undefined,
@@ -83,7 +43,7 @@ export async function generateHandoverBody(
   if (!ctx.model) {
     throw new Error("No model selected; select a model to generate a handover.");
   }
-  const messages = selectHandoverMessages(ctx.sessionManager.getBranch());
+  const { messages } = buildSessionContext(ctx.sessionManager.getBranch());
   if (messages.length === 0) {
     throw new Error("No conversation to hand over.");
   }
@@ -99,7 +59,7 @@ export async function generateHandoverBody(
     { systemPrompt: HANDOVER_SYSTEM_PROMPT, messages: [request] },
     { signal, cacheRetention: "none", sessionId: randomUUID(), maxTokens: HANDOVER_MAX_OUTPUT_TOKENS },
   );
-  if (response.stopReason === "aborted") {
+  if (response.stopReason === "aborted" || signal?.aborted) {
     throw new Error("Handover generation was aborted.");
   }
   if (response.stopReason === "error") {
@@ -116,12 +76,11 @@ export async function generateHandoverBody(
   return body;
 }
 
-export interface GitState {
+interface GitState {
   branch: string;
   head: string;
 }
 
-/** Read the branch and HEAD of cwd. Returns undefined when cwd is not a git repository or git fails. */
 export function readGitState(cwd: string): Promise<GitState | undefined> {
   return new Promise((resolve) => {
     execFile("git", ["rev-parse", "HEAD", "--abbrev-ref", "HEAD"], { cwd, timeout: GIT_TIMEOUT_MS, windowsHide: true }, (error, stdout) => {

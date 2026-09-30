@@ -3,39 +3,60 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { SessionEntry } from "@earendil-works/pi-coding-agent";
-import { formatHandoverMessage, generateHandoverBody, readGitState, selectHandoverMessages } from "./handover.ts";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { formatHandoverMessage, generateHandoverBody, readGitState } from "./handover.ts";
 
-function messageEntry(id: string, text: string): SessionEntry {
-  return {
-    type: "message",
-    id,
-    parentId: null,
-    timestamp: "2026-09-30T00:00:00.000Z",
-    message: { role: "user", content: text, timestamp: 0 },
-  } as SessionEntry;
+function user(text: string) {
+  return { role: "user" as const, content: text, timestamp: 0 };
 }
 
-test("selectHandoverMessages keeps message entries when the branch was never compacted", () => {
-  const branch = [
-    messageEntry("a", "first"),
-    { type: "label", id: "l", parentId: "a", timestamp: "2026-09-30T00:00:00.000Z", targetId: "a", label: "x" } as unknown as SessionEntry,
-    messageEntry("b", "second"),
-  ];
-  assert.deepEqual(selectHandoverMessages(branch).map((message) => (message as { content: string }).content), ["first", "second"]);
+function handoverContext(sessionManager: unknown, response: Record<string, unknown>, requests: string[] = []) {
+  return {
+    model: { id: "m" },
+    sessionManager,
+    modelRegistry: {
+      complete: async (_model: unknown, context: { messages: Array<{ content: Array<{ text: string }> }> }) => {
+        requests.push(context.messages[0]!.content[0]!.text);
+        return response;
+      },
+    },
+  } as never;
+}
+
+test("generateHandoverBody summarizes the context Pi would send to the model", async () => {
+  const session = SessionManager.inMemory(tmpdir());
+  const early = session.appendMessage(user("early work"));
+  session.appendCompaction("first summary", early, 10);
+  const secret = session.appendMessage(user("secret original"));
+  session.appendContextEdit(secret, { content: "redacted" });
+  session.appendCompaction("second summary", secret, 20);
+  session.branchWithSummary(session.getLeafId(), "explored another approach");
+  session.appendMessage(user("latest request"));
+
+  const requests: string[] = [];
+  await generateHandoverBody(handoverContext(session, { stopReason: "stop", content: [{ type: "text", text: "body" }] }, requests), "next", undefined);
+
+  const conversation = requests[0]!;
+  for (const expected of ["second summary", "redacted", "explored another approach", "latest request"]) {
+    assert.ok(conversation.includes(expected), `expected ${expected}`);
+  }
+  for (const excluded of ["first summary", "secret original", "early work"]) {
+    assert.ok(!conversation.includes(excluded), `unexpected ${excluded}`);
+  }
 });
 
-test("selectHandoverMessages starts from the latest compaction summary and its kept entries", () => {
-  const branch = [
-    messageEntry("a", "summarized away"),
-    messageEntry("b", "kept"),
-    { type: "compaction", id: "c", parentId: "b", timestamp: "2026-09-30T00:00:00.000Z", summary: "earlier work", firstKeptEntryId: "b", tokensBefore: 10 } as SessionEntry,
-    messageEntry("d", "after"),
-  ];
-  const selected = selectHandoverMessages(branch);
-  assert.deepEqual(selected.map((message) => message.role), ["compactionSummary", "user", "user"]);
-  assert.equal((selected[0] as { summary: string }).summary, "earlier work");
-  assert.deepEqual(selected.slice(1).map((message) => (message as { content: string }).content), ["kept", "after"]);
+test("generateHandoverBody reports why generation failed", async () => {
+  const session = SessionManager.inMemory(tmpdir());
+  session.appendMessage(user("hello"));
+
+  await assert.rejects(generateHandoverBody({ model: undefined, sessionManager: session, modelRegistry: {} } as never, undefined, undefined), /No model selected/);
+  await assert.rejects(generateHandoverBody({ model: { id: "m" }, sessionManager: SessionManager.inMemory(tmpdir()), modelRegistry: {} } as never, undefined, undefined), /No conversation/);
+  await assert.rejects(generateHandoverBody(handoverContext(session, { stopReason: "aborted", content: [] }), undefined, undefined), /aborted/);
+  await assert.rejects(generateHandoverBody(handoverContext(session, { stopReason: "error", errorMessage: "rate limited", content: [] }), undefined, undefined), /rate limited/);
+  const aborted = new AbortController();
+  aborted.abort();
+  await assert.rejects(generateHandoverBody(handoverContext(session, { stopReason: "stop", content: [{ type: "text", text: "summary" }] }), undefined, aborted.signal), /aborted/);
+  assert.equal(await generateHandoverBody(handoverContext(session, { stopReason: "stop", content: [{ type: "text", text: " summary " }] }), "goal", undefined), "summary");
 });
 
 test("formatHandoverMessage includes the session file and git state only when known", () => {
@@ -64,19 +85,4 @@ test("readGitState returns undefined outside a git repository", async () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
-});
-
-test("generateHandoverBody reports why generation failed", async () => {
-  const sessionManager = { getBranch: () => [messageEntry("a", "hello")] };
-  const withResponse = (response: Record<string, unknown>) => ({
-    model: { id: "m" },
-    sessionManager,
-    modelRegistry: { complete: async () => response },
-  }) as never;
-
-  await assert.rejects(generateHandoverBody({ model: undefined, sessionManager, modelRegistry: {} } as never, undefined, undefined), /No model selected/);
-  await assert.rejects(generateHandoverBody({ model: { id: "m" }, sessionManager: { getBranch: () => [] }, modelRegistry: {} } as never, undefined, undefined), /No conversation/);
-  await assert.rejects(generateHandoverBody(withResponse({ stopReason: "aborted", content: [] }), undefined, undefined), /aborted/);
-  await assert.rejects(generateHandoverBody(withResponse({ stopReason: "error", errorMessage: "rate limited", content: [] }), undefined, undefined), /rate limited/);
-  assert.equal(await generateHandoverBody(withResponse({ stopReason: "stop", content: [{ type: "text", text: " summary " }] }), "goal", undefined), "summary");
 });
