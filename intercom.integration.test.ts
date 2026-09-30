@@ -1487,8 +1487,8 @@ test("intercom handover summarizes the session and delivers it to the target", {
     assert.match(message.content.text, /Sender session file: \/sessions\/handover-sender\.jsonl/);
     assert.ok(message.content.text.endsWith("## Next task\nPort the fix"));
     assert.match(modelRequests[0]!.messages[0]!.content[0]!.text, /fix the adapter[\s\S]*continue in pi-mcp-adapter/);
-    await harness.emitLifecycle("session_shutdown");
   } finally {
+    await harness.emitLifecycle("session_shutdown");
     await cleanup();
   }
 });
