@@ -4,6 +4,9 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+### Fixed
+- Pressing Ctrl+O now shows the full message of an outgoing `intercom` or `contact_supervisor` call. Before, long messages stayed cut off at a short preview even when expanded. Thanks to [@summer-tt](https://github.com/summer-tt) for PR #153.
+
 ## [0.16.0] - 2026-09-30
 
 ### Highlights
