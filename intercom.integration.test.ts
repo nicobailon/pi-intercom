@@ -2239,7 +2239,7 @@ test("busy interactive sessions steer top-level asks without aborting", { concur
   }
 });
 
-test("idle interactive sessions wake through a user prompt so before_agent_start runs", { concurrency: false }, async () => {
+test("idle interactive sessions wake through a user prompt instead of triggerTurn", { concurrency: false }, async () => {
 	const { default: piIntercomExtension } = await import("./index.ts");
 	const { planner, cleanup } = await setupClients();
 	const harness = createExtensionHarness("idle-trigger-worker", {
@@ -2525,6 +2525,43 @@ test("human-first leaves non-UI sessions on the busy auto-reply path after compa
       const reply = await replyPromise;
       assert.match(reply.message.content.text, /non-interactive|cannot respond/i);
       assert.equal(harness.sentMessages.length, 0);
+    } finally {
+      await harness.emitLifecycle("session_shutdown");
+      await cleanup();
+    }
+  });
+});
+
+test("human-first releases the next held peer only after the woken run starts", { concurrency: false }, async () => {
+  await withIntercomConfig({ busyDelivery: "human-first" }, async () => {
+    const { default: piIntercomExtension } = await import("./index.ts");
+    const { planner, cleanup } = await setupClients();
+    let idle = false;
+    const harness = createExtensionHarness("human-first-wake", { hasUI: true, isIdle: () => idle });
+    try {
+      piIntercomExtension(harness.pi as never);
+      await harness.emitLifecycle("session_start");
+      const target = await waitForSessionByName(planner, "human-first-wake");
+      await harness.emitLifecycle("agent_start");
+      const queued = new Set<string>();
+      const unsubscribe = planner.onMessageReceipt((_from, receipt) => {
+        if (receipt.status === "queued") queued.add(receipt.messageId);
+      });
+      assert.equal((await planner.send(target.id, { messageId: "peer-a", text: "Peer A" })).delivered, true);
+      assert.equal((await planner.send(target.id, { messageId: "peer-b", text: "Peer B" })).delivered, true);
+      await waitForCondition(() => queued.has("peer-a") && queued.has("peer-b"), "both peers held");
+      unsubscribe();
+
+      // The run ends; the wake prompt's preflight keeps Pi idle across several flush ticks.
+      idle = true;
+      await waitForCondition(() => harness.sentMessages.length === 1, "peer A injected");
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      assert.equal(harness.sentMessages.length, 1, "peer B must wait for a later turn");
+      assert.deepEqual(harness.userMessages, ["New intercom message above."]);
+
+      await harness.emitLifecycle("agent_start");
+      await waitForCondition(() => harness.sentMessages.length === 2, "peer B injected");
+      assert.match(harness.sentMessages[1]?.message.content ?? "", /Peer B/);
     } finally {
       await harness.emitLifecycle("session_shutdown");
       await cleanup();
@@ -4305,6 +4342,35 @@ test("subagent relay events wake an idle orchestrator and steer a busy one", { c
     await waitForCondition(() => harness.sentMessages.length === 2, "busy relay message");
     assert.equal(harness.sentMessages[1]?.options, undefined, "Pi steers untriggered messages while streaming");
     assert.equal(harness.userMessages.length, 1, "a busy session must not get a wake prompt");
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("a wake prompt that never starts a run stops blocking later wakes after its window", { concurrency: false }, async (t) => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { cleanup } = await setupClients();
+  const realNow = Date.now.bind(Date);
+  let offset = 0;
+  t.mock.method(Date, "now", () => realNow() + offset);
+  const harness = createExtensionHarness("unstarted-wake", { hasUI: true, isIdle: () => true });
+  const relay = (message: string) => harness.pi.events.emit("subagent:control-intercom", { to: "unstarted-wake", message });
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+
+    // An input handler can handle the wake prompt, so no agent_start follows it.
+    relay("first");
+    await waitForCondition(() => harness.sentMessages.length === 1, "first relay message");
+    relay("second");
+    await waitForCondition(() => harness.sentMessages.length === 2, "second relay message");
+    assert.equal(harness.userMessages.length, 1, "a recent wake may still be starting");
+
+    offset += 10_001;
+    relay("third");
+    await waitForCondition(() => harness.sentMessages.length === 3, "third relay message");
+    assert.equal(harness.userMessages.length, 2, "an expired wake must not block the next one");
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await cleanup();
