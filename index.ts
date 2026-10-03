@@ -672,6 +672,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   let runtimeStarted = false;
   let runtimeGeneration = 0;
   let agentRunning = false;
+  // Set while a wake prompt is starting; Pi only marks the run active after its async preflight.
+  let idleWakePending = false;
   const heldInboundMessages: InboundMessageEntry[] = [];
   let heldInboundTimer: NodeJS.Timeout | null = null;
   function dropHeldInboundMessage(messageId: string, receipt: { status: MessageReceiptStatus; detail?: string }): boolean {
@@ -1280,6 +1282,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       : entry.from.name || entry.from.id.slice(0, 8);
     const replyInstruction = replyCommand ? `\n\nTo reply, use the intercom tool: ${replyCommand}` : "";
     const deliveryMetadata = formatInboundDeliveryMetadata(injectedMessage);
+    const trigger = delivery === "trigger" && shouldTriggerInboundMessage(entry, forceTrigger);
     pi.sendMessage(
       {
         customType: "intercom_message",
@@ -1287,10 +1290,14 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         display: true,
         details: deliveredEntry,
       },
-      delivery === "trigger" && shouldTriggerInboundMessage(entry, forceTrigger)
-        ? { triggerTurn: true }
-        : { deliverAs: "steer" }
+      trigger ? undefined : { deliverAs: "steer" }
     );
+    // Pi skips before_agent_start for sendMessage({ triggerTurn: true }) turns (pi#5581),
+    // so wake an idle session with a user prompt that runs the normal prompt lifecycle.
+    if (trigger && !idleWakePending && getLiveContext(runtimeContext, generation)?.isIdle()) {
+      idleWakePending = true;
+      pi.sendUserMessage("New intercom message above.");
+    }
     emitMessageReceipt(injectedMessage.id, "injected");
   }
   function sendIncomingBrokerMessage(entry: InboundMessageEntry, delivery: "trigger" | "steer", generation = runtimeGeneration): void {
@@ -1870,6 +1877,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     disposed = false;
     runtimeStarted = true;
     runtimeGeneration += 1;
+    idleWakePending = false;
     outboxRequestIds.clear();
     reconnectAttempt = 0;
     clearReconnectTimer();
@@ -2063,6 +2071,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
   });
   pi.on("agent_start", () => {
+    idleWakePending = false;
     if (!getLiveContext()) {
       return;
     }

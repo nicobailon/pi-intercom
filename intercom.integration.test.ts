@@ -197,6 +197,7 @@ function createExtensionHarness(sessionName: string | (() => string) = "child-wo
   let activeToolNames = [...(options.activeTools ?? [])];
   const entries: Array<{ type: string; data: unknown }> = [];
   const sentMessages: Array<{ message: { customType?: string; content?: string; details?: unknown }; options?: { triggerTurn?: boolean; deliverAs?: string }; activeTools: string[] }> = [];
+  const userMessages: string[] = [];
   const pi = {
     getSessionName: () => typeof sessionName === "function" ? sessionName() : currentSessionName,
     setSessionName: (name: string) => { currentSessionName = name; },
@@ -226,6 +227,7 @@ function createExtensionHarness(sessionName: string | (() => string) = "child-wo
     sendMessage: (message: { customType?: string; content?: string; details?: unknown }, options?: { triggerTurn?: boolean; deliverAs?: string }) => {
       sentMessages.push({ message, options, activeTools: [...activeToolNames] });
     },
+    sendUserMessage: (content: string) => { userMessages.push(content); },
     appendEntry: (type: string, data: unknown) => entries.push({ type, data }),
   };
   const ctx = {
@@ -245,6 +247,7 @@ function createExtensionHarness(sessionName: string | (() => string) = "child-wo
     commands,
     entries,
     sentMessages,
+    userMessages,
     getActiveTools: () => pi.getActiveTools(),
     async emitLifecycle(event: string, payload: unknown = {}, eventContext: unknown = ctx) {
       for (const handler of lifecycleHandlers.get(event) ?? []) {
@@ -2236,7 +2239,7 @@ test("busy interactive sessions steer top-level asks without aborting", { concur
   }
 });
 
-test("idle interactive sessions trigger a new turn immediately", { concurrency: false }, async () => {
+test("idle interactive sessions wake through a user prompt so before_agent_start runs", { concurrency: false }, async () => {
 	const { default: piIntercomExtension } = await import("./index.ts");
 	const { planner, cleanup } = await setupClients();
 	const harness = createExtensionHarness("idle-trigger-worker", {
@@ -2253,8 +2256,14 @@ test("idle interactive sessions trigger a new turn immediately", { concurrency: 
 		await new Promise((resolve) => setTimeout(resolve, 20));
 
 		assert.equal(harness.sentMessages.length, 1);
-		assert.equal(harness.sentMessages[0]?.options?.triggerTurn, true);
-		assert.equal(harness.sentMessages[0]?.options?.deliverAs, undefined);
+		assert.equal(harness.sentMessages[0]?.options, undefined, "triggerTurn would bypass before_agent_start");
+		assert.deepEqual(harness.userMessages, ["New intercom message above."]);
+
+		await harness.emitLifecycle("agent_start");
+		await harness.emitLifecycle("agent_end");
+		assert.equal((await planner.send(worker.id, { messageId: "idle-trigger-2", text: "And this" })).delivered, true);
+		await waitForCondition(() => harness.sentMessages.length === 2, "second injected message");
+		assert.equal(harness.userMessages.length, 2, "a started run re-arms the wake");
 	} finally {
 		await harness.emitLifecycle("session_shutdown");
 		await cleanup();
@@ -2387,7 +2396,8 @@ for (const outcome of ["success", "failure", "abort", "cancel"]) {
       assert.equal(harness.sentMessages.length, 2);
       assert.match(harness.sentMessages[0]?.message.content ?? "", /First held/);
       assert.match(harness.sentMessages[1]?.message.content ?? "", /Second held/);
-      assert.deepEqual(harness.sentMessages.map(({ options }) => options), [{ triggerTurn: true }, { triggerTurn: true }]);
+      assert.deepEqual(harness.sentMessages.map(({ options }) => options), [undefined, undefined]);
+      assert.deepEqual(harness.userMessages, ["New intercom message above."], "one wake covers both messages");
       await waitForCondition(() => receipts.get(`${outcome}-1`)?.includes("injected") === true, "first injected receipt");
       await waitForCondition(() => receipts.get(`${outcome}-2`)?.includes("injected") === true, "second injected receipt");
       assert.deepEqual(receipts.get(`${outcome}-1`), ["receiver_received", "acknowledged", "queued", "injected"]);
@@ -4197,7 +4207,7 @@ test("intercom reply queues mail for a disconnected named sender", { concurrency
   }
 });
 
-test("subagent control intercom events wake the current orchestrator session", async () => {
+test("subagent control intercom events reach the current orchestrator session", async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const events = new EventEmitter();
   const sentMessages: Array<{ message: { customType?: string; content?: string }; options?: { triggerTurn?: boolean } }> = [];
@@ -4232,10 +4242,9 @@ test("subagent control intercom events wake the current orchestrator session", a
   assert.equal(sentMessages[0]?.message.customType, "intercom_message");
   assert.match(sentMessages[0]?.message.content ?? "", /From subagent-control/);
   assert.match(sentMessages[0]?.message.content ?? "", /worker needs attention in run 78f659a3/);
-  assert.equal(sentMessages[0]?.options?.triggerTurn, true);
 });
 
-test("subagent result intercom events wake the current orchestrator session", async () => {
+test("subagent result intercom events reach the current orchestrator session", async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const events = new EventEmitter();
   const sentMessages: Array<{ message: { customType?: string; content?: string }; options?: { triggerTurn?: boolean } }> = [];
@@ -4273,8 +4282,33 @@ test("subagent result intercom events wake the current orchestrator session", as
   assert.equal(sentMessages[0]?.message.customType, "intercom_message");
   assert.match(sentMessages[0]?.message.content ?? "", /From subagent-result/);
   assert.match(sentMessages[0]?.message.content ?? "", /Status: completed/);
-  assert.equal(sentMessages[0]?.options?.triggerTurn, true);
   assert.deepEqual(deliveryAcks, [{ requestId: "result-1", delivered: true }]);
+});
+
+test("subagent relay events wake an idle orchestrator and steer a busy one", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { cleanup } = await setupClients();
+  let idle = true;
+  const harness = createExtensionHarness("relay-orchestrator", { hasUI: true, isIdle: () => idle });
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+
+    harness.pi.events.emit("subagent:result-intercom", { to: "relay-orchestrator", requestId: "idle-result", message: "subagent result\n\nStatus: completed" });
+    await waitForCondition(() => harness.sentMessages.length === 1, "idle relay message");
+    assert.equal(harness.sentMessages[0]?.options, undefined);
+    assert.deepEqual(harness.userMessages, ["New intercom message above."]);
+
+    await harness.emitLifecycle("agent_start");
+    idle = false;
+    harness.pi.events.emit("subagent:control-intercom", { to: "relay-orchestrator", message: "subagent needs attention" });
+    await waitForCondition(() => harness.sentMessages.length === 2, "busy relay message");
+    assert.equal(harness.sentMessages[1]?.options, undefined, "Pi steers untriggered messages while streaming");
+    assert.equal(harness.userMessages.length, 1, "a busy session must not get a wake prompt");
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
 });
 
 test("async ask can be replied to later from the single pending ask fallback", { concurrency: false }, async () => {

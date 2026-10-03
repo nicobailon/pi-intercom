@@ -6,6 +6,7 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ### Fixed
 - Pressing Ctrl+O now shows the full message of an outgoing `intercom` or `contact_supervisor` call. Before, long messages stayed cut off at a short preview even when expanded. Thanks to [@summer-tt](https://github.com/summer-tt) for PR #153.
+- A message that arrived while a session was idle started a turn that skipped other extensions' `before_agent_start` hooks, so their prompt additions were missing. Providers that check the prompt, such as pi-claude-bridge, failed that turn and could leave the session broken afterwards. The message is now added to the session, and the session wakes through a normal prompt, so the hooks run. The transcript shows that wake as a short "New intercom message above." prompt. Thanks to [@BGamboa13](https://github.com/BGamboa13) for issue #152 and [@pmontiel-x](https://github.com/pmontiel-x) for the follow-up diagnosis.
 
 ## [0.16.0] - 2026-09-30
 
