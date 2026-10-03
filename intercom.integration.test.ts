@@ -1960,6 +1960,67 @@ test("intercom tool renders compact call and result rows", async () => {
   assert.match(expandedRoster, /peer-a\n• peer-b/);
 });
 
+test("outgoing tool calls preserve full messages when expanded", async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+
+  await withChildOrchestratorEnv({
+    orchestratorTarget: "orchestrator",
+    runId: "expanded-call-test",
+    agent: "worker",
+    index: "0",
+  }, () => {
+    const harness = createExtensionHarness();
+    piIntercomExtension(harness.pi as never);
+    const message = [
+      `  First line: ${"a".repeat(70)}`,
+      "",
+      `    Second line with 中文 and emoji 🧪: ${"b".repeat(35)}`,
+      "Last line after the 96-character preview.",
+    ].join("\n");
+    const normalized = message.replace(/\s+/g, " ").trim();
+    const preview = `${normalized.slice(0, 95)}…`;
+    const cases = [
+      ...["send", "ask", "reply", "handover"].map((action) => ({
+        toolName: "intercom",
+        args: { action, to: "planner", message },
+        title: `intercom ${action} → planner`,
+      })),
+      ...["need_decision", "progress_update", "interview_request"].map((reason) => ({
+        toolName: "contact_supervisor",
+        args: { reason, message },
+        title: `contact_supervisor ${reason}`,
+      })),
+    ];
+
+    for (const { toolName, args, title } of cases) {
+      const tool = harness.tools.find((candidate) => candidate.name === toolName)!;
+      assert.ok(tool.renderCall);
+      const collapsed = `${title}\n  ${preview}`;
+      assert.equal(renderToText(tool.renderCall(args, renderTheme, {})), collapsed);
+      assert.equal(renderToText(tool.renderCall(args, renderTheme, { expanded: false })), collapsed);
+      assert.equal(renderToText(tool.renderCall(args, renderTheme, { expanded: true })), `${title}\n  ${message}`);
+      assert.equal(renderToText(tool.renderCall(args, renderTheme, { expanded: false })), collapsed);
+      assert.equal(args.message, message, "rendering must not change the outgoing message");
+    }
+  });
+});
+
+test("expanded outgoing tool calls wrap long Unicode messages without losing the tail", async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { visibleWidth } = await import("@earendil-works/pi-tui");
+  const harness = createExtensionHarness();
+  piIntercomExtension(harness.pi as never);
+  const tool = harness.tools.find((candidate) => candidate.name === "intercom")!;
+  assert.ok(tool.renderCall);
+  const message = `${"消息🧪".repeat(50)}完整结尾`;
+
+  for (const width of [20, 47, 80]) {
+    const lines = tool.renderCall({ action: "ask", to: "planner", message }, renderTheme, { expanded: true }).render(width);
+    for (const line of lines) assert.ok(visibleWidth(line) <= width);
+    assert.ok(lines.map((line) => line.trimEnd()).join("").includes(message));
+  }
+});
+
 test("intercom tool result hook marks failed details as errors", async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const harness = createExtensionHarness();

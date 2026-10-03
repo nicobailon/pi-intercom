@@ -2381,17 +2381,19 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
           };
         }
       },
-      renderCall(args, theme) {
+      renderCall(args, theme, context) {
         const reason = typeof args.reason === "string" ? args.reason : "contact";
-        const messagePreview = previewText(args.message, 96);
+        const messageText = context.expanded && typeof args.message === "string"
+          ? args.message
+          : previewText(args.message, 96);
         const interview = args.interview && typeof args.interview === "object" ? args.interview as { title?: unknown } : undefined;
         let text = theme.fg("toolTitle", theme.bold("contact_supervisor "));
         text += theme.fg(reason === "need_decision" ? "warning" : reason === "progress_update" ? "muted" : "accent", reason);
         if (typeof interview?.title === "string" && interview.title.trim()) {
           text += " " + theme.fg("accent", interview.title.trim());
         }
-        if (messagePreview) {
-          text += "\n  " + theme.fg("dim", messagePreview);
+        if (messageText) {
+          text += "\n  " + theme.fg("dim", messageText);
         }
         return new Text(text, 0, 0);
       },
@@ -2877,10 +2879,12 @@ Usage:
           };
       }
     },
-    renderCall(args, theme) {
+    renderCall(args, theme, context) {
       const action = typeof args.action === "string" ? args.action : "intercom";
       const target = typeof args.to === "string" && args.to.trim() ? args.to.trim() : undefined;
-      const messagePreview = previewText(args.message, 96);
+      const messageText = context.expanded && typeof args.message === "string"
+        ? args.message
+        : previewText(args.message, 96);
       const attachmentCount = Array.isArray(args.attachments) ? args.attachments.length : 0;
       let text = theme.fg("toolTitle", theme.bold("intercom "));
       text += theme.fg(action === "ask" ? "warning" : action === "reply" ? "success" : "accent", action);
@@ -2890,8 +2894,8 @@ Usage:
       if (attachmentCount > 0) {
         text += " " + theme.fg("dim", `(${attachmentCount} attachment${attachmentCount === 1 ? "" : "s"})`);
       }
-      if (messagePreview) {
-        text += "\n  " + theme.fg("dim", messagePreview);
+      if (messageText) {
+        text += "\n  " + theme.fg("dim", messageText);
       }
       return new Text(text, 0, 0);
     },
