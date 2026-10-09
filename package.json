@@ -21,6 +21,7 @@
     "format-context.ts",
     "handover.ts",
     "herdr-location.ts",
+    "idle-wake.ts",
     "project-agent.ts",
     "reply-tracker.ts",
     "broker/**/*.ts",

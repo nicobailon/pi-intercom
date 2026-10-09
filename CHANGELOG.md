@@ -4,6 +4,9 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+### Fixed
+- When an intercom message and a subagent notice reached an idle session at the same moment, both extensions sent a wake prompt. Pi marks a run as started only after the prompt's setup finishes, so the second wake failed with `Extension "<runtime>" error: Agent is already processing a prompt`. pi-intercom and pi-subagents now share one wake per session, so the second message joins the turn the first one starts. pi-subagents needs its matching release.
+
 ## [0.16.1] - 2026-10-04
 
 ### Highlights

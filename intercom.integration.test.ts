@@ -2268,6 +2268,37 @@ test("idle interactive sessions wake through a user prompt instead of triggerTur
 		await harness.emitLifecycle("session_shutdown");
 		await cleanup();
 	}
+
+test("an idle wake sent by another extension covers intercom messages, and intercom's wake blocks theirs", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+  const harness = createExtensionHarness("shared-wake-worker", { hasUI: true, isIdle: () => true });
+  // The cross-extension contract that pi-subagents' parent wake reads and writes.
+  const reservations = (globalThis as Record<symbol, WeakMap<object, { sessionId: string; sentAt?: number }>>)[Symbol.for("pi.idle-wake.v1")];
+  const sessionManager = harness.ctx.sessionManager;
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const worker = await waitForSessionByName(planner, "shared-wake-worker");
+    reservations.set(sessionManager, { sessionId: sessionManager.getSessionId(), sentAt: Date.now() });
+
+    assert.equal((await planner.send(worker.id, { messageId: "shared-wake-1", text: "First" })).delivered, true);
+    await waitForCondition(() => harness.sentMessages.length === 1, "first injected message");
+    assert.deepEqual(harness.userMessages, [], "a second wake prompt during the other wake's preflight throws in Pi");
+
+    await harness.emitLifecycle("agent_start");
+    await harness.emitLifecycle("agent_end");
+    assert.equal(reservations.get(sessionManager)?.sentAt, undefined, "a started run releases the shared wake");
+    assert.equal((await planner.send(worker.id, { messageId: "shared-wake-2", text: "Second" })).delivered, true);
+    await waitForCondition(() => harness.sentMessages.length === 2, "second injected message");
+    assert.deepEqual(harness.userMessages, ["New intercom message above."]);
+    assert.notEqual(reservations.get(sessionManager)?.sentAt, undefined, "other extensions see intercom's wake");
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
 });
 
 test("broker rejects changed duplicate message IDs and replays identical sends without reinjection", { concurrency: false }, async () => {

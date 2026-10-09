@@ -39,6 +39,7 @@ import { relaySenderName } from "./cross-machine-envelope.ts";
 import { runCommand, sendCrossMachine } from "./cross-machine-transport.ts";
 import { listMachineAgents, listSavedMachines, parseCrossMachineTarget } from "./cross-machine-discovery.ts";
 import { formatHandoverMessage, generateHandoverBody, readGitState } from "./handover.ts";
+import { isIdleWakePending, releaseIdleWake, reserveIdleWake } from "./idle-wake.ts";
 
 const INTERCOM_TOOL_NAME = "intercom";
 const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
@@ -672,11 +673,6 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   let runtimeStarted = false;
   let runtimeGeneration = 0;
   let agentRunning = false;
-  // A wake prompt stays pending until agent_start: Pi marks the run active only after its async
-  // preflight. Pi exposes no prompt completion, and a handled or failed preflight never emits
-  // agent_start, so the reservation expires after a bounded window instead of latching.
-  let idleWakeRequestedAt = 0;
-  const idleWakePending = () => idleWakeRequestedAt > 0 && Date.now() - idleWakeRequestedAt < 10_000;
   const heldInboundMessages: InboundMessageEntry[] = [];
   let heldInboundTimer: NodeJS.Timeout | null = null;
   function dropHeldInboundMessage(messageId: string, receipt: { status: MessageReceiptStatus; detail?: string }): boolean {
@@ -1297,9 +1293,10 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     );
     // Pi skips before_agent_start for sendMessage({ triggerTurn: true }) turns (pi#5581),
     // so wake an idle session with a user prompt that runs the normal prompt lifecycle.
-    if (trigger && !idleWakePending() && getLiveContext(runtimeContext, generation)?.isIdle()) {
-      idleWakeRequestedAt = Date.now();
-      pi.sendUserMessage("New intercom message above.");
+    const wakeContext = trigger ? getLiveContext(runtimeContext, generation) : undefined;
+    if (wakeContext?.isIdle() && !isIdleWakePending(wakeContext.sessionManager)) {
+      reserveIdleWake(wakeContext.sessionManager);
+      pi.sendUserMessage("New intercom message above.", { deliverAs: "steer" });
     }
     emitMessageReceipt(injectedMessage.id, "injected");
   }
@@ -1335,7 +1332,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   function flushHeldInboundMessages(ctx: ExtensionContext, generation: number): void {
     if (!getLiveContext(ctx, generation)) return;
     if (config.busyDelivery === "human-first" && ctx.hasUI) {
-      if (ctx.isIdle() && !idleWakePending() && heldInboundMessages.length > 0) {
+      if (ctx.isIdle() && !isIdleWakePending(ctx.sessionManager) && heldInboundMessages.length > 0) {
         deliverIncomingBrokerMessage(heldInboundMessages.shift()!, ctx, generation);
       }
       if (heldInboundMessages.length === 0) clearHeldInboundTimer();
@@ -1880,7 +1877,6 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     disposed = false;
     runtimeStarted = true;
     runtimeGeneration += 1;
-    idleWakeRequestedAt = 0;
     outboxRequestIds.clear();
     reconnectAttempt = 0;
     clearReconnectTimer();
@@ -2073,8 +2069,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       if (heldInboundMessages.length === 0) clearHeldInboundTimer();
     }
   });
-  pi.on("agent_start", () => {
-    idleWakeRequestedAt = 0;
+  pi.on("agent_start", (_event, ctx) => {
+    releaseIdleWake(ctx.sessionManager);
     if (!getLiveContext()) {
       return;
     }
