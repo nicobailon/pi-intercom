@@ -264,6 +264,7 @@ class IntercomBroker {
   private unregisteredConnections = new Set<net.Socket>();
   private server: net.Server;
   private livenessSweepTimer: NodeJS.Timeout | null = null;
+  private lastLivenessSweepAt = Date.now();
   private shutdownTimer: NodeJS.Timeout | null = null;
   private readonly askTimeoutMs = getAskTimeoutMs();
   private namespaceOwners = new Map<string, NamespaceOwner>();
@@ -318,12 +319,23 @@ class IntercomBroker {
     process.on("SIGINT", () => this.shutdown());
     this.livenessSweepTimer = setInterval(() => this.evictSilentSessions(), LIVENESS_SWEEP_MS);
     this.livenessSweepTimer.unref();
+    this.lastLivenessSweepAt = Date.now();
   }
 
   // A process that died without closing its socket can leave it open, and writes to it
   // still succeed. Dropping a session whose client stopped heartbeating hands its mail
   // to the mailbox through the normal close path.
   private evictSilentSessions(now = Date.now()): void {
+    const sinceLastSweepMs = now - this.lastLivenessSweepAt;
+    this.lastLivenessSweepAt = now;
+    // A sweep this late means the broker itself was paused (system sleep suspends the
+    // broker and its clients together); a missed tick plus 1s covers ordinary timer lag.
+    // Silence measured across the pause is not the clients' fault, so restart every
+    // session's window and let each heartbeat again before judging it.
+    if (sinceLastSweepMs > 2 * LIVENESS_SWEEP_MS + 1000) {
+      for (const session of this.sessions.values()) session.lastInboundAt = now;
+      return;
+    }
     for (const session of this.sessions.values()) {
       if (session.livenessIntervalMs === undefined) continue;
       const silentMs = now - session.lastInboundAt;
