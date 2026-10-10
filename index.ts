@@ -3053,6 +3053,10 @@ Usage:
     try {
       await ensureConnected("background");
     } catch (error) {
+      if (getLiveContext(liveContext, commandGeneration)) {
+        // The command cleared the reconnect timer above, so queue the retry it promises.
+        scheduleReconnect();
+      }
       notifyAliasCommand(liveContext, `Joined intercom pool ${requested}, but intercom is unavailable: ${getErrorMessage(error)}. Retrying in the background.`, "warning", commandGeneration);
       return;
     }
