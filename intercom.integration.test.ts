@@ -951,6 +951,67 @@ test("broker rejects changed message content after a rebound exact-target failur
   }
 });
 
+test("broker reports socket delivery only after a receipt-promising receiver confirms it", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { createMessageReader } = await import("./broker/framing.ts");
+  const previousTimeout = process.env.PI_INTERCOM_RECEIPT_TIMEOUT_MS;
+  process.env.PI_INTERCOM_RECEIPT_TIMEOUT_MS = "300";
+  const { planner, orchestrator, cleanup } = await setupClients().finally(() => {
+    if (previousTimeout === undefined) delete process.env.PI_INTERCOM_RECEIPT_TIMEOUT_MS;
+    else process.env.PI_INTERCOM_RECEIPT_TIMEOUT_MS = previousTimeout;
+  });
+  const silent = await connectRawRegistered("silent-receiver", "silent-receiver", { acknowledgesReceipts: true });
+  const closing = await connectRawRegistered("closing-receiver", "closing-receiver", { acknowledgesReceipts: true });
+  const sender = await connectRawRegistered("stalled-sender", "stalled-sender");
+  const harness = createExtensionHarness("receipt-worker", { hasUI: true });
+  const outcome = (result: { delivered: boolean; delivery: string; outcomeKnown: boolean; retryable: boolean; code?: string }) =>
+    ({ delivered: result.delivered, delivery: result.delivery, outcomeKnown: result.outcomeKnown, retryable: result.retryable, code: result.code });
+
+  try {
+    assert.deepEqual(outcome(await planner.send("silent-receiver", { text: "never confirmed" })),
+      { delivered: false, delivery: "unknown", outcomeKnown: false, retryable: true, code: "E_RECEIPT_TIMEOUT" });
+    closing.socket.on("data", createMessageReader((frame) => {
+      if ((frame as { type?: string }).type === "message") closing.socket.destroy();
+    }, () => undefined));
+    assert.deepEqual(outcome(await planner.send("closing-receiver", { text: "dropped" })),
+      { delivered: false, delivery: "unknown", outcomeKnown: false, retryable: true, code: "E_RECEIVER_DISCONNECTED" });
+    // Clients that never promised receipts keep the immediate socket_delivered result.
+    assert.equal((await planner.send(orchestrator.sessionId!, { text: "bare client" })).delivery, "socket_delivered");
+
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const worker = await waitForSessionByName(planner, "receipt-worker");
+    assert.equal((await planner.send(worker.id, { text: "confirmed" })).delivery, "socket_delivered");
+
+    const results: Array<Record<string, unknown>> = [];
+    sender.socket.on("data", createMessageReader((frame) => {
+      const result = frame as Record<string, unknown>;
+      if ((result.type === "delivered" || result.type === "delivery_failed") && result.messageId === "stalled-receipt") results.push(result);
+    }, () => undefined));
+    const send = () => sender.writeMessage(sender.socket, {
+      type: "send",
+      to: worker.id,
+      message: { id: "stalled-receipt", timestamp: Date.now(), content: { text: "inject once" } },
+    });
+    send();
+    // The receiving extension runs in this process: stall it past the broker's receipt timeout.
+    const stallUntil = Date.now() + 800;
+    while (Date.now() < stallUntil) { /* stalled receiver */ }
+    await waitForCondition(() => results.length === 1, "unconfirmed delivery result");
+    assert.equal(results[0]?.delivery, "unknown");
+    send();
+    await waitForCondition(() => results.length === 2, "retried delivery result");
+    assert.equal(results[1]?.delivery, "socket_delivered");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const injected = harness.sentMessages.filter((sent) => (sent.message.details as { message?: Message } | undefined)?.message?.id === "stalled-receipt");
+    assert.equal(injected.length, 1);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    for (const raw of [silent, closing, sender]) raw.socket.destroy();
+    await cleanup();
+  }
+});
+
 test("all-non-Herdr rosters preserve upstream structured and text output without invoking Herdr", { concurrency: false }, async () => {
   const fixtureDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-no-herdr-"));
   const marker = path.join(fixtureDir, "invoked");

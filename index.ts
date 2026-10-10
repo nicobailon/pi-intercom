@@ -970,6 +970,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       ...(tmuxPane ? { tmuxPane } : {}),
       ...(herdrPaneId ? { herdrPaneId } : {}),
       ...(herdrSessionPath ? { herdrSessionPath } : {}),
+      // handleIncomingMessage sends receiver_received (or acknowledged) for every message it is handed.
+      acknowledgesReceipts: true,
       ...(localExtensions.size > 0
         ? {
             extensions: currentExtensionCapabilities(),
@@ -1790,6 +1792,12 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       });
       if (!result.delivered) {
         const errorText = result.reason ?? "Session may not exist or has disconnected.";
+        if (!result.outcomeKnown) {
+          return {
+            content: [{ type: "text", text: `Delivery to "${targetDisplay}" could not be confirmed: ${errorText}. The message may still arrive, so a new send could duplicate it.` }],
+            details: deliveryDetails(result),
+          };
+        }
         return {
           content: [{ type: "text", text: `Message to "${targetDisplay}" was not delivered: ${errorText}` }],
           details: deliveryDetails(result),

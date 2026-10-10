@@ -267,6 +267,9 @@ export function isSessionRegistration(value: unknown): value is SessionRegistrat
   if (value.herdrSessionPath !== undefined && typeof value.herdrSessionPath !== "string") {
     return false;
   }
+  if (value.acknowledgesReceipts !== undefined && typeof value.acknowledgesReceipts !== "boolean") {
+    return false;
+  }
 
   return value.status === undefined || typeof value.status === "string";
 }

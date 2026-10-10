@@ -45,6 +45,17 @@ const MAILBOX_MESSAGE_RETENTION_MS = 24 * 60 * 60 * 1000;
 const MAX_MAILBOX_MESSAGES = 256;
 const DELIVERY_RECORD_RETENTION_MS = 60 * 60 * 1000;
 const MAX_DELIVERY_RECORDS = 4096;
+// Must stay below the client's 10s send timeout, so an unconfirmed send resolves as unknown instead of throwing.
+const RECEIPT_TIMEOUT_MS = readReceiptTimeoutMs(process.env.PI_INTERCOM_RECEIPT_TIMEOUT_MS);
+const RECEIPT_PROOF_STATUSES = new Set(["receiver_received", "acknowledged", "queued", "injected"]);
+
+function readReceiptTimeoutMs(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === "") return 2000;
+  const value = Number(raw);
+  if (Number.isSafeInteger(value) && value > 0 && value < 10000) return value;
+  console.error("PI_INTERCOM_RECEIPT_TIMEOUT_MS must be a positive integer below 10000; using 2000");
+  return 2000;
+}
 
 function serializedPayloadSize(payload: unknown): number | null {
   try {
@@ -66,6 +77,19 @@ interface ConnectedSession {
   /** Stable Pi session identity used only for live Herdr snapshot joins. This
    * is a self-asserted local-client hint, not authenticated location evidence. */
   herdrSessionPath?: string;
+  acknowledgesReceipts: boolean;
+}
+
+/** A socket delivery whose success reply waits for the receiver's receipt. */
+interface PendingReceipt {
+  senderSocket: net.Socket;
+  fromKey: string;
+  messageId: string;
+  targetSocket: net.Socket;
+  scopeId?: string;
+  expectsReply: boolean;
+  replyTo?: string;
+  timer: NodeJS.Timeout;
 }
 
 interface DeliveryRecord {
@@ -210,6 +234,7 @@ class IntercomBroker {
   private disconnectedSessions = new Map<string, DisconnectedSession>();
   private mailboxMessages: MailboxMessage[] = [];
   private deliveryRecords = new Map<string, DeliveryRecord>();
+  private pendingReceipts = new Map<string, PendingReceipt>();
   private connections = new Set<net.Socket>();
   private unregisteredConnections = new Set<net.Socket>();
   private server: net.Server;
@@ -322,6 +347,7 @@ class IntercomBroker {
     socket.on("close", () => {
       clearRegistrationTimeout();
       this.connections.delete(socket);
+      this.settlePendingReceiptsForSocket(socket);
       if (sessionKey) {
         const existing = this.sessions.get(sessionKey);
         if (existing?.socket === socket) {
@@ -490,6 +516,7 @@ class IntercomBroker {
           ownerOrder: previous?.ownerOrder ?? this.nextOwnerOrder++,
           extensions,
           ...(session.herdrSessionPath ? { herdrSessionPath: session.herdrSessionPath } : {}),
+          acknowledgesReceipts: session.acknowledgesReceipts === true,
         };
         this.sessions.set(key, connectedSession);
         this.disconnectedSessions.delete(key);
@@ -733,18 +760,13 @@ class IntercomBroker {
             });
             this.updateDeliveryRecord(currentKey, message.supersedes, "failed", `Superseded by ${message.id}`, "E_DELIVERY_SUPERSEDED");
           }
+          this.messageReceiptRoutes.set(message.id, { from: currentKey, to: target.key, createdAt: brokerReceivedAt });
           writeMessage(target.socket, {
             type: "message",
             from: fromSession.info,
             message: deliveredMessage,
           });
-          if (message.replyTo) {
-            this.askEdges.delete(message.replyTo);
-            this.removePendingAskRecord(message.replyTo, fromSession.scopeId);
-          }
-          this.messageReceiptRoutes.set(message.id, { from: currentKey, to: target.key, createdAt: brokerReceivedAt });
-          this.recordDelivery(currentKey, message.id, fingerprint, "socket_delivered");
-          this.writeDeliverySuccess(socket, message.id, "socket_delivered");
+          this.completeSocketDelivery(socket, currentKey, fromSession.scopeId, target, message, fingerprint);
           break;
         }
 
@@ -784,21 +806,19 @@ class IntercomBroker {
               brokerReceivedAt,
               brokerDeliveredAt: Date.now(),
             };
+            this.messageReceiptRoutes.set(message.id, { from: currentKey, to: liveMailboxTarget.key, createdAt: brokerReceivedAt });
             writeMessage(liveMailboxTarget.socket, {
               type: "message",
               from: fromSession.info,
               message: deliveredMessage,
             });
-            this.messageReceiptRoutes.set(message.id, { from: currentKey, to: liveMailboxTarget.key, createdAt: brokerReceivedAt });
-          } else {
-            this.queueMailboxMessage(fromSession, disconnectedTarget, message, brokerReceivedAt);
+            this.completeSocketDelivery(socket, currentKey, fromSession.scopeId, liveMailboxTarget, message, fingerprint);
+            break;
           }
-          if (message.replyTo) {
-            this.askEdges.delete(message.replyTo);
-            this.removePendingAskRecord(message.replyTo, fromSession.scopeId);
-          }
-          this.recordDelivery(currentKey, message.id, fingerprint, liveMailboxTarget ? "socket_delivered" : "queued");
-          this.writeDeliverySuccess(socket, message.id, liveMailboxTarget ? "socket_delivered" : "queued");
+          this.queueMailboxMessage(fromSession, disconnectedTarget, message, brokerReceivedAt);
+          this.releaseReplyEdge(message.replyTo, fromSession.scopeId);
+          this.recordDelivery(currentKey, message.id, fingerprint, "queued");
+          this.writeDeliverySuccess(socket, message.id, "queued");
           break;
         }
 
@@ -822,6 +842,9 @@ class IntercomBroker {
         const route = this.messageReceiptRoutes.get(clientMessage.receipt.messageId);
         const receiver = this.sessions.get(currentKey);
         const sender = route ? this.sessions.get(route.from) : undefined;
+        if (route?.to === currentKey && receiver?.socket === socket && RECEIPT_PROOF_STATUSES.has(clientMessage.receipt.status)) {
+          this.confirmPendingReceipt(this.deliveryRecordKey(route.from, clientMessage.receipt.messageId), socket);
+        }
         if (route?.to === currentKey && receiver?.socket === socket && sender) {
           writeMessage(sender.socket, {
             type: "message_receipt",
@@ -1065,6 +1088,87 @@ class IntercomBroker {
     writeMessage(socket, { type: "delivery_failed", messageId, reason, delivery: "failed", code, retryable, outcomeKnown: true });
   }
 
+  private releaseReplyEdge(replyTo: string | undefined, scopeId: string | undefined): void {
+    if (!replyTo) return;
+    this.askEdges.delete(replyTo);
+    this.removePendingAskRecord(replyTo, scopeId);
+  }
+
+  // Called right after the message was written to the target socket. A receiver
+  // that promised receipts must confirm before the sender hears "delivered":
+  // a socket whose process died still accepts writes.
+  private completeSocketDelivery(senderSocket: net.Socket, fromKey: string, scopeId: string | undefined, target: ConnectedSession, message: Message, fingerprint: string): void {
+    if (!target.acknowledgesReceipts) {
+      this.releaseReplyEdge(message.replyTo, scopeId);
+      this.recordDelivery(fromKey, message.id, fingerprint, "socket_delivered");
+      this.writeDeliverySuccess(senderSocket, message.id, "socket_delivered");
+      return;
+    }
+    const key = this.deliveryRecordKey(fromKey, message.id);
+    this.recordDelivery(fromKey, message.id, fingerprint, "unknown", "Waiting for the receiver to confirm receipt", "E_RECEIPT_PENDING", true);
+    const timer = setTimeout(() => {
+      this.failPendingReceipt(key, `Receiver did not confirm receipt within ${RECEIPT_TIMEOUT_MS}ms`, "E_RECEIPT_TIMEOUT");
+    }, RECEIPT_TIMEOUT_MS);
+    timer.unref();
+    this.pendingReceipts.set(key, {
+      senderSocket,
+      fromKey,
+      messageId: message.id,
+      targetSocket: target.socket,
+      ...(scopeId ? { scopeId } : {}),
+      expectsReply: message.expectsReply === true,
+      ...(message.replyTo ? { replyTo: message.replyTo } : {}),
+      timer,
+    });
+  }
+
+  private confirmPendingReceipt(key: string, receiverSocket: net.Socket): void {
+    const pending = this.pendingReceipts.get(key);
+    if (!pending || pending.targetSocket !== receiverSocket) return;
+    clearTimeout(pending.timer);
+    this.pendingReceipts.delete(key);
+    // A cancel or supersede may already have settled the record while the receipt was in flight.
+    if (this.deliveryRecords.get(key)?.state === "unknown") {
+      this.updateDeliveryRecord(pending.fromKey, pending.messageId, "socket_delivered");
+    }
+    // Release the answered ask only now, so a retry of an unconfirmed reply still matches it.
+    this.releaseReplyEdge(pending.replyTo, pending.scopeId);
+    if (pending.senderSocket.writable) this.writeDeliverySuccess(pending.senderSocket, pending.messageId, "socket_delivered");
+  }
+
+  private failPendingReceipt(key: string, reason: string, code: string): void {
+    const pending = this.pendingReceipts.get(key);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingReceipts.delete(key);
+    const record = this.deliveryRecords.get(key);
+    if (record?.state === "unknown") {
+      record.reason = reason;
+      record.code = code;
+      record.retryable = true;
+      record.outcomeKnown = false;
+    }
+    // The asker stops waiting on an unconfirmed ask; a retry registers the ask again.
+    const edge = pending.expectsReply ? this.askEdges.get(pending.messageId) : undefined;
+    if (edge?.from === pending.fromKey) {
+      this.askEdges.delete(pending.messageId);
+      this.removePendingAskRecord(pending.messageId, pending.scopeId);
+    }
+    if (pending.senderSocket.writable) {
+      writeMessage(pending.senderSocket, { type: "delivery_failed", messageId: pending.messageId, reason, delivery: "unknown", code, retryable: true, outcomeKnown: false });
+    }
+  }
+
+  private settlePendingReceiptsForSocket(socket: net.Socket): void {
+    for (const [key, pending] of this.pendingReceipts) {
+      if (pending.targetSocket === socket) {
+        this.failPendingReceipt(key, "Receiver disconnected before confirming receipt", "E_RECEIVER_DISCONNECTED");
+      } else if (pending.senderSocket === socket) {
+        this.failPendingReceipt(key, "Sender disconnected before the receiver confirmed receipt", "E_RECEIPT_TIMEOUT");
+      }
+    }
+  }
+
   private deliveryFingerprint(message: Message, targetId: string): string {
     return messageDeliveryFingerprint(message, targetId);
   }
@@ -1080,6 +1184,17 @@ class IntercomBroker {
     if (record.fingerprint !== fingerprint) {
       this.writeDeliveryFailure(socket, messageId, "Message id was reused with different authored content", "E_MESSAGE_ID_REUSE");
       return true;
+    }
+    if (record.state === "unknown") {
+      const pending = this.pendingReceipts.get(this.deliveryRecordKey(fromSessionId, messageId));
+      if (pending) {
+        // The receipt is still in flight; its outcome answers this retry.
+        pending.senderSocket = socket;
+        return true;
+      }
+      // Receivers drop duplicate message ids, so a retry of an unconfirmed delivery is safe.
+      this.deliveryRecords.delete(this.deliveryRecordKey(fromSessionId, messageId));
+      return false;
     }
     if (record.code === "E_TARGET_REBOUND" && record.retryable) {
       return false;
@@ -1712,6 +1827,8 @@ class IntercomBroker {
     this.messageReceiptRoutes.clear();
     this.disconnectedSessions.clear();
     this.mailboxMessages.length = 0;
+    for (const pending of this.pendingReceipts.values()) clearTimeout(pending.timer);
+    this.pendingReceipts.clear();
     if (typeof LISTEN_TARGET === "string" && process.platform !== "win32") {
       try {
         unlinkSync(LISTEN_TARGET);

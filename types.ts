@@ -139,6 +139,8 @@ export type SessionRegistration = Omit<SessionInfo, "id" | "endpointEpoch" | "pe
   extensions?: ExtensionCapability[];
   /** Broker-only join hint; never returned in the public roster. */
   herdrSessionPath?: string;
+  /** The client sends `receiver_received` for every message it is handed, so the broker may wait for it before reporting delivery. */
+  acknowledgesReceipts?: boolean;
 };
 
 export type ClientMessage =
