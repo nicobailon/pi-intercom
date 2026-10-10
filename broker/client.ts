@@ -314,7 +314,8 @@ export class IntercomClient extends EventEmitter {
         const scopeId = getIntercomScopeId();
         writeMessage(socket, {
           type: "register",
-          session,
+          // The heartbeat started on registration sends a frame at least this often.
+          session: { ...session, livenessIntervalMs: getLivenessIntervalMs() },
           ...(sessionId ? { sessionId } : {}),
           ...(scopeId ? { scopeId } : {}),
           ...(typeof target === "string" ? {} : { stateId: target.stateId }),

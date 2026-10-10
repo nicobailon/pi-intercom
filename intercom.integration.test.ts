@@ -1095,6 +1095,41 @@ test("broker reports socket delivery only after a receipt-promising receiver con
   }
 });
 
+test("broker drops a session whose client stopped heartbeating, so its mail queues", { concurrency: false }, async () => {
+  const withEnv = async <T>(name: string, value: string, run: () => Promise<T>): Promise<T> => {
+    const previous = process.env[name];
+    process.env[name] = value;
+    try {
+      return await run();
+    } finally {
+      if (previous === undefined) delete process.env[name];
+      else process.env[name] = previous;
+    }
+  };
+  const { planner, cleanup } = await withEnv("PI_INTERCOM_LIVENESS_SWEEP_MS", "50", setupClients);
+  const silent = await connectRawRegistered("silent-heartbeat", "silent-heartbeat", { livenessIntervalMs: 100 });
+  const legacy = await connectRawRegistered("no-heartbeat-promise", "no-heartbeat-promise");
+  const heartbeating = new IntercomClient();
+
+  try {
+    await withEnv("PI_INTERCOM_LIVENESS_INTERVAL_MS", "200", () => heartbeating.connect({
+      name: "heartbeating", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now(),
+    }));
+    await waitForNoSessionId(planner, "silent-heartbeat");
+    // Three of the heartbeating client's 600 ms windows.
+    await new Promise((resolve) => setTimeout(resolve, 1800));
+    const roster = (await planner.listSessions()).map((session) => session.id);
+    assert.ok(roster.includes(heartbeating.sessionId!), "a heartbeating client stays registered");
+    assert.ok(roster.includes("no-heartbeat-promise"), "a client that never promised a heartbeat is not dropped");
+    assert.equal((await planner.send("silent-heartbeat", { text: "for later" })).delivery, "queued");
+  } finally {
+    await heartbeating.disconnect().catch(() => undefined);
+    silent.socket.destroy();
+    legacy.socket.destroy();
+    await cleanup();
+  }
+});
+
 test("all-non-Herdr rosters preserve upstream structured and text output without invoking Herdr", { concurrency: false }, async () => {
   const fixtureDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-no-herdr-"));
   const marker = path.join(fixtureDir, "invoked");

@@ -49,6 +49,15 @@ const DEFAULT_RECEIPT_TIMEOUT_MS = 5000;
 // Must stay below the client's 10s send timeout, so an unconfirmed send resolves as unknown instead of throwing.
 const RECEIPT_TIMEOUT_MS = readReceiptTimeoutMs(process.env.PI_INTERCOM_RECEIPT_TIMEOUT_MS);
 const RECEIPT_PROOF_STATUSES = new Set(["receiver_received", "acknowledged", "queued", "injected"]);
+// A session that advertised its heartbeat interval and stays silent this many intervals is dropped.
+const LIVENESS_MISSED_INTERVALS = 3;
+const LIVENESS_SWEEP_MS = readPositiveIntEnv(process.env.PI_INTERCOM_LIVENESS_SWEEP_MS, 10_000);
+const TCP_KEEPALIVE_DELAY_MS = 30_000;
+
+function readPositiveIntEnv(raw: string | undefined, fallback: number): number {
+  const value = Number(raw);
+  return raw !== undefined && Number.isSafeInteger(value) && value > 0 ? value : fallback;
+}
 
 function readReceiptTimeoutMs(raw: string | undefined): number {
   if (raw === undefined || raw.trim() === "") return DEFAULT_RECEIPT_TIMEOUT_MS;
@@ -79,6 +88,10 @@ interface ConnectedSession {
    * is a self-asserted local-client hint, not authenticated location evidence. */
   herdrSessionPath?: string;
   acknowledgesReceipts: boolean;
+  /** Heartbeat interval the client promised; absent for clients that never heartbeat. */
+  livenessIntervalMs?: number;
+  /** Last time any frame arrived on this session's socket. */
+  lastInboundAt: number;
 }
 
 /** A socket delivery whose success reply waits for the receiver's receipt. */
@@ -250,6 +263,7 @@ class IntercomBroker {
   private connections = new Set<net.Socket>();
   private unregisteredConnections = new Set<net.Socket>();
   private server: net.Server;
+  private livenessSweepTimer: NodeJS.Timeout | null = null;
   private shutdownTimer: NodeJS.Timeout | null = null;
   private readonly askTimeoutMs = getAskTimeoutMs();
   private namespaceOwners = new Map<string, NamespaceOwner>();
@@ -302,10 +316,28 @@ class IntercomBroker {
     }
     process.on("SIGTERM", () => this.shutdown());
     process.on("SIGINT", () => this.shutdown());
+    this.livenessSweepTimer = setInterval(() => this.evictSilentSessions(), LIVENESS_SWEEP_MS);
+    this.livenessSweepTimer.unref();
+  }
+
+  // A process that died without closing its socket can leave it open, and writes to it
+  // still succeed. Dropping a session whose client stopped heartbeating hands its mail
+  // to the mailbox through the normal close path.
+  private evictSilentSessions(now = Date.now()): void {
+    for (const session of this.sessions.values()) {
+      if (session.livenessIntervalMs === undefined) continue;
+      const silentMs = now - session.lastInboundAt;
+      if (silentMs <= session.livenessIntervalMs * LIVENESS_MISSED_INTERVALS) continue;
+      if (session.socket.destroyed) continue;
+      console.log(`Dropping session ${session.info.id}: no heartbeat for ${silentMs}ms`);
+      session.socket.destroy();
+    }
   }
 
   private handleConnection(socket: net.Socket): void {
     this.connections.add(socket);
+    // Lets the OS notice a dead peer on the TCP transport; pipes and Unix sockets ignore it.
+    socket.setKeepAlive(true, TCP_KEEPALIVE_DELAY_MS);
     let sessionKey: string | null = null;
     let registrationTimeout: NodeJS.Timeout | null = null;
     const armRegistrationTimeout = () => {
@@ -342,6 +374,8 @@ class IntercomBroker {
         socket.destroy(new Error("Intercom broker rate limit exceeded"));
         return;
       }
+      const session = sessionKey ? this.sessions.get(sessionKey) : undefined;
+      if (session?.socket === socket) session.lastInboundAt = Date.now();
       this.handleMessage(socket, msg, sessionKey, (id) => {
         sessionKey = id;
         if (id) {
@@ -542,6 +576,8 @@ class IntercomBroker {
           extensions,
           ...(session.herdrSessionPath ? { herdrSessionPath: session.herdrSessionPath } : {}),
           acknowledgesReceipts: session.acknowledgesReceipts === true,
+          ...(session.livenessIntervalMs !== undefined ? { livenessIntervalMs: session.livenessIntervalMs } : {}),
+          lastInboundAt: Date.now(),
         };
         this.sessions.set(key, connectedSession);
         this.disconnectedSessions.delete(key);
@@ -1838,7 +1874,8 @@ class IntercomBroker {
 
   private shutdown(): void {
     console.log("Broker shutting down");
-    
+    if (this.livenessSweepTimer) clearInterval(this.livenessSweepTimer);
+
     for (const session of this.sessions.values()) {
       session.socket.end();
     }

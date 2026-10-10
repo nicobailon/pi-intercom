@@ -143,6 +143,8 @@ export type SessionRegistration = Omit<SessionInfo, "id" | "endpointEpoch" | "pe
   herdrSessionPath?: string;
   /** The client sends `receiver_received` for every message it is handed, so the broker may wait for it before reporting delivery. */
   acknowledgesReceipts?: boolean;
+  /** The client sends a frame at least this often, so the broker may drop it after several silent intervals. */
+  livenessIntervalMs?: number;
 };
 
 export type ClientMessage =
