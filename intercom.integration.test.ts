@@ -2268,6 +2268,7 @@ test("idle interactive sessions wake through a user prompt instead of triggerTur
 		await harness.emitLifecycle("session_shutdown");
 		await cleanup();
 	}
+});
 
 test("an idle wake sent by another extension covers intercom messages, and intercom's wake blocks theirs", { concurrency: false }, async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
@@ -2298,7 +2299,6 @@ test("an idle wake sent by another extension covers intercom messages, and inter
     await harness.emitLifecycle("session_shutdown");
     await cleanup();
   }
-});
 });
 
 test("broker rejects changed duplicate message IDs and replays identical sends without reinjection", { concurrency: false }, async () => {
