@@ -51,7 +51,7 @@ function toError(error: unknown): Error {
  */
 function getLivenessIntervalMs(): number {
   const raw = Number.parseInt(process.env.PI_INTERCOM_LIVENESS_INTERVAL_MS ?? "", 10);
-  return Number.isFinite(raw) && raw > 0 ? raw : 30_000;
+  return Number.isSafeInteger(raw) && raw > 0 ? raw : 30_000;
 }
 
 function getLivenessTimeoutMs(): number {
