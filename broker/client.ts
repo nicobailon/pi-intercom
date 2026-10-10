@@ -5,7 +5,7 @@ import { writeMessage, createMessageReader } from "./framing.ts";
 import { getBrokerConnectTarget, type BrokerConnectTarget } from "./paths.ts";
 import { isMessage, isMessageControl, isMessageReceipt, isSessionInfo } from "./protocol.ts";
 import { getIntercomScopeId } from "../config.ts";
-import { EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, type DeliveryDetails } from "../types.ts";
+import { EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, SESSION_HELD_ERROR_CODE, type DeliveryDetails } from "../types.ts";
 import type {
   Attachment,
   BrokerMessage,
@@ -63,6 +63,28 @@ function connectToBrokerTarget(target: BrokerConnectTarget): net.Socket {
   return typeof target === "string"
     ? net.connect(target)
     : net.connect({ host: target.host, port: target.port });
+}
+
+export interface SessionHolder {
+  pid: number;
+  cwd: string;
+  name?: string;
+}
+
+/** connect() rejected because another live process holds the requested session id. */
+export class IntercomSessionHeldError extends Error {
+  readonly code = SESSION_HELD_ERROR_CODE;
+  constructor(message: string, readonly holder: SessionHolder | undefined) {
+    super(message);
+    this.name = "IntercomSessionHeldError";
+  }
+}
+
+function parseSessionHolder(value: unknown): SessionHolder | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const { pid, cwd, name } = value as Record<string, unknown>;
+  if (typeof pid !== "number" || typeof cwd !== "string") return undefined;
+  return { pid, cwd, ...(typeof name === "string" ? { name } : {}) };
 }
 
 export class IntercomClient extends EventEmitter {
@@ -251,6 +273,10 @@ export class IntercomClient extends EventEmitter {
       };
 
       const onReaderError = (error: Error) => {
+        if (!connectionEstablished && error.cause instanceof IntercomSessionHeldError) {
+          onError(error.cause);
+          return;
+        }
         const protocolError = new Error(`Intercom protocol error: ${error.message}`, { cause: error });
         if (!connectionEstablished) {
           onError(protocolError);
@@ -463,6 +489,9 @@ export class IntercomClient extends EventEmitter {
         }
 
         if (this._sessionId === null) {
+          if (brokerMessage.code === SESSION_HELD_ERROR_CODE) {
+            throw new IntercomSessionHeldError(brokerMessage.error, parseSessionHolder(brokerMessage.holder));
+          }
           throw new Error(brokerMessage.error);
         }
         this.emit("error", new Error(brokerMessage.error));

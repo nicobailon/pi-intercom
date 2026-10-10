@@ -3,7 +3,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { randomUUID } from "crypto";
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
-import { IntercomClient, type SendResult } from "./broker/client.ts";
+import { IntercomClient, IntercomSessionHeldError, type SendResult } from "./broker/client.ts";
 import { spawnBrokerIfNeeded } from "./broker/spawn.ts";
 import { SessionListOverlay, type SessionListSelection } from "./ui/session-list.ts";
 import { HandoverPicker, type HandoverPickerResult, type RemoteSessionLister } from "./ui/handover-picker.ts";
@@ -676,6 +676,10 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   let reconnectPromiseGeneration: number | null = null;
   let startupConnectTimer: NodeJS.Timeout | null = null;
   let reconnectAttempt = 0;
+  // Set when the broker refused our session id because another live process holds it.
+  // Retrying cannot succeed until that process exits, so background reconnects stop
+  // until the next session start (/reload) or a successful manual connect.
+  let sessionHeldBlocked = false;
   let shuttingDown = false;
   let disposed = true;
   let runtimeStarted = false;
@@ -1517,7 +1521,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
   }
   function scheduleReconnect(): void {
-    if (disposed || shuttingDown || reconnectTimer || reconnectPromise || !getLiveContext()) {
+    if (disposed || shuttingDown || sessionHeldBlocked || reconnectTimer || reconnectPromise || !getLiveContext()) {
       return;
     }
     const scheduledGeneration = runtimeGeneration;
@@ -1531,6 +1535,19 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         // ensureConnected("background") already queued the next retry.
       });
     }, getReconnectDelayMs());
+  }
+  function reportSessionHeld(ctx: ExtensionContext, generation: number, error: IntercomSessionHeldError): void {
+    if (sessionHeldBlocked || !getLiveContext(ctx, generation)) return;
+    sessionHeldBlocked = true;
+    const holder = error.holder ? `process ${error.holder.pid} in ${error.holder.cwd}` : "another live process";
+    const message = `Intercom is offline: session id ${currentIntercomSessionId} is held by ${holder}. Close that session and run /reload, or give this session its own PI_INTERCOM_STABLE_ID.`;
+    notifyIfLive(ctx, message, "warning", generation);
+    pi.appendEntry("intercom_session_held", {
+      sessionId: currentIntercomSessionId,
+      ...(error.holder ? { holder: error.holder } : {}),
+      error: error.message,
+      timestamp: Date.now(),
+    });
   }
   async function ensureConnected(reason: "startup" | "background" | "tool" | "overlay"): Promise<IntercomClient> {
     if (!config.enabled) {
@@ -1565,10 +1582,14 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         }
         client = nextClient;
         reconnectAttempt = 0;
+        sessionHeldBlocked = false;
         return nextClient;
       } catch (error) {
         if (client === nextClient) {
           client = null;
+        }
+        if (error instanceof IntercomSessionHeldError) {
+          reportSessionHeld(contextAtStart, generationAtStart, error);
         }
         retryAfterFailure = reason === "background";
         throw toError(error);
@@ -1894,6 +1915,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     runtimeGeneration += 1;
     outboxRequestIds.clear();
     reconnectAttempt = 0;
+    sessionHeldBlocked = false;
     clearReconnectTimer();
     clearStartupConnectTimer();
     clearNamePollTimer();

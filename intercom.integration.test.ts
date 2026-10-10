@@ -714,8 +714,11 @@ test("broker keeps a session id with its live holder and releases it from a dead
 
   try {
     const holder = await connectAs(otherProcess.pid!, "held-id");
-    await assert.rejects(connectAs(process.pid, "held-id"), (error: Error) =>
-      error.message.includes(`E_SESSION_HELD: intercom session held-id is held by live process ${otherProcess.pid} in ${repoDir}`));
+    await assert.rejects(connectAs(process.pid, "held-id"), (error: Error & { code?: string; holder?: { pid: number; cwd: string } }) => {
+      assert.equal(error.code, "E_SESSION_HELD");
+      assert.deepEqual(error.holder, { pid: otherProcess.pid, cwd: repoDir, name: "holder" });
+      return true;
+    });
     assert.equal((await waitForSessionId(planner, "held-id")).pid, otherProcess.pid);
     const received = once(holder, "message") as Promise<[SessionInfo, Message]>;
     assert.equal((await planner.send("held-id", { text: "still yours" })).delivered, true);
@@ -732,6 +735,44 @@ test("broker keeps a session id with its live holder and releases it from a dead
     assert.equal((await waitForSessionId(planner, "dead-holder-id")).pid, process.pid);
   } finally {
     for (const client of clients) await client.disconnect().catch(() => undefined);
+    otherProcess.kill();
+    await cleanup();
+  }
+});
+
+test("a session refused for a held id stops retrying, tells the user once, and retries after reload", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const otherProcess = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore" });
+  const holder = new IntercomClient();
+  const notifications: string[] = [];
+  const harness = createExtensionHarness("held-worker", {
+    sessionId: "held-session",
+    hasUI: true,
+    ui: { notify: (message: string) => { notifications.push(message); } },
+  });
+
+  try {
+    await holder.connect({ name: "holder", cwd: "/elsewhere", model: "test-model", pid: otherProcess.pid!, startedAt: Date.now(), lastActivity: Date.now() }, "held-session");
+    const { default: piIntercomExtension } = await import("./index.ts");
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    await waitForCondition(() => notifications.length > 0, "held-id notification");
+    assert.match(notifications[0]!, new RegExp(`held by process ${otherProcess.pid} in /elsewhere\\. Close that session and run /reload`));
+    assert.deepEqual(harness.entries.filter((entry) => entry.type === "intercom_session_held").map((entry) => (entry.data as { holder?: unknown }).holder),
+      [{ pid: otherProcess.pid, cwd: "/elsewhere", name: "holder" }]);
+
+    // With the holder gone, a retrying session would register within its 1 s backoff.
+    await holder.disconnect();
+    await waitForNoSessionId(planner, "held-session");
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    assert.equal((await planner.listSessions()).some((session) => session.id === "held-session"), false);
+    assert.equal(notifications.length, 1);
+
+    await harness.emitLifecycle("session_start");
+    await waitForSessionId(planner, "held-session");
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await holder.disconnect().catch(() => undefined);
     otherProcess.kill();
     await cleanup();
   }
