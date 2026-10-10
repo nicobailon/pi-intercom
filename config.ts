@@ -26,9 +26,9 @@ export function getIntercomScopeId(env: NodeJS.ProcessEnv = process.env): string
 }
 
 /** Sets this process's broker routing scope. Children launched afterwards inherit it. */
-export function setIntercomScopeId(scopeId: string | undefined, env: NodeJS.ProcessEnv = process.env): void {
-  if (scopeId) env[INTERCOM_SCOPE_ID_ENV] = scopeId;
-  else delete env[INTERCOM_SCOPE_ID_ENV];
+export function setIntercomScopeId(scopeId: string | undefined): void {
+  if (scopeId) process.env[INTERCOM_SCOPE_ID_ENV] = scopeId;
+  else delete process.env[INTERCOM_SCOPE_ID_ENV];
 }
 
 export type InboundTriggerPolicy = "always" | "replies" | "never";

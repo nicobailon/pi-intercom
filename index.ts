@@ -676,8 +676,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   let reconnectPromiseGeneration: number | null = null;
   let startupConnectTimer: NodeJS.Timeout | null = null;
   let reconnectAttempt = 0;
-  // Set when the broker refused our session id because another live process holds it.
-  // Retrying cannot succeed until that process exits, so background reconnects stop
+  // Retrying a held session id cannot succeed until its holder exits, so background reconnects stop
   // until the next session start (/reload) or a successful manual connect.
   let sessionHeldBlocked = false;
   let shuttingDown = false;
@@ -856,12 +855,12 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       // The UI can disappear during session shutdown/reload while async overlay work is settling.
     }
   }
-  function notifyAliasCommand(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error", generation = runtimeGeneration): void {
+  function notifyCommand(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error", generation = runtimeGeneration): void {
     const liveContext = getLiveContext(ctx, generation);
     if (!liveContext) return;
     if (!liveContext.hasUI) {
       // Command handlers return void and print mode supplies a no-op UI. Keep
-      // alias guidance visible without injecting a synthetic Pi message.
+      // command output visible without injecting a synthetic Pi message.
       console.error(message);
       return;
     }
@@ -982,7 +981,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       ...(tmuxPane ? { tmuxPane } : {}),
       ...(herdrPaneId ? { herdrPaneId } : {}),
       ...(herdrSessionPath ? { herdrSessionPath } : {}),
-      // handleIncomingMessage sends receiver_received (or acknowledged) for every message it is handed.
+      // handleIncomingMessage confirms every message it accepts; one that lands mid-reload goes unconfirmed.
       acknowledgesReceipts: true,
       ...(localExtensions.size > 0
         ? {
@@ -1539,12 +1538,11 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   function reportSessionHeld(ctx: ExtensionContext, generation: number, error: IntercomSessionHeldError): void {
     if (sessionHeldBlocked || !getLiveContext(ctx, generation)) return;
     sessionHeldBlocked = true;
-    const holder = error.holder ? `process ${error.holder.pid} in ${error.holder.cwd}` : "another live process";
-    const message = `Intercom is offline: session id ${currentIntercomSessionId} is held by ${holder}. Close that session and run /reload, or give this session its own PI_INTERCOM_STABLE_ID.`;
+    const message = `Intercom is offline: session id ${currentIntercomSessionId} is held by process ${error.holder.pid} in ${error.holder.cwd}. Close that session and run /reload, or give this session its own PI_INTERCOM_STABLE_ID.`;
     notifyIfLive(ctx, message, "warning", generation);
     pi.appendEntry("intercom_session_held", {
       sessionId: currentIntercomSessionId,
-      ...(error.holder ? { holder: error.holder } : {}),
+      holder: error.holder,
       error: error.message,
       timestamp: Date.now(),
     });
@@ -1956,7 +1954,6 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         if (!getLiveContext(ctx, startupGeneration)) {
           return;
         }
-        client = null;
         scheduleReconnect();
       });
     }, 0);
@@ -2848,12 +2845,11 @@ Usage:
               replyTo: target.message.id,
             });
             if (!result.delivered) {
-              const errorText = result.reason ?? "Session may not exist or has disconnected.";
               if (result.reason === "Session not found") {
                 dismissIncomingAsk(target.message.id);
               }
               return {
-                content: [{ type: "text", text: `Reply to "${target.from.name || target.from.id}" was not delivered: ${errorText}` }],
+                content: [{ type: "text", text: undeliveredText(target.from.name || target.from.id, result) }],
                 details: deliveryDetails(result),
               };
             }
@@ -2905,7 +2901,7 @@ Usage:
             return {
               content: [{
                 type: "text",
-                text: `**Intercom Status:**\nConnected: Yes\nSession ID: ${mySessionId}${pool ? `\nPool: ${pool}` : ""}\nActive sessions: ${sessions.length}`,
+                text: `**Intercom status:**\nConnected: Yes\nSession ID: ${mySessionId}${pool ? `\nPool: ${pool}` : ""}\nActive sessions: ${sessions.length}`,
               }],
               details: {},
             };
@@ -3010,7 +3006,7 @@ Usage:
     if (opensAliasInput) {
       if (!liveContext.hasUI) {
         const currentAlias = pi.getSessionName()?.trim();
-        notifyAliasCommand(
+        notifyCommand(
           liveContext,
           alias ? "The alias menu requires an interactive UI; use /alias <name>." : currentAlias ? `Session alias: ${currentAlias}` : "No session alias set. Use /alias <name>.",
           alias ? "warning" : "info",
@@ -3027,13 +3023,13 @@ Usage:
           currentAlias ? `Current alias: ${currentAlias}` : "Enter an alias",
         );
       } catch (error) {
-        notifyAliasCommand(liveContext, `Unable to set session alias: ${getErrorMessage(error)}`, "error", commandGeneration);
+        notifyCommand(liveContext, `Unable to set session alias: ${getErrorMessage(error)}`, "error", commandGeneration);
         return;
       }
       if (entered === undefined) return;
       alias = entered.trim();
       if (!alias) {
-        notifyAliasCommand(liveContext, "Session alias cannot be empty.", "warning", commandGeneration);
+        notifyCommand(liveContext, "Session alias cannot be empty.", "warning", commandGeneration);
         return;
       }
     }
@@ -3042,7 +3038,7 @@ Usage:
     try {
       pi.setSessionName(alias);
     } catch (error) {
-      notifyAliasCommand(liveContext, `Unable to set session alias: ${getErrorMessage(error)}`, "error", commandGeneration);
+      notifyCommand(liveContext, `Unable to set session alias: ${getErrorMessage(error)}`, "error", commandGeneration);
       return;
     }
 
@@ -3050,7 +3046,7 @@ Usage:
     // an ExtensionAPI event. Push the new identity directly so broker peers
     // see the alias without waiting for the idle name poll.
     syncPresenceIdentity(liveContext.sessionManager.getSessionId());
-    notifyAliasCommand(liveContext, `Session alias set: ${alias}`, "info", commandGeneration);
+    notifyCommand(liveContext, `Session alias set: ${alias}`, "info", commandGeneration);
   }
 
   async function runIntercomPoolCommand(args: string, ctx: ExtensionContext): Promise<void> {
@@ -3059,7 +3055,7 @@ Usage:
     if (!liveContext) return;
     const requested = args.trim();
     if (!requested) {
-      notifyAliasCommand(liveContext, `Intercom pool: ${getIntercomScopeId() ?? "default"}`, "info", commandGeneration);
+      notifyCommand(liveContext, `Intercom pool: ${getIntercomScopeId() ?? "default"}`, "info", commandGeneration);
       return;
     }
     const nextPool = requested === "default" ? undefined : requested;
@@ -3067,12 +3063,12 @@ Usage:
     await reconnectPromise?.catch(() => undefined);
     if (!getLiveContext(liveContext, commandGeneration)) return;
     if (nextPool === getIntercomScopeId()) {
-      notifyAliasCommand(liveContext, `Already in intercom pool: ${requested}`, "info", commandGeneration);
+      notifyCommand(liveContext, `Already in intercom pool: ${requested}`, "info", commandGeneration);
       return;
     }
     if (replyWaiter) {
       // The reply is routed inside the current pool and would be lost after the switch.
-      notifyAliasCommand(liveContext, `Cannot switch intercom pool while waiting for a reply from "${replyWaiter.from}". Wait for the reply or cancel the ask first.`, "warning", commandGeneration);
+      notifyCommand(liveContext, `Cannot switch intercom pool while waiting for a reply from "${replyWaiter.from}". Wait for the reply or cancel the ask first.`, "warning", commandGeneration);
       return;
     }
 
@@ -3087,13 +3083,13 @@ Usage:
       await ensureConnected("background");
     } catch (error) {
       if (getLiveContext(liveContext, commandGeneration)) {
-        // The command cleared the reconnect timer above, so queue the retry it promises.
+        // A tool connect that started during the switch may own this failed attempt, and it does not retry.
         scheduleReconnect();
       }
-      notifyAliasCommand(liveContext, `Joined intercom pool ${requested}, but intercom is unavailable: ${getErrorMessage(error)}. Retrying in the background.`, "warning", commandGeneration);
+      notifyCommand(liveContext, `Switched to intercom pool ${requested}, but intercom is unavailable: ${getErrorMessage(error)}. Retrying in the background.`, "warning", commandGeneration);
       return;
     }
-    notifyAliasCommand(liveContext, `Joined intercom pool: ${requested}`, "info", commandGeneration);
+    notifyCommand(liveContext, `Joined intercom pool: ${requested}`, "info", commandGeneration);
   }
 
   async function runHandoverCommand(args: string, ctx: ExtensionContext): Promise<void> {
@@ -3101,7 +3097,7 @@ Usage:
     const liveContext = getLiveContext(ctx, commandGeneration);
     if (!liveContext) return;
     if (!liveContext.hasUI || (liveContext as ExtensionContext & { mode?: string }).mode !== "tui") {
-      notifyAliasCommand(liveContext, "/handover requires the interactive terminal UI; use the intercom tool's handover action instead.", "error", commandGeneration);
+      notifyCommand(liveContext, "/handover requires the interactive terminal UI; use the intercom tool's handover action instead.", "error", commandGeneration);
       return;
     }
     const input = args.trim();

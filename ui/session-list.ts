@@ -128,7 +128,7 @@ export class SessionListOverlay implements Component {
 
     const lines: string[] = [];
     lines.push(border(`╭${"─".repeat(contentWidth)}╮`));
-    lines.push(row(this.theme.bold(" Current Session")));
+    lines.push(row(this.theme.bold(" Current session")));
     lines.push(border(`├${"─".repeat(contentWidth)}┤`));
     lines.push(row());
     lines.push(row(`  ${this.theme.fg("dim", sessionTitle(this.currentSession, { self: true }))}`));
@@ -138,7 +138,7 @@ export class SessionListOverlay implements Component {
     if (this.pool) lines.push(row(`  ${this.theme.fg("dim", `Pool: ${this.pool}`)}`));
     lines.push(row());
     lines.push(border(`├${"─".repeat(contentWidth)}┤`));
-    lines.push(row(this.theme.bold(" Other Sessions")));
+    lines.push(row(this.theme.bold(" Other sessions")));
     lines.push(row());
 
     if (this.sessions.length === 0) {

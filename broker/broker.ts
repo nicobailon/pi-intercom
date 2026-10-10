@@ -19,7 +19,7 @@ import {
 import { getAskTimeoutMs } from "../config.ts";
 import { sameCwd } from "../cwd.ts";
 import { EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, SESSION_HELD_ERROR_CODE } from "../types.ts";
-import type { DeliveryState, SessionInfo, Message, BrokerMessage, ExtensionCapability, MessageControl } from "../types.ts";
+import type { DeliveryState, SessionInfo, Message, BrokerMessage, ExtensionCapability, MessageControl, MessageReceiptStatus } from "../types.ts";
 import { ExtensionStateManager } from "./extension-state.ts";
 import { assertNoLiveBroker } from "./runtime-claim.ts";
 import { resolveHerdrLocations } from "../herdr-location.ts";
@@ -45,26 +45,16 @@ const MAILBOX_MESSAGE_RETENTION_MS = 24 * 60 * 60 * 1000;
 const MAX_MAILBOX_MESSAGES = 256;
 const DELIVERY_RECORD_RETENTION_MS = 60 * 60 * 1000;
 const MAX_DELIVERY_RECORDS = 4096;
-const DEFAULT_RECEIPT_TIMEOUT_MS = 5000;
 // Must stay below the client's 10s send timeout, so an unconfirmed send resolves as unknown instead of throwing.
-const RECEIPT_TIMEOUT_MS = readReceiptTimeoutMs(process.env.PI_INTERCOM_RECEIPT_TIMEOUT_MS);
-const RECEIPT_PROOF_STATUSES = new Set(["receiver_received", "acknowledged", "queued", "injected"]);
-// A session that advertised its heartbeat interval and stays silent this many intervals is dropped.
+const RECEIPT_TIMEOUT_MS = readPositiveIntEnv(process.env.PI_INTERCOM_RECEIPT_TIMEOUT_MS, 5000, 10_000);
+const RECEIPT_PROOF_STATUSES = new Set<MessageReceiptStatus>(["receiver_received", "acknowledged", "queued", "injected"]);
 const LIVENESS_MISSED_INTERVALS = 3;
 const LIVENESS_SWEEP_MS = readPositiveIntEnv(process.env.PI_INTERCOM_LIVENESS_SWEEP_MS, 10_000);
 const TCP_KEEPALIVE_DELAY_MS = 30_000;
 
-function readPositiveIntEnv(raw: string | undefined, fallback: number): number {
+function readPositiveIntEnv(raw: string | undefined, fallback: number, limit = Infinity): number {
   const value = Number(raw);
-  return raw !== undefined && Number.isSafeInteger(value) && value > 0 ? value : fallback;
-}
-
-function readReceiptTimeoutMs(raw: string | undefined): number {
-  if (raw === undefined || raw.trim() === "") return DEFAULT_RECEIPT_TIMEOUT_MS;
-  const value = Number(raw);
-  if (Number.isSafeInteger(value) && value > 0 && value < 10000) return value;
-  console.error(`PI_INTERCOM_RECEIPT_TIMEOUT_MS must be a positive integer below 10000; using ${DEFAULT_RECEIPT_TIMEOUT_MS}`);
-  return DEFAULT_RECEIPT_TIMEOUT_MS;
+  return Number.isSafeInteger(value) && value > 0 && value < limit ? value : fallback;
 }
 
 function serializedPayloadSize(payload: unknown): number | null {
@@ -90,7 +80,6 @@ interface ConnectedSession {
   acknowledgesReceipts: boolean;
   /** Heartbeat interval the client promised; absent for clients that never heartbeat. */
   livenessIntervalMs?: number;
-  /** Last time any frame arrived on this session's socket. */
   lastInboundAt: number;
 }
 
@@ -111,7 +100,6 @@ interface DeliveryRecord {
   reason?: string;
   code?: string;
   retryable: boolean;
-  outcomeKnown: boolean;
   createdAt: number;
 }
 
@@ -183,7 +171,7 @@ function normalizeScopeId(value: unknown): string | undefined {
 }
 
 // Clients share this host, so a signal-0 probe tells whether a claimed pid still runs.
-// EPERM means it exists under another user. Never throws.
+// EPERM means it exists under another user.
 function isProcessAlive(pid: number): boolean {
   if (!Number.isSafeInteger(pid) || pid <= 0) return false;
   try {
@@ -263,7 +251,6 @@ class IntercomBroker {
   private connections = new Set<net.Socket>();
   private unregisteredConnections = new Set<net.Socket>();
   private server: net.Server;
-  private livenessSweepTimer: NodeJS.Timeout | null = null;
   private lastLivenessSweepAt = Date.now();
   private shutdownTimer: NodeJS.Timeout | null = null;
   private readonly askTimeoutMs = getAskTimeoutMs();
@@ -317,21 +304,18 @@ class IntercomBroker {
     }
     process.on("SIGTERM", () => this.shutdown());
     process.on("SIGINT", () => this.shutdown());
-    this.livenessSweepTimer = setInterval(() => this.evictSilentSessions(), LIVENESS_SWEEP_MS);
-    this.livenessSweepTimer.unref();
-    this.lastLivenessSweepAt = Date.now();
+    setInterval(() => this.evictSilentSessions(), LIVENESS_SWEEP_MS).unref();
   }
 
   // A process that died without closing its socket can leave it open, and writes to it
   // still succeed. Dropping a session whose client stopped heartbeating hands its mail
   // to the mailbox through the normal close path.
-  private evictSilentSessions(now = Date.now()): void {
+  private evictSilentSessions(): void {
+    const now = Date.now();
     const sinceLastSweepMs = now - this.lastLivenessSweepAt;
     this.lastLivenessSweepAt = now;
     // A sweep this late means the broker itself was paused (system sleep suspends the
     // broker and its clients together); a missed tick plus 1s covers ordinary timer lag.
-    // Silence measured across the pause is not the clients' fault, so restart every
-    // session's window and let each heartbeat again before judging it.
     if (sinceLastSweepMs > 2 * LIVENESS_SWEEP_MS + 1000) {
       for (const session of this.sessions.values()) session.lastInboundAt = now;
       return;
@@ -340,7 +324,6 @@ class IntercomBroker {
       if (session.livenessIntervalMs === undefined) continue;
       const silentMs = now - session.lastInboundAt;
       if (silentMs <= session.livenessIntervalMs * LIVENESS_MISSED_INTERVALS) continue;
-      if (session.socket.destroyed) continue;
       console.log(`Dropping session ${session.info.id}: no heartbeat for ${silentMs}ms`);
       session.socket.destroy();
     }
@@ -551,7 +534,7 @@ class IntercomBroker {
           writeMessage(socket, {
             type: "error",
             code: SESSION_HELD_ERROR_CODE,
-            error: `${SESSION_HELD_ERROR_CODE}: intercom session ${id} is held by live process ${holder.pid} in ${holder.cwd}. Close that session or use a different session id.`,
+            error: `Intercom session ${id} is held by live process ${holder.pid} in ${holder.cwd}`,
             holder: { pid: holder.pid, cwd: holder.cwd, ...(holder.name !== undefined ? { name: holder.name } : {}) },
           });
           socket.end();
@@ -760,7 +743,7 @@ class IntercomBroker {
         if (hasTargetId && hasTargetEpoch) {
           const targetId = clientMessage.targetId as string;
           const targetEpoch = clientMessage.targetEpoch as string;
-          const fingerprint = this.deliveryFingerprint(message, targetId);
+          const fingerprint = messageDeliveryFingerprint(message, targetId);
           if (this.replayOrReject(socket, currentKey, message.id, fingerprint)) {
             break;
           }
@@ -785,7 +768,7 @@ class IntercomBroker {
             break;
           }
           const target = targets[0];
-          const fingerprint = this.deliveryFingerprint(message, target.info.id);
+          const fingerprint = messageDeliveryFingerprint(message, target.info.id);
           if (this.replayOrReject(socket, currentKey, message.id, fingerprint)) {
             break;
           }
@@ -856,7 +839,7 @@ class IntercomBroker {
           }
           const disconnectedTarget = disconnectedTargets[0]!;
           const target = disconnectedTarget.info;
-          const fingerprint = this.deliveryFingerprint(message, target.id);
+          const fingerprint = messageDeliveryFingerprint(message, target.id);
           if (this.replayOrReject(socket, currentKey, message.id, fingerprint)) {
             break;
           }
@@ -1167,8 +1150,7 @@ class IntercomBroker {
     this.removePendingAskRecord(replyTo, scopeId);
   }
 
-  // Called right after the message was written to the target socket. A receiver
-  // that promised receipts must confirm before the sender hears "delivered":
+  // A receiver that promised receipts must confirm before the sender hears "delivered":
   // a socket whose process died still accepts writes.
   private completeSocketDelivery(senderSocket: net.Socket, fromKey: string, scopeId: string | undefined, target: ConnectedSession, message: Message, fingerprint: string): void {
     if (!target.acknowledgesReceipts) {
@@ -1178,7 +1160,7 @@ class IntercomBroker {
       return;
     }
     const key = this.deliveryRecordKey(fromKey, message.id);
-    this.recordDelivery(fromKey, message.id, fingerprint, "unknown", "Waiting for the receiver to confirm receipt", "E_RECEIPT_PENDING", true);
+    this.recordDelivery(fromKey, message.id, fingerprint, "unknown");
     const timer = setTimeout(() => {
       this.failPendingReceipt(key, `Receiver did not confirm receipt within ${RECEIPT_TIMEOUT_MS}ms`, "E_RECEIPT_TIMEOUT");
     }, RECEIPT_TIMEOUT_MS);
@@ -1213,13 +1195,6 @@ class IntercomBroker {
     if (!pending) return;
     clearTimeout(pending.timer);
     this.pendingReceipts.delete(key);
-    const record = this.deliveryRecords.get(key);
-    if (record?.state === "unknown") {
-      record.reason = reason;
-      record.code = code;
-      record.retryable = true;
-      record.outcomeKnown = false;
-    }
     // An unconfirmed ask keeps its edge, so a receiver that was only slow can still
     // reply. pruneAskEdges expires it after the ask timeout if no reply comes.
     if (pending.senderSocket.writable) {
@@ -1229,16 +1204,11 @@ class IntercomBroker {
 
   private settlePendingReceiptsForSocket(socket: net.Socket): void {
     for (const [key, pending] of this.pendingReceipts) {
-      if (pending.targetSocket === socket) {
+      // A closed sender socket is unwritable, so this reason only ever reaches a live sender.
+      if (pending.targetSocket === socket || pending.senderSocket === socket) {
         this.failPendingReceipt(key, "Receiver disconnected before confirming receipt", "E_RECEIVER_DISCONNECTED");
-      } else if (pending.senderSocket === socket) {
-        this.failPendingReceipt(key, "Sender disconnected before the receiver confirmed receipt", "E_RECEIPT_TIMEOUT");
       }
     }
-  }
-
-  private deliveryFingerprint(message: Message, targetId: string): string {
-    return messageDeliveryFingerprint(message, targetId);
   }
 
   private deliveryRecordKey(fromSessionId: string, messageId: string): string {
@@ -1247,21 +1217,22 @@ class IntercomBroker {
 
   private replayOrReject(socket: net.Socket, fromSessionId: string, messageId: string, fingerprint: string): boolean {
     this.pruneDeliveryRecords();
-    const record = this.deliveryRecords.get(this.deliveryRecordKey(fromSessionId, messageId));
+    const key = this.deliveryRecordKey(fromSessionId, messageId);
+    const record = this.deliveryRecords.get(key);
     if (!record) return false;
     if (record.fingerprint !== fingerprint) {
       this.writeDeliveryFailure(socket, messageId, "Message id was reused with different authored content", "E_MESSAGE_ID_REUSE");
       return true;
     }
     if (record.state === "unknown") {
-      const pending = this.pendingReceipts.get(this.deliveryRecordKey(fromSessionId, messageId));
+      const pending = this.pendingReceipts.get(key);
       if (pending) {
         // The receipt is still in flight; its outcome answers this retry.
         pending.senderSocket = socket;
         return true;
       }
       // Receivers drop duplicate message ids, so a retry of an unconfirmed delivery is safe.
-      this.deliveryRecords.delete(this.deliveryRecordKey(fromSessionId, messageId));
+      this.deliveryRecords.delete(key);
       return false;
     }
     if (record.code === "E_TARGET_REBOUND" && record.retryable) {
@@ -1288,7 +1259,6 @@ class IntercomBroker {
       ...(reason ? { reason } : {}),
       ...(code ? { code } : {}),
       retryable,
-      outcomeKnown: true,
       createdAt: Date.now(),
     });
   }
@@ -1306,7 +1276,6 @@ class IntercomBroker {
     record.reason = reason;
     record.code = code;
     record.retryable = false;
-    record.outcomeKnown = true;
   }
 
   private flushMailboxForSession(session: ConnectedSession, now = Date.now()): void {
@@ -1886,8 +1855,6 @@ class IntercomBroker {
 
   private shutdown(): void {
     console.log("Broker shutting down");
-    if (this.livenessSweepTimer) clearInterval(this.livenessSweepTimer);
-
     for (const session of this.sessions.values()) {
       session.socket.end();
     }
@@ -1896,8 +1863,6 @@ class IntercomBroker {
     this.messageReceiptRoutes.clear();
     this.disconnectedSessions.clear();
     this.mailboxMessages.length = 0;
-    for (const pending of this.pendingReceipts.values()) clearTimeout(pending.timer);
-    this.pendingReceipts.clear();
     if (typeof LISTEN_TARGET === "string" && process.platform !== "win32") {
       try {
         unlinkSync(LISTEN_TARGET);

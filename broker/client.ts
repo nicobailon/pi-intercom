@@ -16,6 +16,7 @@ import type {
   MessageProvenance,
   MessageReceipt,
   SessionInfo,
+  SessionHolder,
   SessionRegistration,
 } from "../types.ts";
 
@@ -41,14 +42,6 @@ function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
-/**
- * Liveness heartbeat interval. A half-open socket (peer killed with SIGKILL or
- * crashed without sending a FIN) stays "writable" indefinitely, so passive
- * close-event detection never fires and the client silently drops out of the
- * roster. The heartbeat actively round-trips a lightweight request and tears
- * down the socket if the broker does not respond within the timeout, letting
- * the existing onClose -> "disconnected" path drive reconnection.
- */
 function getLivenessIntervalMs(): number {
   const raw = Number.parseInt(process.env.PI_INTERCOM_LIVENESS_INTERVAL_MS ?? "", 10);
   return Number.isSafeInteger(raw) && raw > 0 ? raw : 30_000;
@@ -56,7 +49,7 @@ function getLivenessIntervalMs(): number {
 
 function getLivenessTimeoutMs(): number {
   const raw = Number.parseInt(process.env.PI_INTERCOM_LIVENESS_TIMEOUT_MS ?? "", 10);
-  return Number.isFinite(raw) && raw > 0 ? Math.min(raw, getLivenessIntervalMs()) : 5_000;
+  return Number.isSafeInteger(raw) && raw > 0 ? Math.min(raw, getLivenessIntervalMs()) : 5_000;
 }
 
 function connectToBrokerTarget(target: BrokerConnectTarget): net.Socket {
@@ -65,25 +58,18 @@ function connectToBrokerTarget(target: BrokerConnectTarget): net.Socket {
     : net.connect({ host: target.host, port: target.port });
 }
 
-export interface SessionHolder {
-  pid: number;
-  cwd: string;
-  name?: string;
-}
-
 /** connect() rejected because another live process holds the requested session id. */
 export class IntercomSessionHeldError extends Error {
   readonly code = SESSION_HELD_ERROR_CODE;
-  constructor(message: string, readonly holder: SessionHolder | undefined) {
+  constructor(message: string, readonly holder: SessionHolder) {
     super(message);
     this.name = "IntercomSessionHeldError";
   }
 }
 
-function parseSessionHolder(value: unknown): SessionHolder | undefined {
-  if (typeof value !== "object" || value === null) return undefined;
-  const { pid, cwd, name } = value as Record<string, unknown>;
-  if (typeof pid !== "number" || typeof cwd !== "string") return undefined;
+function parseSessionHolder(value: unknown): SessionHolder {
+  const { pid, cwd, name } = (typeof value === "object" && value !== null ? value : {}) as Record<string, unknown>;
+  if (typeof pid !== "number" || typeof cwd !== "string") throw new Error("Invalid session holder");
   return { pid, cwd, ...(typeof name === "string" ? { name } : {}) };
 }
 
@@ -314,7 +300,6 @@ export class IntercomClient extends EventEmitter {
         const scopeId = getIntercomScopeId();
         writeMessage(socket, {
           type: "register",
-          // The heartbeat started on registration sends a frame at least this often.
           session: { ...session, livenessIntervalMs: getLivenessIntervalMs() },
           ...(sessionId ? { sessionId } : {}),
           ...(scopeId ? { scopeId } : {}),
@@ -412,7 +397,7 @@ export class IntercomClient extends EventEmitter {
         }
 
         this.pendingSends.delete(messageId);
-        pending.resolve({ id: messageId, delivered: true, delivery: delivery as "socket_delivered" | "queued" | undefined ?? "socket_delivered", retryable: retryable as boolean | undefined ?? false, outcomeKnown: outcomeKnown as boolean | undefined ?? true, ...(typeof brokerMessage.code === "string" ? { code: brokerMessage.code } : {}) });
+        pending.resolve({ id: messageId, delivered: true, delivery: delivery === "queued" ? "queued" : "socket_delivered", retryable: retryable === true, outcomeKnown: outcomeKnown !== false, ...(typeof brokerMessage.code === "string" ? { code: brokerMessage.code } : {}) });
         break;
       }
 
@@ -429,7 +414,7 @@ export class IntercomClient extends EventEmitter {
         }
 
         this.pendingSends.delete(messageId);
-        pending.resolve({ id: messageId, delivered: false, reason, delivery: delivery as "failed" | "unknown" | undefined ?? "failed", retryable: retryable as boolean | undefined ?? false, outcomeKnown: outcomeKnown as boolean | undefined ?? true, ...(typeof brokerMessage.code === "string" ? { code: brokerMessage.code } : {}) });
+        pending.resolve({ id: messageId, delivered: false, reason, delivery: delivery === "unknown" ? "unknown" : "failed", retryable: retryable === true, outcomeKnown: outcomeKnown !== false, ...(typeof brokerMessage.code === "string" ? { code: brokerMessage.code } : {}) });
         break;
       }
 

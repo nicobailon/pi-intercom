@@ -270,7 +270,7 @@ export function isSessionRegistration(value: unknown): value is SessionRegistrat
   if (value.acknowledgesReceipts !== undefined && typeof value.acknowledgesReceipts !== "boolean") {
     return false;
   }
-  if (value.livenessIntervalMs !== undefined && (!Number.isSafeInteger(value.livenessIntervalMs) || (value.livenessIntervalMs as number) <= 0)) {
+  if (value.livenessIntervalMs !== undefined && (typeof value.livenessIntervalMs !== "number" || !Number.isSafeInteger(value.livenessIntervalMs) || value.livenessIntervalMs <= 0)) {
     return false;
   }
 

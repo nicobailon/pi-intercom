@@ -66,6 +66,8 @@ export interface SessionInfo {
   herdrLocation?: HerdrLocation;
 }
 
+export type SessionHolder = Pick<SessionInfo, "pid" | "cwd" | "name">;
+
 export interface CrossMachineOrigin {
   name: string;
   sessionId: string;
@@ -180,7 +182,7 @@ export type BrokerMessage =
   | { type: "presence_update"; session: SessionInfo }
   | { type: "session_joined"; session: SessionInfo }
   | { type: "session_left"; sessionId: string }
-  | { type: "error"; error: string; code?: string; holder?: { pid: number; cwd: string; name?: string } }
+  | { type: "error"; error: string; code?: string; holder?: SessionHolder }
   | ({ type: "delivered"; messageId: string } & DeliveryDetails)
   | ({ type: "delivery_failed"; messageId: string; reason: string } & DeliveryDetails)
   | { type: "message_receipt"; from: SessionInfo; receipt: MessageReceipt }
