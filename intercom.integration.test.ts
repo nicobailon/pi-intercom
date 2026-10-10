@@ -548,8 +548,8 @@ async function waitForPendingAskRecordRemoved(messageId: string): Promise<void> 
   assert.equal(existsSync(filePath), false);
 }
 
-async function waitForSessionByName(client: InstanceType<typeof IntercomClient>, name: string): Promise<SessionInfo> {
-  const deadline = Date.now() + 2000;
+async function waitForSessionByName(client: InstanceType<typeof IntercomClient>, name: string, timeoutMs = 2000): Promise<SessionInfo> {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const session = (await client.listSessions()).find((candidate) => candidate.name === name);
     if (session) {
@@ -675,6 +675,28 @@ test("broker accepts caller supplied stable IDs across reconnect", { concurrency
   } finally {
     await worker.disconnect().catch(() => undefined);
     await cleanup();
+  }
+});
+
+test("extension keeps retrying after a failed background reconnect", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("retry-worker", { sessionId: "retry-worker-session" });
+  let setup: Awaited<ReturnType<typeof setupClients>> | undefined;
+
+  try {
+    // No broker runs and this command cannot start one, so the startup connect
+    // and the first background retry (1 s later) both fail.
+    await withIntercomConfig({ brokerCommand: path.join(sharedHomeDir, "missing-broker") }, () => {
+      piIntercomExtension(harness.pi as never);
+    });
+    await harness.emitLifecycle("session_start");
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    setup = await setupClients();
+    // The next retry is due 2 s after the failed one and must find the broker on its own.
+    await waitForSessionByName(setup.planner, "retry-worker", 5000);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await setup?.cleanup();
   }
 });
 

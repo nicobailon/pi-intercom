@@ -1542,6 +1542,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       const nextClient = new IntercomClient();
       client = nextClient;
       attachClientHandlers(nextClient);
+      let retryAfterFailure = false;
       try {
         await spawnBrokerIfNeeded(config.brokerCommand, config.brokerArgs);
         await nextClient.connect(buildRegistration(), currentIntercomSessionId ?? currentSessionId);
@@ -1556,14 +1557,16 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         if (client === nextClient) {
           client = null;
         }
-        if (reason === "background" && getLiveContext(contextAtStart, generationAtStart)) {
-          scheduleReconnect();
-        }
+        retryAfterFailure = reason === "background";
         throw toError(error);
       } finally {
         if (reconnectPromise === nextReconnectPromise) {
           reconnectPromise = null;
           reconnectPromiseGeneration = null;
+        }
+        // scheduleReconnect() skips while reconnectPromise is set, so queue the retry only after clearing it.
+        if (retryAfterFailure && getLiveContext(contextAtStart, generationAtStart)) {
+          scheduleReconnect();
         }
       }
     })();
