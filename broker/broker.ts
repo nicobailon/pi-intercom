@@ -45,16 +45,17 @@ const MAILBOX_MESSAGE_RETENTION_MS = 24 * 60 * 60 * 1000;
 const MAX_MAILBOX_MESSAGES = 256;
 const DELIVERY_RECORD_RETENTION_MS = 60 * 60 * 1000;
 const MAX_DELIVERY_RECORDS = 4096;
+const DEFAULT_RECEIPT_TIMEOUT_MS = 5000;
 // Must stay below the client's 10s send timeout, so an unconfirmed send resolves as unknown instead of throwing.
 const RECEIPT_TIMEOUT_MS = readReceiptTimeoutMs(process.env.PI_INTERCOM_RECEIPT_TIMEOUT_MS);
 const RECEIPT_PROOF_STATUSES = new Set(["receiver_received", "acknowledged", "queued", "injected"]);
 
 function readReceiptTimeoutMs(raw: string | undefined): number {
-  if (raw === undefined || raw.trim() === "") return 2000;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_RECEIPT_TIMEOUT_MS;
   const value = Number(raw);
   if (Number.isSafeInteger(value) && value > 0 && value < 10000) return value;
-  console.error("PI_INTERCOM_RECEIPT_TIMEOUT_MS must be a positive integer below 10000; using 2000");
-  return 2000;
+  console.error(`PI_INTERCOM_RECEIPT_TIMEOUT_MS must be a positive integer below 10000; using ${DEFAULT_RECEIPT_TIMEOUT_MS}`);
+  return DEFAULT_RECEIPT_TIMEOUT_MS;
 }
 
 function serializedPayloadSize(payload: unknown): number | null {
@@ -87,7 +88,6 @@ interface PendingReceipt {
   messageId: string;
   targetSocket: net.Socket;
   scopeId?: string;
-  expectsReply: boolean;
   replyTo?: string;
   timer: NodeJS.Timeout;
 }
@@ -1116,7 +1116,6 @@ class IntercomBroker {
       messageId: message.id,
       targetSocket: target.socket,
       ...(scopeId ? { scopeId } : {}),
-      expectsReply: message.expectsReply === true,
       ...(message.replyTo ? { replyTo: message.replyTo } : {}),
       timer,
     });
@@ -1148,12 +1147,8 @@ class IntercomBroker {
       record.retryable = true;
       record.outcomeKnown = false;
     }
-    // The asker stops waiting on an unconfirmed ask; a retry registers the ask again.
-    const edge = pending.expectsReply ? this.askEdges.get(pending.messageId) : undefined;
-    if (edge?.from === pending.fromKey) {
-      this.askEdges.delete(pending.messageId);
-      this.removePendingAskRecord(pending.messageId, pending.scopeId);
-    }
+    // An unconfirmed ask keeps its edge, so a receiver that was only slow can still
+    // reply. pruneAskEdges expires it after the ask timeout if no reply comes.
     if (pending.senderSocket.writable) {
       writeMessage(pending.senderSocket, { type: "delivery_failed", messageId: pending.messageId, reason, delivery: "unknown", code, retryable: true, outcomeKnown: false });
     }

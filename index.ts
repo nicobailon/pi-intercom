@@ -160,6 +160,14 @@ export function explicitCrossMachineSendRestriction(options: {
   return undefined;
 }
 
+// An unconfirmed outcome must not read as a failure: the receiver may still have the message.
+function undeliveredText(target: string, result: SendResult): string {
+  const reason = result.reason ?? "Session may not exist or has disconnected.";
+  return result.outcomeKnown
+    ? `Message to "${target}" was not delivered: ${reason}`
+    : `Delivery to "${target}" could not be confirmed: ${reason}. The message may still arrive, so sending it again could duplicate it.`;
+}
+
 function deliveryDetails(result: SendResult): Record<string, unknown> {
   return {
     messageId: result.id,
@@ -1791,15 +1799,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         retryOf,
       });
       if (!result.delivered) {
-        const errorText = result.reason ?? "Session may not exist or has disconnected.";
-        if (!result.outcomeKnown) {
-          return {
-            content: [{ type: "text", text: `Delivery to "${targetDisplay}" could not be confirmed: ${errorText}. The message may still arrive, so a new send could duplicate it.` }],
-            details: deliveryDetails(result),
-          };
-        }
         return {
-          content: [{ type: "text", text: `Message to "${targetDisplay}" was not delivered: ${errorText}` }],
+          content: [{ type: "text", text: undeliveredText(targetDisplay, result) }],
           details: deliveryDetails(result),
         };
       }
@@ -2281,9 +2282,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
               text: formatChildOrchestratorMessage("update", metadata, message),
             });
             if (!result.delivered) {
-              const errorText = result.reason ?? "Session may not exist or has disconnected.";
               return {
-                content: [{ type: "text", text: `Message to "${metadata.orchestratorTarget}" was not delivered: ${errorText}` }],
+                content: [{ type: "text", text: undeliveredText(metadata.orchestratorTarget, result) }],
                 details: deliveryDetails(result),
               };
             }
@@ -2342,8 +2342,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
           });
           deliveryState = sendResult.delivered ? "socket_delivered" : "delivery_failed";
           if (!sendResult.delivered) {
-            const errorText = sendResult.reason ?? "Session may not exist or has disconnected.";
-            rejectReplyWaiter(new Error(`Message to "${metadata.orchestratorTarget}" was not delivered: ${errorText}`));
+            const errorText = undeliveredText(metadata.orchestratorTarget, sendResult);
+            rejectReplyWaiter(new Error(errorText));
             if (replyPromise) {
               try {
                 await replyPromise;
@@ -2352,7 +2352,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
               }
             }
             return {
-              content: [{ type: "text", text: `Message to "${metadata.orchestratorTarget}" was not delivered: ${errorText}` }],
+              content: [{ type: "text", text: errorText }],
               details: { error: true },
             };
           }
@@ -2753,8 +2753,8 @@ Usage:
 
             deliveryState = sendResult.delivery;
             if (!sendResult.delivered) {
-              const errorText = sendResult.reason ?? "Session may not exist or has disconnected.";
-              rejectReplyWaiter(new Error(`Message to "${targetDisplay}" was not delivered: ${errorText}`));
+              const errorText = undeliveredText(targetDisplay, sendResult);
+              rejectReplyWaiter(new Error(errorText));
               if (replyPromise) {
                 try {
                   await replyPromise;
@@ -2763,7 +2763,7 @@ Usage:
                 }
               }
               return {
-                content: [{ type: "text", text: `Message to "${targetDisplay}" was not delivered: ${errorText}` }],
+                content: [{ type: "text", text: errorText }],
                 details: { error: true, ...deliveryDetails(sendResult) },
               };
             }

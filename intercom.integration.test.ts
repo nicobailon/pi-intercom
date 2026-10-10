@@ -970,6 +970,11 @@ test("broker reports socket delivery only after a receipt-promising receiver con
   try {
     assert.deepEqual(outcome(await planner.send("silent-receiver", { text: "never confirmed" })),
       { delivered: false, delivery: "unknown", outcomeKnown: false, retryable: true, code: "E_RECEIPT_TIMEOUT" });
+    // An ask whose receipt timed out keeps its reply route, so a receiver that was only slow can still answer.
+    assert.equal((await planner.send("silent-receiver", { messageId: "slow-ask", text: "still there?", expectsReply: true })).delivery, "unknown");
+    const lateReply = waitForReply(planner, "slow-ask");
+    silent.writeMessage(silent.socket, { type: "send", to: planner.sessionId, message: { id: "slow-answer", timestamp: Date.now(), replyTo: "slow-ask", content: { text: "yes" } } });
+    assert.equal((await lateReply).message.content.text, "yes");
     closing.socket.on("data", createMessageReader((frame) => {
       if ((frame as { type?: string }).type === "message") closing.socket.destroy();
     }, () => undefined));
