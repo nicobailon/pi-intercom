@@ -1,5 +1,7 @@
 export const EXTENSION_BUS_FEATURE = "extension-bus-v1";
 export const EXACT_SEND_FEATURE = "exact-send-v1";
+/** Broker refused a register because another live process holds the session id. */
+export const SESSION_HELD_ERROR_CODE = "E_SESSION_HELD";
 
 export type DeliveryState = "socket_delivered" | "queued" | "failed" | "unknown";
 
@@ -176,7 +178,7 @@ export type BrokerMessage =
   | { type: "presence_update"; session: SessionInfo }
   | { type: "session_joined"; session: SessionInfo }
   | { type: "session_left"; sessionId: string }
-  | { type: "error"; error: string }
+  | { type: "error"; error: string; code?: string; holder?: { pid: number; cwd: string; name?: string } }
   | ({ type: "delivered"; messageId: string } & DeliveryDetails)
   | ({ type: "delivery_failed"; messageId: string; reason: string } & DeliveryDetails)
   | { type: "message_receipt"; from: SessionInfo; receipt: MessageReceipt }

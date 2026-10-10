@@ -18,7 +18,7 @@ import {
 } from "./paths.ts";
 import { getAskTimeoutMs } from "../config.ts";
 import { sameCwd } from "../cwd.ts";
-import { EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE } from "../types.ts";
+import { EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, SESSION_HELD_ERROR_CODE } from "../types.ts";
 import type { DeliveryState, SessionInfo, Message, BrokerMessage, ExtensionCapability, MessageControl } from "../types.ts";
 import { ExtensionStateManager } from "./extension-state.ts";
 import { assertNoLiveBroker } from "./runtime-claim.ts";
@@ -167,6 +167,18 @@ function normalizeScopeId(value: unknown): string | undefined {
   }
   const trimmed = value.trim();
   return trimmed ? trimmed : undefined;
+}
+
+// Clients share this host, so a signal-0 probe tells whether a claimed pid still runs.
+// EPERM means it exists under another user. Never throws.
+function isProcessAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return isRecord(error) && error.code === "EPERM";
+  }
 }
 
 function sameScope(a: string | undefined, b: string | undefined): boolean {
@@ -484,6 +496,19 @@ class IntercomBroker {
         if (!previous && this.sessions.size >= MAX_SESSIONS) {
           writeMessage(socket, { type: "error", error: "Too many registered intercom sessions" });
           socket.destroy();
+          break;
+        }
+        if (previous && previous.info.pid !== session.pid && isProcessAlive(previous.info.pid)) {
+          // Another live process holds this id. Keep it; handing the id over makes the
+          // two processes evict each other on every reconnect (#155).
+          const holder = previous.info;
+          writeMessage(socket, {
+            type: "error",
+            code: SESSION_HELD_ERROR_CODE,
+            error: `${SESSION_HELD_ERROR_CODE}: intercom session ${id} is held by live process ${holder.pid} in ${holder.cwd}. Close that session or use a different session id.`,
+            holder: { pid: holder.pid, cwd: holder.cwd, ...(holder.name !== undefined ? { name: holder.name } : {}) },
+          });
+          socket.end();
           break;
         }
         if (previous) {

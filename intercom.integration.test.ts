@@ -700,6 +700,43 @@ test("extension keeps retrying after a failed background reconnect", { concurren
   }
 });
 
+test("broker keeps a session id with its live holder and releases it from a dead one", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  // Registered pids are client-supplied; a sleeping child stands in for another live process.
+  const otherProcess = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore" });
+  const clients: Array<InstanceType<typeof IntercomClient>> = [];
+  const connectAs = async (pid: number, sessionId: string) => {
+    const client = new IntercomClient();
+    clients.push(client);
+    await client.connect({ name: "holder", cwd: repoDir, model: "test-model", pid, startedAt: Date.now(), lastActivity: Date.now() }, sessionId);
+    return client;
+  };
+
+  try {
+    const holder = await connectAs(otherProcess.pid!, "held-id");
+    await assert.rejects(connectAs(process.pid, "held-id"), (error: Error) =>
+      error.message.includes(`E_SESSION_HELD: intercom session held-id is held by live process ${otherProcess.pid} in ${repoDir}`));
+    assert.equal((await waitForSessionId(planner, "held-id")).pid, otherProcess.pid);
+    const received = once(holder, "message") as Promise<[SessionInfo, Message]>;
+    assert.equal((await planner.send("held-id", { text: "still yours" })).delivered, true);
+    assert.equal((await received)[1].content.text, "still yours");
+
+    // The holder's own process reconnecting on a new socket replaces its entry.
+    const sameProcess = await connectAs(otherProcess.pid!, "held-id");
+    assert.equal(sameProcess.sessionId, "held-id");
+    await waitForCondition(() => !holder.isConnected(), "replaced holder disconnect");
+
+    // A dead holder's id goes to the newcomer on the first attempt.
+    await connectAs(2147483647, "dead-holder-id");
+    await connectAs(process.pid, "dead-holder-id");
+    assert.equal((await waitForSessionId(planner, "dead-holder-id")).pid, process.pid);
+  } finally {
+    for (const client of clients) await client.disconnect().catch(() => undefined);
+    otherProcess.kill();
+    await cleanup();
+  }
+});
+
 test("broker scopes discovery, routing, mailbox, and presence", { concurrency: false }, async () => {
   const broker = spawn(process.execPath, [...tsxImportArgs, path.join(repoDir, "broker", "broker.ts")], {
     cwd: repoDir,
