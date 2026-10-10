@@ -4,6 +4,9 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+### Added
+- Move a running session into a separate intercom pool with `/intercom-pool <name>`, so it only talks to sessions in that pool. `/intercom-pool default` moves it back, and the current pool shows in `status` and the `/intercom` overlay. Thanks to [@Pl8tinium](https://github.com/Pl8tinium) for issue #156.
+
 ### Fixed
 - When an intercom message and a subagent notice reached an idle session at the same moment, both extensions sent a wake prompt. Pi marks a run as started only after the prompt's setup finishes, so the second wake failed with `Extension "<runtime>" error: Agent is already processing a prompt`. pi-intercom and pi-subagents now share one wake per session, so the second message joins the turn the first one starts. pi-subagents needs its matching release.
 

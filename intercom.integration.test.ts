@@ -1527,6 +1527,60 @@ test("intercom-id inserts a stable handoff snippet into the editor", { concurren
   }
 });
 
+test("intercom-pool moves a running session between pools", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const poolPeer = new IntercomClient();
+  const notifications: string[] = [];
+  const harness = createExtensionHarness("pool-worker", {
+    hasUI: true,
+    ui: { notify: (message: string) => { notifications.push(message); } },
+  });
+
+  try {
+    await withIntercomScope(undefined, async () => {
+      await connectClientWithScope(poolPeer, "review", "pool-peer", "pool-peer");
+      piIntercomExtension(harness.pi as never);
+      await harness.emitLifecycle("session_start");
+      const worker = await waitForSessionByName(planner, "pool-worker");
+      const poolCommand = harness.commands.get("intercom-pool")!;
+      const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+      const run = (id: string, params: Record<string, unknown>) => intercomTool.execute(id, params, new AbortController().signal, undefined, harness.ctx);
+
+      await poolCommand("review", harness.ctx);
+      assert.equal(notifications.at(-1), "Joined intercom pool: review");
+      await waitForSessionId(poolPeer, worker.id);
+      await waitForNoSessionId(planner, worker.id);
+      const listed = (await run("pool-list", { action: "list" })).content[0]?.text ?? "";
+      assert.match(listed, /pool-peer/);
+      assert.doesNotMatch(listed, /planner/);
+      const crossPool = await run("pool-send", { action: "send", to: "planner", message: "must not cross" });
+      assert.equal(crossPool.details?.delivered, false);
+      assert.match(crossPool.content[0]?.text ?? "", /Session not found/);
+      assert.match((await run("pool-status", { action: "status" })).content[0]?.text ?? "", /Pool: review/);
+
+      const askReceived = once(poolPeer, "message") as Promise<[SessionInfo, Message]>;
+      const ask = run("pool-ask", { action: "ask", to: "pool-peer", message: "Ready?" });
+      const [, askMessage] = await askReceived;
+      await poolCommand("default", harness.ctx);
+      assert.match(notifications.at(-1) ?? "", /Cannot switch intercom pool while waiting for a reply/);
+      assert.equal((await poolPeer.send(worker.id, { text: "Yes.", replyTo: askMessage.id })).delivered, true);
+      assert.match((await ask).content[0]?.text ?? "", /Yes\./);
+
+      await poolCommand("default", harness.ctx);
+      await waitForSessionId(planner, worker.id);
+      await waitForNoSessionId(poolPeer, worker.id);
+      await poolCommand("", harness.ctx);
+      assert.equal(notifications.at(-1), "Intercom pool: default");
+      assert.doesNotMatch((await run("pool-status-default", { action: "status" })).content[0]?.text ?? "", /Pool:/);
+    });
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await poolPeer.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
 test("alias names the current session, opens the local input menu, and appears in intercom displays", { concurrency: false }, async () => {
   const { planner, orchestrator, cleanup } = await setupClients();
   const { default: piIntercomExtension } = await import("./index.ts");

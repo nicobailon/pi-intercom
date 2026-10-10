@@ -9,7 +9,7 @@ import { SessionListOverlay, type SessionListSelection } from "./ui/session-list
 import { HandoverPicker, type HandoverPickerResult, type RemoteSessionLister } from "./ui/handover-picker.ts";
 import { ComposeOverlay, type ComposeResult } from "./ui/compose.ts";
 import { InlineMessageComponent } from "./ui/inline-message.ts";
-import { getAskTimeoutMs, loadConfig, type IntercomConfig } from "./config.ts";
+import { getAskTimeoutMs, getIntercomScopeId, loadConfig, setIntercomScopeId, type IntercomConfig } from "./config.ts";
 import { EXTENSION_BUS_FEATURE } from "./types.ts";
 import type { Attachment, BrokerMessage, Message, MessageControl, MessageReceiptStatus, SessionInfo, SessionRegistration } from "./types.ts";
 import {
@@ -1488,11 +1488,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         return;
       }
       rejectReplyWaiter(new Error(`Disconnected while waiting for reply: ${error.message}`, { cause: error }));
-      for (const [namespace, extension] of localExtensions) {
-        extension.owner = undefined;
-        emitLocalExtensionEvent(namespace, { type: "connection", connected: false, supported: false });
-        emitLocalExtensionEvent(namespace, { type: "owner" });
-      }
+      markLocalExtensionsDisconnected();
       client = null;
       if (!shuttingDown && !disposed) {
         clearReconnectTimer();
@@ -1502,6 +1498,13 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     nextClient.on("error", () => {
       // Keep broker/socket noise out of the TUI. Reconnect logic runs from the disconnect path.
     });
+  }
+  function markLocalExtensionsDisconnected(): void {
+    for (const [namespace, extension] of localExtensions) {
+      extension.owner = undefined;
+      emitLocalExtensionEvent(namespace, { type: "connection", connected: false, supported: false });
+      emitLocalExtensionEvent(namespace, { type: "owner" });
+    }
   }
   function scheduleReconnect(): void {
     if (disposed || shuttingDown || reconnectTimer || reconnectPromise || !getLiveContext()) {
@@ -2865,10 +2868,11 @@ Usage:
           try {
             const mySessionId = connectedClient.sessionId;
             const sessions = await connectedClient.listSessions();
+            const pool = getIntercomScopeId();
             return {
               content: [{
                 type: "text",
-                text: `**Intercom Status:**\nConnected: Yes\nSession ID: ${mySessionId}\nActive sessions: ${sessions.length}`,
+                text: `**Intercom Status:**\nConnected: Yes\nSession ID: ${mySessionId}${pool ? `\nPool: ${pool}` : ""}\nActive sessions: ${sessions.length}`,
               }],
               details: {},
             };
@@ -3014,6 +3018,45 @@ Usage:
     // see the alias without waiting for the idle name poll.
     syncPresenceIdentity(liveContext.sessionManager.getSessionId());
     notifyAliasCommand(liveContext, `Session alias set: ${alias}`, "info", commandGeneration);
+  }
+
+  async function runIntercomPoolCommand(args: string, ctx: ExtensionContext): Promise<void> {
+    const commandGeneration = runtimeGeneration;
+    const liveContext = getLiveContext(ctx, commandGeneration);
+    if (!liveContext) return;
+    const requested = args.trim();
+    if (!requested) {
+      notifyAliasCommand(liveContext, `Intercom pool: ${getIntercomScopeId() ?? "default"}`, "info", commandGeneration);
+      return;
+    }
+    const nextPool = requested === "default" ? undefined : requested;
+    // A connect already in flight registered with the old pool; let it settle first.
+    await reconnectPromise?.catch(() => undefined);
+    if (!getLiveContext(liveContext, commandGeneration)) return;
+    if (nextPool === getIntercomScopeId()) {
+      notifyAliasCommand(liveContext, `Already in intercom pool: ${requested}`, "info", commandGeneration);
+      return;
+    }
+    if (replyWaiter) {
+      // The reply is routed inside the current pool and would be lost after the switch.
+      notifyAliasCommand(liveContext, `Cannot switch intercom pool while waiting for a reply from "${replyWaiter.from}". Wait for the reply or cancel the ask first.`, "warning", commandGeneration);
+      return;
+    }
+
+    setIntercomScopeId(nextPool);
+    const previousClient = client;
+    client = null;
+    clearReconnectTimer();
+    markLocalExtensionsDisconnected();
+    await previousClient?.disconnect().catch(() => undefined);
+    if (!getLiveContext(liveContext, commandGeneration)) return;
+    try {
+      await ensureConnected("background");
+    } catch (error) {
+      notifyAliasCommand(liveContext, `Joined intercom pool ${requested}, but intercom is unavailable: ${getErrorMessage(error)}. Retrying in the background.`, "warning", commandGeneration);
+      return;
+    }
+    notifyAliasCommand(liveContext, `Joined intercom pool: ${requested}`, "info", commandGeneration);
   }
 
   async function runHandoverCommand(args: string, ctx: ExtensionContext): Promise<void> {
@@ -3179,7 +3222,7 @@ Usage:
     }
 
     const selection = await ctx.ui.custom<SessionListSelection | undefined>(
-      (_tui, theme, keybindings, done) => new SessionListOverlay(theme, keybindings, currentSession, sessions, done),
+      (_tui, theme, keybindings, done) => new SessionListOverlay(theme, keybindings, currentSession, sessions, done, getIntercomScopeId()),
       { overlay: true, overlayOptions: { width: 88 } }
     ).catch(() => undefined);
 
@@ -3224,6 +3267,11 @@ Usage:
   pi.registerCommand("intercom-id", {
     description: "Insert a stable pi-intercom handoff snippet for this session into the editor",
     handler: async (_args, ctx) => insertIntercomId(ctx),
+  });
+
+  pi.registerCommand("intercom-pool", {
+    description: "Show or switch this session's intercom pool (usage: /intercom-pool, /intercom-pool <name>, or /intercom-pool default)",
+    handler: async (args, ctx) => runIntercomPoolCommand(args, ctx),
   });
 
   pi.registerCommand("alias", {
