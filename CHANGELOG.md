@@ -4,6 +4,9 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+### Fixed
+- On Windows, extension state was never saved: every commit failed with `Failed to persist extension state`, because Windows refuses to flush a file opened read-only. The broker now opens the file for writing before flushing it. When saving does fail, the reason now includes the underlying error. Thanks to [@coylemichael](https://github.com/coylemichael) for issue #166.
+
 ## [0.17.0] - 2026-10-10
 
 ### Highlights

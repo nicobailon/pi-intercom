@@ -158,7 +158,8 @@ export class ExtensionStateManager {
 
     try {
       writeFileSync(tempPath, JSON.stringify(envelope), { mode: 0o600 });
-      const file = openSync(tempPath, "r");
+      // Windows rejects fsync on a read-only handle with EPERM.
+      const file = openSync(tempPath, "r+");
       try {
         fsyncSync(file);
       } finally {
@@ -184,8 +185,8 @@ export class ExtensionStateManager {
       const state = { revision: envelope.revision, payload };
       this.states.set(namespace, state);
       return { committed: true, revision: envelope.revision };
-    } catch {
-      return { committed: false, revision: currentRevision, reason: "Failed to persist extension state" };
+    } catch (error) {
+      return { committed: false, revision: currentRevision, reason: `Failed to persist extension state: ${error instanceof Error ? error.message : String(error)}` };
     } finally {
       rmSync(tempPath, { force: true });
     }
