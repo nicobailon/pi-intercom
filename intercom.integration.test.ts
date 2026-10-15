@@ -1112,6 +1112,32 @@ test("broker drops a session whose client stopped heartbeating, so its mail queu
   }
 });
 
+test("broker delivers a mailbox larger than its write cap without dropping the reconnecting session", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const registration = { name: "big-mailbox", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() };
+  const offline = new IntercomClient();
+  const target = new IntercomClient();
+
+  try {
+    await offline.connect(registration, "big-mailbox-id");
+    await offline.disconnect();
+    await waitForNoSessionId(planner, "big-mailbox-id");
+    const text = "x".repeat(900 * 1024);
+    for (let index = 0; index < 12; index += 1) {
+      assert.equal((await planner.send("big-mailbox-id", { text })).delivery, "queued");
+    }
+
+    let received = 0;
+    target.on("message", () => { received += 1; });
+    await target.connect(registration, "big-mailbox-id");
+    await waitForCondition(() => received === 12, "all 12 mailbox messages");
+    assert.equal(target.isConnected(), true);
+  } finally {
+    await target.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
 test("all-non-Herdr rosters preserve upstream structured and text output without invoking Herdr", { concurrency: false }, async () => {
   const fixtureDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-no-herdr-"));
   const marker = path.join(fixtureDir, "invoked");

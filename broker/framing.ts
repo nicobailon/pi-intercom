@@ -1,6 +1,6 @@
 import type { Socket } from "net";
 
-const MAX_FRAME_BYTES = 1024 * 1024;
+export const MAX_FRAME_BYTES = 1024 * 1024;
 // A peer that stops reading would otherwise have every frame for it queued in memory
 // forever. Eight max-size frames is far more than a reading peer ever falls behind by.
 const MAX_QUEUED_WRITE_BYTES = 8 * MAX_FRAME_BYTES;

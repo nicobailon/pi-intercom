@@ -2,7 +2,7 @@ import net from "net";
 import { chmodSync, mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from "fs";
 import { join } from "path";
 import { createHash, randomUUID } from "crypto";
-import { writeMessage, createMessageReader } from "./framing.ts";
+import { writeMessage, createMessageReader, MAX_FRAME_BYTES } from "./framing.ts";
 import { isMessage, isMessageReceipt, isSessionId, isSessionRegistration, messageDeliveryFingerprint } from "./protocol.ts";
 import {
   ensureIntercomRuntimeDir,
@@ -1306,6 +1306,13 @@ class IntercomBroker {
       if (!matchesId && !matchesUniqueName) {
         index += 1;
         continue;
+      }
+      // The only bulk write to one socket: pace it so a large mailbox cannot trip writeMessage's queue cap.
+      if (session.socket.writableLength >= MAX_FRAME_BYTES) {
+        session.socket.once("drain", () => {
+          if (this.sessions.get(session.key) === session) this.flushMailboxForSession(session);
+        });
+        return;
       }
 
       this.mailboxMessages.splice(index, 1);
