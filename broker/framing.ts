@@ -1,15 +1,25 @@
 import type { Socket } from "net";
 
 const MAX_FRAME_BYTES = 1024 * 1024;
+// A peer that stops reading would otherwise have every frame for it queued in memory
+// forever. Eight max-size frames is far more than a reading peer ever falls behind by.
+const MAX_QUEUED_WRITE_BYTES = 8 * MAX_FRAME_BYTES;
 
 /**
  * Write a length-prefixed message to a socket.
  * Format: 4-byte big-endian length + JSON payload
+ * Destroys the socket instead of writing when its peer has stopped reading.
  */
 export function writeMessage(socket: Socket, msg: unknown): void {
+  if (socket.writableLength > MAX_QUEUED_WRITE_BYTES) {
+    socket.destroy();
+    return;
+  }
   const json = JSON.stringify(msg);
   const payloadLength = Buffer.byteLength(json, "utf-8");
-  const frame = Buffer.allocUnsafe(4 + payloadLength);
+  // Unpooled: a small pooled frame left queued for a slow peer would pin the whole
+  // 8 KiB pool slab it was cut from, long after the other slices were sent.
+  const frame = Buffer.allocUnsafeSlow(4 + payloadLength);
   frame.writeUInt32BE(payloadLength, 0);
   frame.write(json, 4, payloadLength, "utf-8");
   socket.write(frame);

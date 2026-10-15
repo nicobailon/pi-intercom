@@ -7,6 +7,7 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 ### Fixed
 - On Windows, extension state was never saved: every commit failed with `Failed to persist extension state`, because Windows refuses to flush a file opened read-only. The broker now opens the file for writing before flushing it. When saving does fail, the reason now includes the underlying error. Thanks to [@coylemichael](https://github.com/coylemichael) for issue #166.
 - A bare `intercom({ action: "reply" })` could answer the wrong session. A message that started no turn, such as any message under `inboundTrigger: "never"` or a non-reply under `"replies"`, stayed queued, and the next turn replied to its sender instead of the ask that turn was about. The asker then waited until its ask timed out. A bare reply now answers the one ask among the messages that arrived since the last turn, and asks you to name the session with `to` when several asks arrived at once. Thanks to [@peterdsharpe](https://github.com/peterdsharpe) for issue #167.
+- The broker kept every message for a session whose process stopped reading from its connection, so one stuck session could grow the broker's memory without limit (one report reached 6 GB over a month). The broker now drops a connection once more than 8 MB is waiting to be sent to it, and messages to that session go to its mailbox as for any other disconnect. Waiting messages also no longer take up far more memory than their size. Thanks to [@luwanglin](https://github.com/luwanglin) for issue #168.
 
 ## [0.17.0] - 2026-10-10
 

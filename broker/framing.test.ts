@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import net from "node:net";
+import { once } from "node:events";
 import { createMessageReader, writeMessage } from "./framing.ts";
 
 function framePayload(payload: Buffer): Buffer {
@@ -111,4 +113,26 @@ test("writeMessage emits frames accepted by createMessageReader", () => {
   reader(Buffer.concat(chunks));
 
   assert.deepEqual(messages, [{ ok: true }]);
+});
+
+test("writeMessage drops a peer that stopped reading instead of queueing for it without bound", async () => {
+  const server = net.createServer().listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const peer = net.connect((server.address() as net.AddressInfo).port, "127.0.0.1");
+  peer.pause();
+  const [socket] = (await once(server, "connection")) as [net.Socket];
+  const message = { text: "x".repeat(512 * 1024) };
+  try {
+    let writes = 0;
+    while (!socket.destroyed && writes < 100) {
+      writeMessage(socket, message);
+      writes += 1;
+    }
+
+    assert.equal(socket.destroyed, true, `socket still open after ${writes} unread 512 KiB frames`);
+  } finally {
+    socket.destroy();
+    peer.destroy();
+    server.close();
+  }
 });
