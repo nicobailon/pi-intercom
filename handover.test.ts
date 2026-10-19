@@ -15,9 +15,13 @@ function handoverContext(sessionManager: unknown, response: Record<string, unkno
     model: { id: "m" },
     sessionManager,
     modelRegistry: {
-      complete: async (_model: unknown, context: { messages: Array<{ content: Array<{ text: string }> }> }) => {
+      // Like Pi, a virtual model is routed by streamSimple() only; complete() rejects it.
+      complete: async () => {
+        throw new Error("Virtual model must be routed before streaming");
+      },
+      streamSimple: (_model: unknown, context: { messages: Array<{ content: Array<{ text: string }> }> }) => {
         requests.push(context.messages[0]!.content[0]!.text);
-        return response;
+        return { result: async () => response };
       },
     },
   } as never;
@@ -43,6 +47,31 @@ test("generateHandoverBody summarizes the context Pi would send to the model", a
   for (const excluded of ["first summary", "secret original", "early work"]) {
     assert.ok(!conversation.includes(excluded), `unexpected ${excluded}`);
   }
+});
+
+test("generateHandoverBody generates through the routed streamSimple path", async () => {
+  const session = SessionManager.inMemory(tmpdir());
+  session.appendMessage(user("hello"));
+  const calls: Array<{ model: unknown; options: Record<string, unknown> }> = [];
+  const model = { id: "auto", provider: "router", api: "pi-virtual" };
+  const body = await generateHandoverBody({
+    model,
+    sessionManager: session,
+    modelRegistry: {
+      complete: async () => {
+        throw new Error("Virtual model must be routed before streaming");
+      },
+      streamSimple: (routed: unknown, _context: unknown, options: Record<string, unknown>) => {
+        calls.push({ model: routed, options });
+        return { result: async () => ({ stopReason: "stop", content: [{ type: "text", text: "routed body" }] }) };
+      },
+    },
+  } as never, undefined, undefined);
+
+  assert.equal(body, "routed body");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.model, model);
+  assert.equal(calls[0]!.options.cacheRetention, "none");
 });
 
 test("generateHandoverBody reports why generation failed", async () => {

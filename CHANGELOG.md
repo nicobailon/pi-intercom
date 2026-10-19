@@ -4,6 +4,9 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+### Fixed
+- `handover` works when the selected model is a Pi virtual model, such as a router. Before, generating the handover failed with `Virtual model … must be routed before streaming`, because it called `complete()`, which Pi doesn't route. It now uses `streamSimple()`, like page answers in pi-web-access. See issue #176.
+
 ## [0.17.1] - 2026-10-14
 
 ### Highlights

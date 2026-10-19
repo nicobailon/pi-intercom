@@ -54,11 +54,12 @@ export async function generateHandoverBody(
     content: [{ type: "text", text: `## Conversation\n\n${conversationText}\n\n## Goal for the receiving agent\n\n${goalText}` }],
     timestamp: Date.now(),
   };
-  const response = await ctx.modelRegistry.complete(
+  // streamSimple is Pi's provider-neutral path and routes virtual models; complete() does not.
+  const response = await ctx.modelRegistry.streamSimple(
     ctx.model,
     { systemPrompt: HANDOVER_SYSTEM_PROMPT, messages: [request] },
     { signal, cacheRetention: "none", sessionId: randomUUID(), maxTokens: HANDOVER_MAX_OUTPUT_TOKENS },
-  );
+  ).result();
   if (response.stopReason === "aborted" || signal?.aborted) {
     throw new Error("Handover generation was aborted.");
   }
