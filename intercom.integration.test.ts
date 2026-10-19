@@ -5,7 +5,10 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { EventEmitter, once } from "node:events";
 import { spawn, type ChildProcess } from "node:child_process";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import type { Component, TuiMouseEvent } from "@earendil-works/pi-tui";
+import type { MessageRenderer } from "@earendil-works/pi-coding-agent";
+import { InlineMessageComponent } from "./ui/inline-message.ts";
 import { ReplyTracker } from "./reply-tracker.ts";
 import type { BrokerMessage, Message, SessionInfo } from "./types.ts";
 import type { SendResult } from "./broker/client.ts";
@@ -198,6 +201,7 @@ function createExtensionHarness(sessionName: string | (() => string) = "child-wo
   const lifecycleHandlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
   const commands = new Map<string, (args: string, ctx: unknown) => unknown>();
   const tools: CapturedTool[] = [];
+  const messageRenderers = new Map<string, MessageRenderer>();
   let currentSessionName = typeof sessionName === "function" ? sessionName() : sessionName;
   let activeToolNames = [...(options.activeTools ?? [])];
   const entries: Array<{ type: string; data: unknown }> = [];
@@ -218,7 +222,7 @@ function createExtensionHarness(sessionName: string | (() => string) = "child-wo
       handlers.push(handler);
       lifecycleHandlers.set(event, handlers);
     },
-    registerMessageRenderer: () => undefined,
+    registerMessageRenderer: (customType: string, renderer: MessageRenderer) => { messageRenderers.set(customType, renderer); },
     registerTool: (tool: CapturedTool) => {
       tools.push(tool);
       if (!activeToolNames.includes(tool.name)) activeToolNames.push(tool.name);
@@ -249,6 +253,7 @@ function createExtensionHarness(sessionName: string | (() => string) = "child-wo
     pi,
     ctx,
     tools,
+    messageRenderers,
     commands,
     entries,
     sentMessages,
@@ -5185,5 +5190,149 @@ test("failed delivery from an inferred reply preserves the pending ask", { concu
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await cleanup();
+  }
+});
+
+function freezeRendererFixture<T>(value: T): T {
+  if (value && typeof value === "object") {
+    for (const child of Object.values(value)) freezeRendererFixture(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function rendererMessage(id?: string): Parameters<MessageRenderer>[0] {
+  return freezeRendererFixture({
+    role: "custom", customType: "intercom_message", content: "unchanged synthetic context", display: true, timestamp: 0,
+    details: {
+      from: { id: "synthetic-sender", name: "synthetic", cwd: "/synthetic", model: "test", pid: 1, startedAt: 0, lastActivity: 0 },
+      message: { ...(id === undefined ? {} : { id }), timestamp: 0, content: { text: "Preview " + "long body words ".repeat(40) + "RENDERER_TAIL" } },
+      replyCommand: "intercom reply",
+    },
+  });
+}
+
+function rendererClick(component: Component, y = 0) {
+  const event: TuiMouseEvent = { type: "click", button: "left", x: 4, y, screenX: 4, screenY: y + 1, width: 100, height: component.render(100).length, shift: false, alt: false, ctrl: false, clickCount: 1 };
+  return component.handleMouse?.(event);
+}
+
+function rendererExpanded(component: Component): boolean {
+  return component.render(100).join("\n").includes("RENDERER_TAIL");
+}
+
+async function registeredIntercomRenderer() {
+  const { default: factory } = await import("./index.ts");
+  const harness = createExtensionHarness();
+  factory(harness.pi as never);
+  const renderer = harness.messageRenderers.get("intercom_message");
+  assert.ok(renderer, "official factory registered the renderer");
+  return { harness, renderer };
+}
+
+test("registered inline renderer retains local choice across child rebuild and resize without mutating frozen details", async () => {
+  const { renderer, harness } = await registeredIntercomRenderer();
+  const message = rendererMessage();
+  const snapshot = structuredClone(message);
+  const child = renderer(message, { expanded: false, outputPad: 1 }, renderTheme as never)!;
+  assert.ok(child instanceof InlineMessageComponent);
+  rendererClick(child, 1);
+  const rebuilt = renderer(message, { expanded: false, outputPad: 1 }, renderTheme as never)!;
+  assert.equal(rendererExpanded(rebuilt), true, "same outer message retains local expansion after callback rebuild");
+  for (const width of [1, 2, 30, 120]) rebuilt.render(width);
+  rebuilt.invalidate();
+  assert.equal(rendererExpanded(rebuilt), true);
+  assert.deepEqual(message, snapshot);
+  assert.deepEqual(harness.entries, []);
+  assert.deepEqual(harness.sentMessages, []);
+});
+
+test("registered inline renderer resets local choice permanently on rapid global false true false callbacks", async () => {
+  const { renderer } = await registeredIntercomRenderer();
+  const message = rendererMessage();
+  const child = renderer(message, { expanded: false, outputPad: 1 }, renderTheme as never)!;
+  rendererClick(child);
+  // Deliberately do not render either callback result between the global changes.
+  renderer(message, { expanded: true, outputPad: 1 }, renderTheme as never);
+  const collapsed = renderer(message, { expanded: false, outputPad: 1 }, renderTheme as never)!;
+  assert.equal(rendererExpanded(collapsed), false, "final global false clears the old local expansion");
+  rendererClick(collapsed);
+  assert.equal(rendererExpanded(renderer(message, { expanded: false, outputPad: 1 }, renderTheme as never)!), true, "new local choice survives rebuild after the reset");
+  renderer(message, { expanded: true, outputPad: 1 }, renderTheme as never);
+  const expanded = renderer(message, { expanded: true, outputPad: 1 }, renderTheme as never)!;
+  rendererClick(expanded);
+  assert.equal(rendererExpanded(renderer(message, { expanded: true, outputPad: 1 }, renderTheme as never)!), false, "local collapse is independent of global true");
+  renderer(message, { expanded: false, outputPad: 1 }, renderTheme as never);
+  assert.equal(rendererExpanded(renderer(message, { expanded: true, outputPad: 1 }, renderTheme as never)!), true, "global round trip also clears local collapse");
+});
+
+for (const missingId of [false, true]) {
+  test(`registered inline renderer isolates outer messages with ${missingId ? "missing" : "duplicate"} envelope ids and factory runtimes`, async () => {
+    const { renderer } = await registeredIntercomRenderer();
+    const otherRuntime = await registeredIntercomRenderer();
+    const a = rendererMessage(missingId ? undefined : "duplicate-id");
+    const b = rendererMessage(missingId ? undefined : "duplicate-id");
+    const childA = renderer(a, { expanded: false, outputPad: 1 }, renderTheme as never)!;
+    const childB = renderer(b, { expanded: false, outputPad: 1 }, renderTheme as never)!;
+    rendererClick(childA, 2);
+    assert.equal(rendererExpanded(childA), true, "A expands");
+    assert.equal(rendererExpanded(childB), false, "B stays collapsed");
+    assert.equal(rendererExpanded(renderer(b, { expanded: false, outputPad: 1 }, renderTheme as never)!), false);
+    assert.equal(rendererExpanded(otherRuntime.renderer(a, { expanded: false, outputPad: 1 }, renderTheme as never)!), false, "another factory does not inherit A's choice");
+    assert.equal(rendererExpanded(renderer(a, { expanded: false, outputPad: 1 }, renderTheme as never)!), true);
+    assert.equal(rendererExpanded(renderer(rendererMessage(), { expanded: true, outputPad: 1 }, renderTheme as never)!), true, "new outer message starts with current global value");
+  });
+}
+
+test("registered inline renderer follows real CustomMessageComponent rebuild and no-frame global reset lifecycle", async () => {
+  const { renderer } = await registeredIntercomRenderer();
+  // Use the real host wrapper; only its palette is synthetic.
+  const { CustomMessageComponent, Theme } = await import("@earendil-works/pi-coding-agent");
+  const sdkDist = path.dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
+  const { setThemeInstance } = await import(pathToFileURL(path.join(sdkDist, "modes/interactive/theme/theme.js")).href);
+  // Built-in theme parsing in the locked SDK requires a separately registered
+  // color resolver. This test uses a real in-memory Theme and restores globals.
+  const keys = [Symbol.for("@earendil-works/pi-coding-agent:theme"), Symbol.for("@mariozechner/pi-coding-agent:theme")];
+  const previous = keys.map((key) => Object.getOwnPropertyDescriptor(globalThis, key));
+  const palette = { toolTitle: 32, text: 33, muted: 34, dim: 35, thinkingXhigh: 36 };
+  setThemeInstance(new Theme(palette as never, { selectedBg: 0 } as never, "256color"));
+  try {
+    const message = rendererMessage();
+    const snapshot = structuredClone(message);
+    let child: Component | undefined;
+    const children: Component[] = [];
+    const capture: MessageRenderer = (entry, options, theme) => {
+      child = renderer(entry, options, theme);
+      assert.ok(child instanceof InlineMessageComponent, "host uses the actual registered inline child");
+      children.push(child);
+      return child;
+    };
+    const host = new CustomMessageComponent(message, capture);
+    assert.ok(child);
+    rendererClick(child, 1);
+    host.setOutputPad(2);
+    assert.equal(rendererExpanded(host), true, "outputPad rebuild preserves local choice");
+    assert.notEqual(children[0], children[1], "real host actually rebuilt its child");
+    const beforeTheme = host.render(100).join("\n");
+    setThemeInstance(new Theme({ ...palette, text: 97 } as never, { selectedBg: 0 } as never, "256color"));
+    host.invalidate();
+    assert.equal(rendererExpanded(host), true, "theme invalidation rebuild preserves choice");
+    assert.notEqual(host.render(100).join("\n"), beforeTheme, "rebuilt child uses the new theme");
+    host.render(32);
+    assert.equal(rendererExpanded(host), true, "resize preserves choice");
+    host.setExpanded(true);
+    host.setExpanded(false);
+    assert.equal(rendererExpanded(host), false, "two global updates without a frame discard old choice");
+    host.invalidate();
+    assert.equal(rendererExpanded(host), false, "discarded local expansion cannot resurrect");
+    assert.deepEqual(message, snapshot);
+    const reconstructed = new CustomMessageComponent(structuredClone(message), capture);
+    assert.equal(rendererExpanded(reconstructed), false, "full reconstruction defaults to host global state");
+  } finally {
+    keys.forEach((key, index) => {
+      const descriptor = previous[index];
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else Reflect.deleteProperty(globalThis, key);
+    });
   }
 });
