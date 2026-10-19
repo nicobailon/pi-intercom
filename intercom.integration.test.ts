@@ -1671,9 +1671,9 @@ test("intercom handover summarizes the session and delivers it to the target", {
       getBranch: () => [{ type: "message", id: "a", parentId: null, timestamp: "2026-09-30T00:00:00.000Z", message: { role: "user", content: "fix the adapter", timestamp: 0 } }],
     },
     modelRegistry: {
-      complete: async (_model: unknown, context: (typeof modelRequests)[number]) => {
+      streamSimple: (_model: unknown, context: (typeof modelRequests)[number]) => {
         modelRequests.push(context);
-        return { stopReason: "stop", content: [{ type: "text", text: "## Next task\nPort the fix" }] };
+        return { result: async () => ({ stopReason: "stop", content: [{ type: "text", text: "## Next task\nPort the fix" }] }) };
       },
     },
   };
