@@ -394,8 +394,9 @@ test("packed artifact contains an executable pi-intercom bin and its runtime mod
   mkdirSync(extracted);
   try {
     const npmArgs = ["--ignore-scripts", "--cache", cache, "--json"];
-    const dryRun = JSON.parse(execFileSync("npm", ["pack", "--dry-run", ...npmArgs], { encoding: "utf8" })) as Array<{ files: Array<{ path: string }> }>;
-    const dryRunFiles = new Set(dryRun[0]!.files.map((file) => file.path));
+    const dryRun = JSON.parse(execFileSync("npm", ["pack", "--dry-run", ...npmArgs], { encoding: "utf8" })) as Array<{ files: Array<{ path: string }> }> | Record<string, { files: Array<{ path: string }> }>;
+    const dryRunPackage = Array.isArray(dryRun) ? dryRun[0]! : Object.values(dryRun)[0]!;
+    const dryRunFiles = new Set(dryRunPackage.files.map((file) => file.path));
     for (const path of [
       "cli.mjs",
       "cli.ts",
@@ -408,8 +409,9 @@ test("packed artifact contains an executable pi-intercom bin and its runtime mod
       assert.equal(dryRunFiles.has(path), true, `dry-run omitted ${path}`);
     }
 
-    const packed = JSON.parse(execFileSync("npm", ["pack", "--pack-destination", temp, ...npmArgs], { encoding: "utf8" })) as Array<{ filename: string }>;
-    const tarball = join(temp, packed[0]!.filename);
+    const packed = JSON.parse(execFileSync("npm", ["pack", "--pack-destination", temp, ...npmArgs], { encoding: "utf8" })) as Array<{ filename: string }> | Record<string, { filename: string }>;
+    const packedPackage = Array.isArray(packed) ? packed[0]! : Object.values(packed)[0]!;
+    const tarball = join(temp, packedPackage.filename);
     const tarFiles = execFileSync("tar", ["-tzf", tarball], { encoding: "utf8" }).trim().split("\n");
     assert.equal(tarFiles.includes("package/cli.mjs"), true);
     execFileSync("tar", ["-xzf", tarball, "-C", extracted]);
