@@ -437,16 +437,23 @@ class IntercomBroker {
     return true;
   }
 
-  private scheduleShutdownCheck(): void {
+  private scheduleShutdownCheck(delayMs = 5000): void {
     if (this.shutdownTimer) return;
 
     this.shutdownTimer = setTimeout(() => {
       this.shutdownTimer = null;
-      if (this.sessions.size === 0) {
-        console.log("No sessions connected, shutting down");
-        this.shutdown();
+      if (this.sessions.size > 0) return;
+      const now = Date.now();
+      this.pruneMailboxMessages(now);
+      // Queued mail keeps the broker up until it is delivered or expires; recheck at the next expiry.
+      if (this.mailboxMessages.length > 0) {
+        const oldestQueuedAt = Math.min(...this.mailboxMessages.map(entry => entry.queuedAt));
+        this.scheduleShutdownCheck(Math.max(oldestQueuedAt + MAILBOX_MESSAGE_RETENTION_MS - now + 1, 1000));
+        return;
       }
-    }, 5000);
+      console.log("No sessions connected, shutting down");
+      this.shutdown();
+    }, delayMs);
   }
 
   private handleMessage(
