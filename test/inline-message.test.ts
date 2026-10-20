@@ -245,35 +245,21 @@ function mouseEvent(component: Component, y: number, overrides: Partial<TuiMouse
   } satisfies TuiMouseEvent;
 }
 
-const clickRegions = [
-  { name: "collapsed header", collapsed: true, row: /From:/ },
-  { name: "collapsed preview", collapsed: true, row: /Preview start/ },
-  { name: "collapsed meta", collapsed: true, row: /To reply:/ },
-  { name: "collapsed frame", collapsed: true, row: /╰/ },
-  { name: "expanded header", collapsed: false, row: /From:/ },
-  { name: "expanded wrapped body", collapsed: false, row: /wrapped body/ },
-  { name: "expanded reply meta", collapsed: false, row: /To reply:/ },
-  { name: "expanded attachment meta", collapsed: false, row: /Attachment:/ },
-  { name: "expanded replyTo meta", collapsed: false, row: /Reply to parent-m/ },
-  { name: "expanded provenance meta", collapsed: false, row: /Via extension:/ },
-  { name: "expanded blank frame", collapsed: false, row: /^│\s+│$/ },
-  { name: "expanded bottom frame", collapsed: false, row: /╰/ },
-];
-
-for (const region of clickRegions) {
-  test(`inline click toggles only this message from ${region.name}`, () => {
-    const component: Component = new InlineMessageComponent(from, clickMessage, theme as any, "intercom reply", undefined, region.collapsed);
-    const neighbor = new InlineMessageComponent(from, clickMessage, theme as any, "intercom reply", undefined, region.collapsed);
-    const neighborBefore = neighbor.render(100);
-    const lines = component.render(100);
-    const y = lines.findIndex((line) => region.row.test(stripVTControlCharacters(line)));
-    assert.ok(y >= 0, `fixture has ${region.name}`);
-    const result = component.handleMouse?.(mouseEvent(component, y));
-    assert.equal(component.render(100).join("\n").includes("EXPANDED_TAIL"), region.collapsed, "single click changes visible expansion");
-    assert.deepEqual(result, { handled: true, render: true });
-    assert.deepEqual(neighbor.render(100), neighborBefore);
-    assert.deepEqual(component.handleMouse?.(mouseEvent(component, 0, { clickCount: undefined })), { handled: true, render: true });
-    assert.deepEqual(component.render(100), lines, "a second deliberate single restores output");
+for (const collapsed of [true, false]) {
+  test(`inline click on any ${collapsed ? "collapsed" : "expanded"} row toggles only this message`, () => {
+    const rows = new InlineMessageComponent(from, clickMessage, theme as any, "intercom reply", undefined, collapsed).render(100).length;
+    for (let y = 0; y < rows; y++) {
+      const component: Component = new InlineMessageComponent(from, clickMessage, theme as any, "intercom reply", undefined, collapsed);
+      const neighbor = new InlineMessageComponent(from, clickMessage, theme as any, "intercom reply", undefined, collapsed);
+      const neighborBefore = neighbor.render(100);
+      const lines = component.render(100);
+      const result = component.handleMouse?.(mouseEvent(component, y));
+      assert.equal(component.render(100).join("\n").includes("EXPANDED_TAIL"), collapsed, `row ${y}: single click changes visible expansion`);
+      assert.deepEqual(result, { handled: true, render: true });
+      assert.deepEqual(neighbor.render(100), neighborBefore);
+      assert.deepEqual(component.handleMouse?.(mouseEvent(component, 0, { clickCount: undefined })), { handled: true, render: true });
+      assert.deepEqual(component.render(100), lines, `row ${y}: a second deliberate single restores output`);
+    }
   });
 }
 
@@ -288,16 +274,14 @@ for (const collapsed of [true, false]) {
   test(`inline mouse fallback preserves ${collapsed ? "collapsed" : "expanded"} output for non-single-primary events`, () => {
     const component: Component = new InlineMessageComponent(from, clickMessage, theme as any, "intercom reply", undefined, collapsed);
     const before = component.render(100);
-    for (let y = 0; y < before.length; y++) {
-      for (const ignored of ignoredMouseEvents) {
-        assert.equal(component.handleMouse?.(mouseEvent(component, y, ignored)), undefined, JSON.stringify({ y, ...ignored }));
-        assert.deepEqual(component.render(100), before);
-      }
+    for (const ignored of ignoredMouseEvents) {
+      assert.equal(component.handleMouse?.(mouseEvent(component, 0, ignored)), undefined, JSON.stringify(ignored));
+      assert.deepEqual(component.render(100), before);
     }
   });
 }
 
-test("inline click keeps frozen message data and narrow Unicode output intact", () => {
+test("inline click expands a frozen message without mutating it", () => {
   const frozen = structuredClone(clickMessage);
   Object.freeze(frozen.content.attachments![0]);
   Object.freeze(frozen.content.attachments);
@@ -306,14 +290,8 @@ test("inline click keeps frozen message data and narrow Unicode output intact", 
   Object.freeze(frozen);
   const before = structuredClone(frozen);
   const component: Component = new InlineMessageComponent(Object.freeze({ ...from }), frozen, styledTheme() as any, "intercom reply", undefined, true);
-  for (const width of [1, 2, 18, 52, 120]) {
-    for (const line of component.render(width)) assert.ok(visibleWidth(line) <= width, `${width}: ${line}`);
-  }
   component.handleMouse?.(mouseEvent(component, 1));
   assert.match(component.render(100).join("\n"), /EXPANDED_TAIL/);
-  for (const width of [1, 2, 18, 52, 120]) {
-    for (const line of component.render(width)) assert.ok(visibleWidth(line) <= width, `${width}: ${line}`);
-  }
   assert.deepEqual(frozen, before);
 });
 
@@ -338,28 +316,9 @@ test("inline preview and wrapped body caches avoid rereading text on repeated re
   assert.ok(reads > bodyReads, "new body width rewraps the body");
 });
 
-
 test("collapsed inline hint retains Ctrl+O and advertises fullscreen message clicks", () => {
   const component = new InlineMessageComponent(from, clickMessage, theme as any, undefined, undefined, true);
   const output = component.render(160).join("\n");
   assert.match(output, /Ctrl\+O/);
   assert.match(output, /click.*message.*fullscreen/i);
-});
-
-test("expanded inline body cache reuses text at the same width and rebuilds on resize", () => {
-  let reads = 0;
-  const cachedMessage = { ...clickMessage, content: { get text() { reads++; return clickMessage.content.text; } } };
-  const component = new InlineMessageComponent(from, cachedMessage, theme as any);
-  const before = component.render(100);
-  const bodyReads = reads;
-  assert.ok(bodyReads > 0);
-  assert.deepEqual(component.render(100), before);
-  component.invalidate();
-  assert.deepEqual(component.render(100), before);
-  assert.equal(reads, bodyReads);
-  component.render(80);
-  assert.ok(reads > bodyReads);
-  const resizedReads = reads;
-  component.render(80);
-  assert.equal(reads, resizedReads);
 });

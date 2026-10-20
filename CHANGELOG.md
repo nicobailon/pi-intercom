@@ -4,6 +4,9 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+### Added
+- In fullscreen mode, clicking an intercom message expands or collapses just that message. Ctrl+O still expands or collapses all of them at once. Thanks to [@summer-tt](https://github.com/summer-tt) for #178.
+
 ### Fixed
 - `handover` works when the selected model is a Pi virtual model, such as a router. Before, generating the handover failed with `Virtual model … must be routed before streaming`, because it called `complete()`, which Pi doesn't route. It now uses `streamSimple()`. Thanks to [@colinperel](https://github.com/colinperel) for #176 and #177.
 

@@ -5266,23 +5266,23 @@ test("registered inline renderer resets local choice permanently on rapid global
   assert.equal(rendererExpanded(renderer(message, { expanded: true, outputPad: 1 }, renderTheme as never)!), true, "global round trip also clears local collapse");
 });
 
-for (const missingId of [false, true]) {
-  test(`registered inline renderer isolates outer messages with ${missingId ? "missing" : "duplicate"} envelope ids and factory runtimes`, async () => {
-    const { renderer } = await registeredIntercomRenderer();
-    const otherRuntime = await registeredIntercomRenderer();
-    const a = rendererMessage(missingId ? undefined : "duplicate-id");
-    const b = rendererMessage(missingId ? undefined : "duplicate-id");
+test("registered inline renderer isolates outer messages with duplicate or missing envelope ids and factory runtimes", async () => {
+  const { renderer } = await registeredIntercomRenderer();
+  const otherRuntime = await registeredIntercomRenderer();
+  for (const id of ["duplicate-id", undefined]) {
+    const a = rendererMessage(id);
+    const b = rendererMessage(id);
     const childA = renderer(a, { expanded: false, outputPad: 1 }, renderTheme as never)!;
     const childB = renderer(b, { expanded: false, outputPad: 1 }, renderTheme as never)!;
     rendererClick(childA, 2);
-    assert.equal(rendererExpanded(childA), true, "A expands");
-    assert.equal(rendererExpanded(childB), false, "B stays collapsed");
+    assert.equal(rendererExpanded(childA), true, `${id}: A expands`);
+    assert.equal(rendererExpanded(childB), false, `${id}: B stays collapsed`);
     assert.equal(rendererExpanded(renderer(b, { expanded: false, outputPad: 1 }, renderTheme as never)!), false);
     assert.equal(rendererExpanded(otherRuntime.renderer(a, { expanded: false, outputPad: 1 }, renderTheme as never)!), false, "another factory does not inherit A's choice");
     assert.equal(rendererExpanded(renderer(a, { expanded: false, outputPad: 1 }, renderTheme as never)!), true);
-    assert.equal(rendererExpanded(renderer(rendererMessage(), { expanded: true, outputPad: 1 }, renderTheme as never)!), true, "new outer message starts with current global value");
-  });
-}
+  }
+  assert.equal(rendererExpanded(renderer(rendererMessage(), { expanded: true, outputPad: 1 }, renderTheme as never)!), true, "new outer message starts with current global value");
+});
 
 test("registered inline renderer follows real CustomMessageComponent rebuild and no-frame global reset lifecycle", async () => {
   const { renderer } = await registeredIntercomRenderer();
