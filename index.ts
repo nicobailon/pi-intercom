@@ -168,6 +168,10 @@ function undeliveredText(target: string, result: SendResult): string {
     : `Delivery to "${target}" could not be confirmed: ${reason}. The message may still arrive, so sending it again could duplicate it.`;
 }
 
+function queuedText(target: string, what = "message"): string {
+  return `Session "${target}" is not connected. The ${what} is waiting in the broker mailbox until that session reconnects.`;
+}
+
 function deliveryDetails(result: SendResult): Record<string, unknown> {
   return {
     messageId: result.id,
@@ -1281,6 +1285,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   }
   function sendIncomingMessage(entry: InboundMessageEntry, delivery: "trigger" | "steer", generation = runtimeGeneration, forceTrigger = false): void {
     if (runtimeStarted && !getLiveContext(runtimeContext, generation)) {
+      emitMessageReceipt(entry.message.id, "expired", "session context no longer active before injection");
       return;
     }
     const injectedMessage = { ...entry.message, injectedAt: Date.now() };
@@ -1372,6 +1377,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     const messageGeneration = runtimeGeneration;
     const liveContext = getLiveContext(ctx, messageGeneration);
     if (!liveContext) {
+      emitMessageReceipt(message.id, "expired", "session context no longer active on receipt");
       return;
     }
     const receiverReceivedAt = Date.now();
@@ -1491,7 +1497,11 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     });
     nextClient.on("message", (from, message) => {
       const liveContext = getLiveContext();
-      if (client !== nextClient || !liveContext) {
+      if (client !== nextClient) {
+        return;
+      }
+      if (!liveContext) {
+        emitMessageReceipt(message.id, "expired", "session context no longer active on receipt");
         return;
       }
       handleIncomingMessage(liveContext, from, message);
@@ -1835,9 +1845,11 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       return {
         content: [{
           type: "text",
-          text: target.projectPane
-            ? `Opened Herdr project pane ${target.projectPane.paneId} for ${target.projectPane.projectRoot} and sent message to ${targetDisplay}`
-            : inferredAsk ? `Reply sent to ${targetDisplay} (inferred from pending ask)` : `Message sent to ${targetDisplay}`,
+          text: result.delivery === "queued"
+            ? queuedText(targetDisplay, inferredAsk ? "reply (inferred from pending ask)" : "message")
+            : target.projectPane
+              ? `Opened Herdr project pane ${target.projectPane.paneId} for ${target.projectPane.projectRoot} and sent message to ${targetDisplay}`
+              : inferredAsk ? `Reply sent to ${targetDisplay} (inferred from pending ask)` : `Message sent to ${targetDisplay}`,
         }],
         details: {
           ...deliveryDetails(result),
@@ -2325,7 +2337,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
               subagent: { runId: metadata.runId, agent: metadata.agent, index: metadata.index },
             });
             return {
-              content: [{ type: "text", text: `Progress update sent to supervisor ${metadata.orchestratorTarget}` }],
+              content: [{ type: "text", text: result.delivery === "queued" ? queuedText(metadata.orchestratorTarget, "progress update") : `Progress update sent to supervisor ${metadata.orchestratorTarget}` }],
               details: { messageId: result.id, delivered: true },
             };
           } catch (error) {
@@ -2872,7 +2884,7 @@ Usage:
               timestamp: Date.now(),
             });
             return {
-              content: [{ type: "text", text: `Reply sent to ${target.from.name || target.from.id}` }],
+              content: [{ type: "text", text: result.delivery === "queued" ? queuedText(target.from.name || target.from.id, "reply") : `Reply sent to ${target.from.name || target.from.id}` }],
               details: { ...deliveryDetails(result), replyTo: target.message.id },
             };
           } catch (error) {
@@ -3299,7 +3311,7 @@ Usage:
         messageId: result.messageId,
         timestamp: Date.now(),
       });
-      notifyIfLive(ctx, `Message sent to ${targetLabel}`, "info", overlayGeneration);
+      notifyIfLive(ctx, result.queued ? queuedText(targetLabel) : `Message sent to ${targetLabel}`, "info", overlayGeneration);
     }
   }
 

@@ -8,6 +8,7 @@ export interface ComposeResult {
   sent: boolean;
   messageId?: string;
   text?: string;
+  queued?: boolean;
 }
 
 export class ComposeOverlay implements Component {
@@ -94,6 +95,7 @@ export class ComposeOverlay implements Component {
         sent: true,
         messageId: result.id,
         text: this.inputBuffer.trim(),
+        queued: result.delivery === "queued",
       });
     } catch (error) {
       this.error = error instanceof Error ? error.message : String(error);

@@ -9,6 +9,7 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ### Fixed
 - `handover` works when the selected model is a Pi virtual model, such as a router. Before, generating the handover failed with `Virtual model … must be routed before streaming`, because it called `complete()`, which Pi doesn't route. It now uses `streamSimple()`. Thanks to [@colinperel](https://github.com/colinperel) for #176 and #177.
+- A `send`, `reply`, or progress update to a disconnected session said `Message sent`, even though the message was only held in the broker's mailbox until that session came back. The result now says the session is not connected and the message is waiting in the broker mailbox until it reconnects. A message that reaches a session after it was replaced or shut down was dropped with no receipt. It now reports `expired`, so the sender's last known delivery state shows the drop. Thanks to [@Jaggerxtrm](https://github.com/Jaggerxtrm) for #172.
 
 ## [0.17.1] - 2026-10-14
 

@@ -5038,6 +5038,62 @@ test("multiple pending asks from the same sender leave a send unthreaded and pre
   }
 });
 
+test("send to a disconnected named session says the message is waiting in the mailbox, not sent", { concurrency: false }, async () => {
+  const { orchestrator, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("queued-sender");
+  const offline = new IntercomClient();
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    await waitForSessionByName(orchestrator, "queued-sender");
+    await offline.connect({ name: "offline-target", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() });
+    await waitForSessionByName(orchestrator, "offline-target");
+    await offline.disconnect();
+
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const result = await intercomTool.execute("queued-send", {
+      action: "send",
+      to: "offline-target",
+      message: "For when you are back.",
+    }, new AbortController().signal, undefined, harness.ctx);
+
+    assert.equal(result.details?.delivery, "queued");
+    assert.equal(result.content[0]?.text, 'Session "offline-target" is not connected. The message is waiting in the broker mailbox until that session reconnects.');
+  } finally {
+    await offline.disconnect().catch(() => undefined);
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("a message reaching a session whose context went stale reports an expired receipt", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  let sessionId = "stale-receiver-session";
+  const harness = createExtensionHarness("stale-receiver", { sessionId: () => sessionId });
+  const receipts: string[] = [];
+  const unsubscribe = planner.onMessageReceipt((_from, receipt) => {
+    if (receipt.messageId === "stale-receiver-message") receipts.push(receipt.status);
+  });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const target = await waitForSessionByName(planner, "stale-receiver");
+    sessionId = "stale-receiver-replaced";
+    // Not awaited: expired is not delivery proof, so the send itself waits out the broker's receipt timeout.
+    void planner.send(target.id, { messageId: "stale-receiver-message", text: "Dropped" }).catch(() => undefined);
+    await waitForCondition(() => receipts.includes("expired"), "stale-context expired receipt");
+    assert.equal(harness.sentMessages.length, 0);
+  } finally {
+    unsubscribe();
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
 test("an expired pending ask is not inferred; the send remains ordinary", { concurrency: false }, async () => {
   await withAskTimeoutMs(50, async () => {
     const { planner, orchestrator, cleanup } = await setupClients();
