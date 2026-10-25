@@ -16,6 +16,7 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 - The README now documents the mailbox for disconnected sessions: who gets queued mail, when it expires, and what a broker restart loses. Thanks to [@mimadiule](https://github.com/mimadiule) for issue #188.
 
 ### Fixed
+- Long synchronous tools no longer make local sessions disappear after 90 seconds. The broker keeps open Unix sockets and named pipes registered regardless of heartbeat silence, and still removes them on socket close/error. TCP heartbeat eviction and client-side broker probes remain enabled.
 - A cross-machine send no longer crashes Pi when SSH or the remote relay closes its input before the message has finished writing. Failed commands retain their diagnostics, and incomplete writes cannot report success. Thanks to [@Oscar-Williams](https://github.com/Oscar-Williams) for #185.
 - After a reboot, the broker could refuse to start for hours when its old pid file pointed at a process the system had since given to another user. It now treats that pid as stale. Thanks to [@mimadiule](https://github.com/mimadiule) for issue #186.
 - After a reboot, the broker could also refuse to start when its old pid file pointed at an unrelated program of the same user, and intercom stayed down until the file was deleted by hand. The broker now counts the recorded process as a running broker only if it also answers on the broker's socket or pipe; a running broker is still never replaced. Thanks to [@wayne930242](https://github.com/wayne930242) for #198.

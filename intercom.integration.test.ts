@@ -308,7 +308,7 @@ async function connectRawRegistered(sessionId: string, name: string, sessionOver
   return { socket, writeMessage };
 }
 
-test("opt-in TCP broker requires endpoint state for health and registration", { concurrency: false }, async () => {
+test("opt-in TCP broker requires endpoint state and evicts silent clients", { concurrency: false }, async () => {
   const net = await import("node:net");
   const { readFileSync } = await import("node:fs");
   const { createMessageReader, writeMessage } = await import("./broker/framing.ts");
@@ -325,6 +325,7 @@ test("opt-in TCP broker requires endpoint state for health and registration", { 
       USERPROFILE: agentDir,
       PI_CODING_AGENT_DIR: agentDir,
       PI_INTERCOM_TRANSPORT: "tcp",
+      PI_INTERCOM_LIVENESS_SWEEP_MS: "50",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -418,6 +419,37 @@ test("opt-in TCP broker requires endpoint state for health and registration", { 
       sessionId: "authorized-tcp-client",
       features: ["extension-bus-v1", "exact-send-v1"],
     }]);
+
+    // TCP retains #164's half-open-peer cleanup, unlike local pipes/Unix sockets.
+    const silentSocket = net.connect({ host, port });
+    try {
+      await once(silentSocket, "connect");
+      const registered = new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("TCP register timed out")), 2000);
+        const reader = createMessageReader((msg) => {
+          if (typeof msg === "object" && msg !== null && "type" in msg && msg.type === "registered") {
+            clearTimeout(timeout);
+            silentSocket.off("data", reader);
+            resolve();
+          }
+        }, reject);
+        silentSocket.on("data", reader);
+      });
+      writeMessage(silentSocket, {
+        type: "register", sessionId: "silent-tcp-client", stateId,
+        session: {
+          name: "silent-tcp", cwd: repoDir, model: "test-model", pid: process.pid,
+          startedAt: Date.now(), lastActivity: Date.now(), livenessIntervalMs: 100,
+        },
+      });
+      await registered;
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("Silent TCP client was not evicted")), 3000);
+        silentSocket.once("close", () => { clearTimeout(timeout); resolve(); });
+      });
+    } finally {
+      silentSocket.destroy();
+    }
   } finally {
     if (broker.exitCode === null && broker.signalCode === null) {
       broker.kill("SIGTERM");
@@ -1136,7 +1168,7 @@ test("broker reports socket delivery only after a receipt-promising receiver con
   }
 });
 
-test("broker drops a session whose client stopped heartbeating, so its mail queues", { concurrency: false }, async () => {
+test("broker keeps a silent local socket registered until it closes", { concurrency: false }, async () => {
   const { planner, cleanup } = await withEnv("PI_INTERCOM_LIVENESS_SWEEP_MS", "50", setupClients);
   const silent = await connectRawRegistered("silent-heartbeat", "silent-heartbeat", { livenessIntervalMs: 100 });
   const legacy = await connectRawRegistered("no-heartbeat-promise", "no-heartbeat-promise");
@@ -1146,17 +1178,66 @@ test("broker drops a session whose client stopped heartbeating, so its mail queu
     await withEnv("PI_INTERCOM_LIVENESS_INTERVAL_MS", "200", () => heartbeating.connect({
       name: "heartbeating", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now(),
     }));
-    await waitForNoSessionId(planner, "silent-heartbeat");
-    // Three of the heartbeating client's 600 ms windows.
+    // Simulate an event-loop-blocked client: its socket stays open but sends no
+    // frames for six times its advertised three-interval deadline.
     await new Promise((resolve) => setTimeout(resolve, 1800));
     const roster = (await planner.listSessions()).map((session) => session.id);
+    assert.ok(roster.includes("silent-heartbeat"), "a blocked local client stays registered");
     assert.ok(roster.includes(heartbeating.sessionId!), "a heartbeating client stays registered");
     assert.ok(roster.includes("no-heartbeat-promise"), "a client that never promised a heartbeat is not dropped");
+    // The same connection can resume traffic without reconnecting/re-registering.
+    const { createMessageReader } = await import("./broker/framing.ts");
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("Resumed list timed out")), 2000);
+      const reader = createMessageReader((msg) => {
+        if (typeof msg === "object" && msg !== null && "type" in msg && msg.type === "sessions") {
+          clearTimeout(timeout);
+          silent.socket.off("data", reader);
+          resolve();
+        }
+      }, reject);
+      silent.socket.on("data", reader);
+      silent.writeMessage(silent.socket, { type: "list", requestId: "resumed-list" });
+    });
+    silent.socket.destroy();
+    await waitForNoSessionId(planner, "silent-heartbeat");
     assert.equal((await planner.send("silent-heartbeat", { text: "for later" })).delivery, "queued");
   } finally {
     await heartbeating.disconnect().catch(() => undefined);
     silent.socket.destroy();
     legacy.socket.destroy();
+    await cleanup();
+  }
+});
+
+test("broker removes a local client killed without disconnecting and queues its mail", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const child = spawn(process.execPath, [...tsxImportArgs, "--input-type=module", "-e", `
+    import { IntercomClient } from './broker/client.ts';
+    const client = new IntercomClient();
+    await client.connect({
+      name: 'killed-local-client', cwd: process.cwd(), model: 'test-model',
+      pid: process.pid, startedAt: Date.now(), lastActivity: Date.now(),
+    }, 'killed-local-client');
+    setInterval(() => {}, 1000);
+  `], {
+    cwd: repoDir,
+    env: { ...process.env, HOME: sharedHomeDir, USERPROFILE: sharedHomeDir },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  try {
+    await waitForSessionByName(planner, "killed-local-client");
+    const exited = once(child, "exit");
+    child.kill("SIGKILL");
+    await exited;
+    await waitForNoSessionId(planner, "killed-local-client");
+    assert.equal((await planner.send("killed-local-client", { text: "after exit" })).delivery, "queued");
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      const exited = once(child, "exit");
+      child.kill("SIGKILL");
+      await exited;
+    }
     await cleanup();
   }
 });
