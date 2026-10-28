@@ -91,12 +91,14 @@ interface PendingReceipt {
   targetSocket: net.Socket;
   scopeId?: string;
   replyTo?: string;
+  demoted?: "late_reply";
   timer: NodeJS.Timeout;
 }
 
 interface DeliveryRecord {
   fingerprint: string;
   state: DeliveryState;
+  demoted?: "late_reply";
   reason?: string;
   code?: string;
   retryable: boolean;
@@ -138,6 +140,8 @@ interface PendingAskRecord {
 interface MessageReceiptRoute {
   from: string;
   to: string;
+  /** Set for asks, so only an ask can be answered by a late reply. Asks are never queued. */
+  expectsReply?: boolean;
   createdAt: number;
 }
 
@@ -726,6 +730,8 @@ class IntercomBroker {
           this.writeDeliveryFailure(socket, messageId, "Invalid message format", "E_INVALID_MESSAGE");
           break;
         }
+        // lateReplyTo is broker-owned: only a late reply demoted below carries it.
+        delete message.lateReplyTo;
         const fromSession = this.sessions.get(currentKey);
         if (!fromSession || fromSession.socket !== socket) {
           this.writeDeliveryFailure(socket, message.id, "Sender session not found", "E_SENDER_NOT_FOUND");
@@ -770,13 +776,13 @@ class IntercomBroker {
 
         const targets = this.findSessions(clientMessage.to, fromSession.scopeId);
         if (targets.length === 1) {
-          if (message.replyTo && !replyEdge) {
-            this.writeDeliveryFailure(socket, message.id, "Reply target does not match a pending ask", "E_REPLY_TARGET");
-            break;
-          }
           const target = targets[0];
           const fingerprint = messageDeliveryFingerprint(message, target.info.id);
           if (this.replayOrReject(socket, currentKey, message.id, fingerprint)) {
+            break;
+          }
+          if (message.replyTo && !replyEdge && !this.demoteLateReply(message, currentKey, target.key)) {
+            this.writeDeliveryFailure(socket, message.id, "Reply target does not match a pending ask", "E_REPLY_TARGET");
             break;
           }
           if (message.supersedes) {
@@ -823,7 +829,7 @@ class IntercomBroker {
             });
             this.updateDeliveryRecord(currentKey, message.supersedes, "failed", `Superseded by ${message.id}`, "E_DELIVERY_SUPERSEDED");
           }
-          this.messageReceiptRoutes.set(message.id, { from: currentKey, to: target.key, createdAt: brokerReceivedAt });
+          this.messageReceiptRoutes.set(message.id, { from: currentKey, to: target.key, ...(message.expectsReply ? { expectsReply: true } : {}), createdAt: brokerReceivedAt });
           writeMessage(target.socket, {
             type: "message",
             from: fromSession.info,
@@ -840,14 +846,15 @@ class IntercomBroker {
 
         const disconnectedTargets = this.findDisconnectedSessions(clientMessage.to, fromSession.scopeId);
         if (disconnectedTargets.length === 1) {
-          if (message.replyTo && !replyEdge) {
-            this.writeDeliveryFailure(socket, message.id, "Reply target does not match a pending ask", "E_REPLY_TARGET");
-            break;
-          }
           const disconnectedTarget = disconnectedTargets[0]!;
           const target = disconnectedTarget.info;
           const fingerprint = messageDeliveryFingerprint(message, target.id);
           if (this.replayOrReject(socket, currentKey, message.id, fingerprint)) {
+            break;
+          }
+          // No late-reply demotion here: a disconnected session's receipt routes are cleared.
+          if (message.replyTo && !replyEdge) {
+            this.writeDeliveryFailure(socket, message.id, "Reply target does not match a pending ask", "E_REPLY_TARGET");
             break;
           }
           if (message.supersedes) {
@@ -1143,8 +1150,8 @@ class IntercomBroker {
     });
   }
 
-  private writeDeliverySuccess(socket: net.Socket, messageId: string, delivery: "socket_delivered" | "queued"): void {
-    writeMessage(socket, { type: "delivered", messageId, delivery, retryable: false, outcomeKnown: true });
+  private writeDeliverySuccess(socket: net.Socket, messageId: string, delivery: "socket_delivered" | "queued", demoted?: "late_reply"): void {
+    writeMessage(socket, { type: "delivered", messageId, delivery, retryable: false, outcomeKnown: true, ...(demoted ? { demoted } : {}) });
   }
 
   private writeDeliveryFailure(socket: net.Socket, messageId: string, reason: string, code: string, retryable = false): void {
@@ -1157,17 +1164,31 @@ class IntercomBroker {
     this.removePendingAskRecord(replyTo, scopeId);
   }
 
+  // A reply whose ask is gone (expired, cancelled, or already answered) still carries
+  // content the asker wants. When this broker delivered that ask from the target to this
+  // sender, deliver the reply as a plain message. Without replyTo it cannot resolve a
+  // waiter or trigger a "replies"-mode turn, so it is no stronger than a plain send.
+  private demoteLateReply(message: Message, fromKey: string, targetKey: string): boolean {
+    const replyTo = message.replyTo!;
+    const route = this.messageReceiptRoutes.get(replyTo);
+    if (!route?.expectsReply || route.from !== targetKey || route.to !== fromKey) return false;
+    delete message.replyTo;
+    message.lateReplyTo = replyTo;
+    return true;
+  }
+
   // A receiver that promised receipts must confirm before the sender hears "delivered":
   // a socket whose process died still accepts writes.
   private completeSocketDelivery(senderSocket: net.Socket, fromKey: string, scopeId: string | undefined, target: ConnectedSession, message: Message, fingerprint: string): void {
+    const key = this.deliveryRecordKey(fromKey, message.id);
+    const demoted = message.lateReplyTo ? "late_reply" : undefined;
+    this.recordDelivery(fromKey, message.id, fingerprint, target.acknowledgesReceipts ? "unknown" : "socket_delivered");
+    if (demoted) this.deliveryRecords.get(key)!.demoted = demoted;
     if (!target.acknowledgesReceipts) {
       this.releaseReplyEdge(message.replyTo, scopeId);
-      this.recordDelivery(fromKey, message.id, fingerprint, "socket_delivered");
-      this.writeDeliverySuccess(senderSocket, message.id, "socket_delivered");
+      this.writeDeliverySuccess(senderSocket, message.id, "socket_delivered", demoted);
       return;
     }
-    const key = this.deliveryRecordKey(fromKey, message.id);
-    this.recordDelivery(fromKey, message.id, fingerprint, "unknown");
     const timer = setTimeout(() => {
       this.failPendingReceipt(key, `Receiver did not confirm receipt within ${RECEIPT_TIMEOUT_MS}ms`, "E_RECEIPT_TIMEOUT");
     }, RECEIPT_TIMEOUT_MS);
@@ -1179,6 +1200,7 @@ class IntercomBroker {
       targetSocket: target.socket,
       ...(scopeId ? { scopeId } : {}),
       ...(message.replyTo ? { replyTo: message.replyTo } : {}),
+      ...(demoted ? { demoted } : {}),
       timer,
     });
   }
@@ -1194,7 +1216,7 @@ class IntercomBroker {
     }
     // Release the answered ask only now, so a retry of an unconfirmed reply still matches it.
     this.releaseReplyEdge(pending.replyTo, pending.scopeId);
-    if (pending.senderSocket.writable) this.writeDeliverySuccess(pending.senderSocket, pending.messageId, "socket_delivered");
+    if (pending.senderSocket.writable) this.writeDeliverySuccess(pending.senderSocket, pending.messageId, "socket_delivered", pending.demoted);
   }
 
   private failPendingReceipt(key: string, reason: string, code: string): void {
@@ -1246,7 +1268,7 @@ class IntercomBroker {
       return false;
     }
     if (record.state === "socket_delivered" || record.state === "queued") {
-      this.writeDeliverySuccess(socket, messageId, record.state);
+      this.writeDeliverySuccess(socket, messageId, record.state, record.demoted);
     } else {
       this.writeDeliveryFailure(socket, messageId, record.reason ?? "Previous delivery failed", record.code ?? "E_DELIVERY_FAILED", record.retryable);
     }

@@ -10,6 +10,8 @@ export interface DeliveryDetails {
   code?: string;
   retryable: boolean;
   outcomeKnown: boolean;
+  /** Set when the broker delivered a reply to an ask that was no longer open as a plain message. */
+  demoted?: "late_reply";
 }
 
 export type HerdrLocation =
@@ -92,6 +94,8 @@ export interface Message {
   supersedes?: string;
   retryOf?: string;
   replyTo?: string;
+  /** Broker-set only: the ask this message answered after the ask was no longer open. Display-only. */
+  lateReplyTo?: string;
   expectsReply?: boolean;
   provenance?: MessageProvenance;
   crossMachine?: CrossMachineProvenance;

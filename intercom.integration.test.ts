@@ -1350,6 +1350,66 @@ test("broker rejects unknown replyTo values instead of delivering forged replies
   }
 });
 
+test("broker delivers a reply to an ask that is no longer open as a plain message", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+  // Like the Pi extension, this asker confirms receipts, so the broker reports delivery only after one.
+  const asker = new IntercomClient();
+  const received: Message[] = [];
+  asker.on("message", (_from: SessionInfo, message: Message) => {
+    received.push(message);
+    asker.sendMessageReceipt({ messageId: message.id, status: "receiver_received", timestamp: Date.now() });
+  });
+  let raw: Awaited<ReturnType<typeof connectRawRegistered>> | undefined;
+
+  try {
+    await asker.connect({ name: "asker", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now(), acknowledgesReceipts: true });
+    assert.equal((await asker.send(orchestrator.sessionId!, { messageId: "cancelled-ask", text: "Question?", expectsReply: true })).delivered, true);
+    asker.cancelAsk("cancelled-ask");
+    await asker.listSessions(); // the broker handles one connection's frames in order
+
+    const lateReply = { messageId: "late-reply", text: "Answer.", replyTo: "cancelled-ask" };
+    const late = await orchestrator.send(asker.sessionId!, lateReply);
+    assert.equal(late.delivered, true);
+    assert.equal(late.demoted, "late_reply");
+    const message = await waitForReplyMessage(received, "late-reply");
+    // Without replyTo it cannot resolve a waiter or wake an inboundTrigger "replies" session.
+    assert.equal(message.replyTo, undefined);
+    assert.equal(message.lateReplyTo, "cancelled-ask");
+
+    const retried = await orchestrator.send(asker.sessionId!, lateReply);
+    assert.equal(retried.delivered, true);
+    assert.equal(retried.demoted, "late_reply");
+    assert.equal(received.filter((candidate) => candidate.id === "late-reply").length, 1);
+
+    const outsider = await planner.send(asker.sessionId!, { text: "Not my ask.", replyTo: "cancelled-ask" });
+    assert.equal(outsider.code, "E_REPLY_TARGET");
+
+    assert.equal((await asker.send(orchestrator.sessionId!, { messageId: "open-ask", text: "Question?", expectsReply: true })).delivered, true);
+    const wrongReplier = await planner.send(asker.sessionId!, { text: "Not my ask either.", replyTo: "open-ask" });
+    assert.match(wrongReplier.reason ?? "", /does not match the pending ask/);
+
+    assert.equal((await asker.send(orchestrator.sessionId!, { messageId: "plain-note", text: "FYI." })).delivered, true);
+    const notAnAsk = await orchestrator.send(asker.sessionId!, { text: "Re: FYI.", replyTo: "plain-note" });
+    assert.equal(notAnAsk.code, "E_REPLY_TARGET");
+
+    assert.equal((await planner.send(orchestrator.sessionId!, { messageId: "answered-ask", text: "Question?", expectsReply: true })).delivered, true);
+    const first = await orchestrator.send(planner.sessionId!, { text: "First answer.", replyTo: "answered-ask" });
+    assert.equal(first.delivered, true);
+    assert.equal(first.demoted, undefined);
+    const second = await orchestrator.send(planner.sessionId!, { text: "Second answer.", replyTo: "answered-ask" });
+    assert.equal(second.delivered, true);
+    assert.equal(second.demoted, "late_reply");
+
+    raw = await connectRawRegistered("forger-id", "forger");
+    raw.writeMessage(raw.socket, { type: "send", to: asker.sessionId, message: { id: "forged-late", timestamp: Date.now(), lateReplyTo: "cancelled-ask", content: { text: "Forged." } } });
+    assert.equal((await waitForReplyMessage(received, "forged-late")).lateReplyTo, undefined);
+  } finally {
+    raw?.socket.destroy();
+    await asker.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
 test("broker disconnects a connection that exceeds the local rate limit", { concurrency: false }, async () => {
   const { cleanup } = await setupClients();
   const raw = await connectRawRegistered("rate-limit-worker-id", "rate-limit-worker");
@@ -4371,6 +4431,69 @@ test("intercom reply targets exact replyTo when multiple asks are pending", { co
     const pending = await intercomTool.execute("pending-after-exact", { action: "pending" }, new AbortController().signal, undefined, harness.ctx);
     assert.match(pending.content[0]?.text ?? "", /reply-target-1/);
     assert.doesNotMatch(pending.content[0]?.text ?? "", /reply-target-2/);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("intercom reply to an ask that is no longer open delivers it or explains how to send it", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("late-reply-worker");
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const worker = await waitForSessionByName(planner, "late-reply-worker");
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const pendingText = async () => (await intercomTool.execute("pending", { action: "pending" }, new AbortController().signal, undefined, harness.ctx)).content[0]?.text ?? "";
+
+    assert.equal((await planner.send(worker.id, { messageId: "cancelled-late-ask", text: "Still there?", expectsReply: true })).delivered, true);
+    planner.cancelAsk("cancelled-late-ask");
+    await planner.listSessions();
+    const late = await intercomTool.execute("late-reply", { action: "reply", message: "Late answer.", replyTo: "cancelled-late-ask" }, new AbortController().signal, undefined, harness.ctx);
+    assert.notEqual(late.details?.error, true);
+    assert.equal(late.details?.demoted, "late_reply");
+    assert.match(late.content[0]?.text ?? "", /no longer open, so the reply was delivered as a regular message/);
+    assert.doesNotMatch(await pendingText(), /cancelled-late-ask/);
+
+    // A disconnected asker's delivery routes are gone, so the broker cannot prove the ask and refuses the reply.
+    assert.equal((await orchestrator.send(worker.id, { messageId: "abandoned-ask", text: "Anyone?", expectsReply: true })).delivered, true);
+    orchestrator.cancelAsk("abandoned-ask");
+    await orchestrator.disconnect();
+    const refused = await intercomTool.execute("refused-reply", { action: "reply", message: "Too late.", replyTo: "abandoned-ask" }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(refused.details?.error, true);
+    assert.equal(refused.details?.code, "E_REPLY_TARGET");
+    assert.match(refused.content[0]?.text ?? "", /no longer match it to an open ask.*intercom\(\{ action: "send"/);
+    assert.doesNotMatch(await pendingText(), /abandoned-ask/);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("a late reply is labelled in the asker's inbound message metadata", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("late-asker");
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const askReceived = once(planner, "message") as Promise<[SessionInfo, Message]>;
+    const controller = new AbortController();
+    const askResult = intercomTool.execute("late-ask", { action: "ask", to: "planner", message: "Question?" }, controller.signal, undefined, harness.ctx);
+    const [asker, askMessage] = await askReceived;
+    controller.abort();
+    await askResult;
+    await planner.listSessions();
+
+    assert.equal((await planner.send(asker.id, { messageId: "late-answer", text: "Answer.", replyTo: askMessage.id })).demoted, "late_reply");
+    await waitForCondition(() => harness.sentMessages.some((entry) => entry.message.content?.includes("late-answer")), "late reply injection");
+    const injected = harness.sentMessages.find((entry) => entry.message.content?.includes("late-answer"))!;
+    assert.match(injected.message.content ?? "", new RegExp(`late reply to ${askMessage.id}`));
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await cleanup();

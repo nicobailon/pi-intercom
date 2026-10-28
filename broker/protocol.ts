@@ -141,6 +141,10 @@ export function isMessage(value: unknown): value is Message {
     return false;
   }
 
+  if (value.lateReplyTo !== undefined && typeof value.lateReplyTo !== "string") {
+    return false;
+  }
+
   if (value.expectsReply !== undefined && typeof value.expectsReply !== "boolean") {
     return false;
   }
