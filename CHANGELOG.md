@@ -4,6 +4,9 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+### Changed
+- The README now documents the mailbox for disconnected sessions: who can receive queued mail, what is queued, expiry, capacity, delivery order on reconnect, and what a broker restart loses. Thanks to [@mimadiule](https://github.com/mimadiule) for issue #188.
+
 ## [0.18.1] - 2026-10-22
 
 ### Changed
