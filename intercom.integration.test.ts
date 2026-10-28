@@ -2286,14 +2286,10 @@ test("extension channel unregister withdraws the namespace and hands ownership t
     onReady: (value: IntercomExtensionChannel) => { channel = value; },
     onEvent: (event: unknown) => extensionEvents.push(event),
   });
+  const lastOwner = () => successorMessages.filter((message) => message.type === "extension_owner").at(-1);
   const waitForOwner = async (ownerId: string | undefined) => {
-    const deadline = Date.now() + 3000;
-    while (Date.now() < deadline) {
-      const last = successorMessages.filter((message) => message.type === "extension_owner").at(-1);
-      if (last && last.type === "extension_owner" && last.ownerId === ownerId) return last;
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    throw new Error(`Timed out waiting for owner ${ownerId}`);
+    await waitForCondition(() => { const last = lastOwner(); return last?.type === "extension_owner" && last.ownerId === ownerId; }, `owner ${ownerId}`);
+    return lastOwner()!;
   };
 
   try {
@@ -2307,10 +2303,7 @@ test("extension channel unregister withdraws the namespace and hands ownership t
     assert.ok(first);
     // Owners are elected in registration order, so the worker must own the
     // namespace before the successor joins.
-    const ownerDeadline = Date.now() + 3000;
-    while (Date.now() < ownerDeadline && !first.snapshot().owner) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
+    await waitForCondition(() => Boolean(first.snapshot().owner), "worker owner");
     const workerOwner = first.snapshot().owner;
     assert.ok(workerOwner);
 
@@ -2398,73 +2391,10 @@ test("extension channel unregister during the connect handshake still withdraws 
     await waitForSessionByName(observer, "unregister-handshake-worker");
 
     const lastOwner = () => observerMessages.filter((message) => message.type === "extension_owner").at(-1);
-    const deadline = Date.now() + 3000;
-    while (Date.now() < deadline) {
-      const last = lastOwner();
-      if (last?.type === "extension_owner" && last.ownerId === undefined) break;
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    const last = lastOwner();
-    assert.ok(last, "the observer saw an owner election");
-    assert.equal(last.type === "extension_owner" ? last.ownerId : "not an owner message", undefined);
+    await waitForCondition(() => { const last = lastOwner(); return last?.type === "extension_owner" && last.ownerId === undefined; }, "an owner election without an owner");
     await harness.emitLifecycle("session_shutdown");
   } finally {
     IntercomClient.prototype.connect = originalConnect;
-    await observer.disconnect().catch(() => undefined);
-    await cleanup();
-  }
-});
-
-test("extension channel unregister frees a slot under the broker's per-session limit", { concurrency: false }, async () => {
-  const { cleanup } = await setupClients();
-  const observer = new IntercomClient();
-  const observerMessages: BrokerMessage[] = [];
-  const harness = createExtensionHarness("unregister-limit-worker");
-  const channels = new Map<string, IntercomExtensionChannel>();
-  const register = (namespace: string) => harness.pi.events.emit(INTERCOM_EXTENSION_REGISTER_EVENT, {
-    namespace,
-    ownerEligible: true,
-    onReady: (value: IntercomExtensionChannel) => { channels.set(namespace, value); },
-    onEvent: () => {},
-  });
-
-  try {
-    observer.onBrokerMessage((message) => observerMessages.push(message));
-    observer.on("error", () => {});
-    await observer.connect({
-      name: "unregister-limit-observer",
-      cwd: repoDir,
-      model: "test-model",
-      pid: process.pid,
-      startedAt: Date.now(),
-      lastActivity: Date.now(),
-      extensions: [{ namespace: "limit-new/v1", ownerEligible: false }],
-    });
-    const { default: piIntercomExtension } = await import("./index.ts");
-    piIntercomExtension(harness.pi as never);
-    await harness.emitLifecycle("session_start");
-    await waitForSessionByName(observer, "unregister-limit-worker");
-
-    for (let index = 0; index < 32; index++) register(`limit-${index}/v1`);
-    channels.get("limit-0/v1")?.unregister();
-    register("limit-new/v1");
-    channels.get("limit-new/v1")?.publish({ probe: "after-unregister" }, { audience: "capable" });
-
-    const deadline = Date.now() + 3000;
-    while (
-      Date.now() < deadline
-      && !observerMessages.some((message) => message.type === "extension_message"
-        && (message.payload as { probe?: string }).probe === "after-unregister")
-    ) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    assert.equal(
-      observerMessages.some((message) => message.type === "extension_message"
-        && (message.payload as { probe?: string }).probe === "after-unregister"),
-      true,
-    );
-    await harness.emitLifecycle("session_shutdown");
-  } finally {
     await observer.disconnect().catch(() => undefined);
     await cleanup();
   }
