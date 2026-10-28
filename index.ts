@@ -206,7 +206,7 @@ function isClosedAskReply(result: SendResult): boolean {
 }
 
 function closedAskText(target: string): string {
-  return `Reply to "${target}" was not delivered: the ask is no longer open (it expired, was cancelled, or was already answered). To deliver the content, send it as a new message without replyTo: intercom({ action: "send", to: "${target}", message: "..." }).`;
+  return `Reply to "${target}" was not delivered: the broker can no longer match it to an open ask, for example because the asker disconnected or the broker restarted. To deliver the content, send it as a new message without replyTo: intercom({ action: "send", to: "${target}", message: "..." }).`;
 }
 
 const LATE_REPLY_NOTE = "The ask was no longer open, so the reply was delivered as a regular message.";
