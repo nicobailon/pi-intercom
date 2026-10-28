@@ -2012,7 +2012,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
             ? queuedText(display, inferredAsk ? "reply (inferred from pending ask)" : "message")
             : target.projectPane
               ? `Opened Herdr project pane ${target.projectPane.paneId} for ${target.projectPane.projectRoot} and sent message to ${targetDisplay}`
-              : `${inferredAsk ? `Reply sent to ${targetDisplay} (inferred from pending ask)` : `Message sent to ${display}${resolution}`}${result.demoted ? ` ${LATE_REPLY_NOTE}` : ""}`,
+              : `${inferredAsk ? `Reply sent to ${targetDisplay} (inferred from pending ask)` : `Message sent to ${display}${resolution}`}${result.demoted ? `. ${LATE_REPLY_NOTE}` : ""}`,
         }],
         details: {
           ...deliveryDetails(result),
