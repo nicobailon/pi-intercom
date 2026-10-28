@@ -1350,6 +1350,58 @@ test("broker rejects unknown replyTo values instead of delivering forged replies
   }
 });
 
+test("broker delivers a reply to an ask that is no longer open as a plain message", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+  // Like the Pi extension, this asker confirms receipts, so the broker reports delivery only after one.
+  const asker = new IntercomClient();
+  const received: Message[] = [];
+  asker.on("message", (_from: SessionInfo, message: Message) => {
+    received.push(message);
+    asker.sendMessageReceipt({ messageId: message.id, status: "receiver_received", timestamp: Date.now() });
+  });
+  let raw: Awaited<ReturnType<typeof connectRawRegistered>> | undefined;
+
+  try {
+    await asker.connect({ name: "asker", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now(), acknowledgesReceipts: true });
+    assert.equal((await asker.send(orchestrator.sessionId!, { messageId: "cancelled-ask", text: "Question?", expectsReply: true })).delivered, true);
+    asker.cancelAsk("cancelled-ask");
+    await asker.listSessions(); // the broker handles one connection's frames in order
+
+    const lateReply = { messageId: "late-reply", text: "Answer.", replyTo: "cancelled-ask" };
+    const late = await orchestrator.send(asker.sessionId!, lateReply);
+    assert.equal(late.delivered, true);
+    assert.equal(late.demoted, "late_reply");
+    const message = await waitForReplyMessage(received, "late-reply");
+    // Without replyTo it cannot resolve a waiter or wake an inboundTrigger "replies" session.
+    assert.equal(message.replyTo, undefined);
+    assert.equal(message.lateReplyTo, "cancelled-ask");
+
+    const retried = await orchestrator.send(asker.sessionId!, lateReply);
+    assert.equal(retried.delivered, true);
+    assert.equal(retried.demoted, "late_reply");
+    assert.equal(received.filter((candidate) => candidate.id === "late-reply").length, 1);
+
+    const outsider = await planner.send(asker.sessionId!, { text: "Not my ask.", replyTo: "cancelled-ask" });
+    assert.equal(outsider.code, "E_REPLY_TARGET");
+
+    assert.equal((await planner.send(orchestrator.sessionId!, { messageId: "answered-ask", text: "Question?", expectsReply: true })).delivered, true);
+    const first = await orchestrator.send(planner.sessionId!, { text: "First answer.", replyTo: "answered-ask" });
+    assert.equal(first.delivered, true);
+    assert.equal(first.demoted, undefined);
+    const second = await orchestrator.send(planner.sessionId!, { text: "Second answer.", replyTo: "answered-ask" });
+    assert.equal(second.delivered, true);
+    assert.equal(second.demoted, "late_reply");
+
+    raw = await connectRawRegistered("forger-id", "forger");
+    raw.writeMessage(raw.socket, { type: "send", to: asker.sessionId, message: { id: "forged-late", timestamp: Date.now(), lateReplyTo: "cancelled-ask", content: { text: "Forged." } } });
+    assert.equal((await waitForReplyMessage(received, "forged-late")).lateReplyTo, undefined);
+  } finally {
+    raw?.socket.destroy();
+    await asker.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
 test("broker disconnects a connection that exceeds the local rate limit", { concurrency: false }, async () => {
   const { cleanup } = await setupClients();
   const raw = await connectRawRegistered("rate-limit-worker-id", "rate-limit-worker");
