@@ -1169,8 +1169,8 @@ class IntercomBroker {
   // sender, deliver the reply as a plain message. Without replyTo it cannot resolve a
   // waiter or trigger a "replies"-mode turn, so it is no stronger than a plain send.
   private demoteLateReply(message: Message, fromKey: string, targetKey: string): boolean {
-    const replyTo = message.replyTo;
-    const route = replyTo ? this.messageReceiptRoutes.get(replyTo) : undefined;
+    const replyTo = message.replyTo!;
+    const route = this.messageReceiptRoutes.get(replyTo);
     if (!route?.expectsReply || route.from !== targetKey || route.to !== fromKey) return false;
     delete message.replyTo;
     message.lateReplyTo = replyTo;

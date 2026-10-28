@@ -1384,6 +1384,10 @@ test("broker delivers a reply to an ask that is no longer open as a plain messag
     const outsider = await planner.send(asker.sessionId!, { text: "Not my ask.", replyTo: "cancelled-ask" });
     assert.equal(outsider.code, "E_REPLY_TARGET");
 
+    assert.equal((await asker.send(orchestrator.sessionId!, { messageId: "open-ask", text: "Question?", expectsReply: true })).delivered, true);
+    const wrongReplier = await planner.send(asker.sessionId!, { text: "Not my ask either.", replyTo: "open-ask" });
+    assert.match(wrongReplier.reason ?? "", /does not match the pending ask/);
+
     assert.equal((await asker.send(orchestrator.sessionId!, { messageId: "plain-note", text: "FYI." })).delivered, true);
     const notAnAsk = await orchestrator.send(asker.sessionId!, { text: "Re: FYI.", replyTo: "plain-note" });
     assert.equal(notAnAsk.code, "E_REPLY_TARGET");
