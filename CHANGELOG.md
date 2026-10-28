@@ -7,6 +7,9 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 ### Changed
 - The README now documents the mailbox for disconnected sessions: who can receive queued mail, what is queued, expiry, capacity, delivery order on reconnect, and what a broker restart loses. Thanks to [@mimadiule](https://github.com/mimadiule) for issue #188.
 
+### Fixed
+- After a reboot, the broker could refuse to start for hours when its old pid file pointed at a process the system had since given to another user. It now treats that pid as stale. Thanks to [@mimadiule](https://github.com/mimadiule) for issue #186.
+
 ## [0.18.1] - 2026-10-22
 
 ### Changed

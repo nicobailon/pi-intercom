@@ -14,7 +14,10 @@ export function assertNoLiveBroker(pidPath: string): void {
   try {
     process.kill(pid, 0);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
+    // The broker runs as the same user as its clients, so EPERM means the
+    // recorded pid now belongs to another user's process (pid reuse after a reboot).
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH" || code === "EPERM") return;
     throw error;
   }
   throw new Error(`Refusing to replace live intercom broker process ${pid}`);
