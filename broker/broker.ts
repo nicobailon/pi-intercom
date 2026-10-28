@@ -140,6 +140,8 @@ interface PendingAskRecord {
 interface MessageReceiptRoute {
   from: string;
   to: string;
+  /** Set for asks, so only an ask can be answered by a late reply. Asks are never queued. */
+  expectsReply?: boolean;
   createdAt: number;
 }
 
@@ -827,7 +829,7 @@ class IntercomBroker {
             });
             this.updateDeliveryRecord(currentKey, message.supersedes, "failed", `Superseded by ${message.id}`, "E_DELIVERY_SUPERSEDED");
           }
-          this.messageReceiptRoutes.set(message.id, { from: currentKey, to: target.key, createdAt: brokerReceivedAt });
+          this.messageReceiptRoutes.set(message.id, { from: currentKey, to: target.key, ...(message.expectsReply ? { expectsReply: true } : {}), createdAt: brokerReceivedAt });
           writeMessage(target.socket, {
             type: "message",
             from: fromSession.info,
@@ -1169,7 +1171,7 @@ class IntercomBroker {
   private demoteLateReply(message: Message, fromKey: string, targetKey: string): boolean {
     const replyTo = message.replyTo;
     const route = replyTo ? this.messageReceiptRoutes.get(replyTo) : undefined;
-    if (route?.from !== targetKey || route.to !== fromKey) return false;
+    if (!route?.expectsReply || route.from !== targetKey || route.to !== fromKey) return false;
     delete message.replyTo;
     message.lateReplyTo = replyTo;
     return true;
