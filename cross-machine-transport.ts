@@ -37,6 +37,9 @@ export const runCommand: CommandRunner = (command, args, input, timeoutMs) => ne
   let stderr = "";
   let timedOut = false;
   let settled = false;
+  let stdinError: Error | undefined;
+  let stdinClosed = false;
+  let exitCode: number | null | undefined;
   const cleanup = () => {
     if (timer) clearTimeout(timer);
     child.off("error", onError);
@@ -48,11 +51,19 @@ export const runCommand: CommandRunner = (command, args, input, timeoutMs) => ne
     cleanup();
     reject(error);
   };
-  const onClose = (code: number | null) => {
-    if (settled) return;
+  const finish = () => {
+    if (settled || exitCode === undefined || !stdinClosed) return;
     settled = true;
+    if (stdinError && exitCode === 0 && !timedOut) {
+      reject(stdinError);
+      return;
+    }
+    resolve({ stdout, stderr, code: timedOut ? 124 : (exitCode ?? 1), ...(timedOut ? { timedOut: true } : {}) });
+  };
+  const onClose = (code: number | null) => {
+    exitCode = code;
     cleanup();
-    resolve({ stdout, stderr, code: timedOut ? 124 : (code ?? 1), ...(timedOut ? { timedOut: true } : {}) });
+    finish();
   };
   const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
     timedOut = true;
@@ -62,7 +73,16 @@ export const runCommand: CommandRunner = (command, args, input, timeoutMs) => ne
   child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
   child.on("error", onError);
   child.on("close", onClose);
-  child.stdin.end(input);
+  // stdin errors belong to the pipe, not the ChildProcess. Wait for both to
+  // close so a late write error cannot turn incomplete input into success.
+  child.stdin.on("error", (error) => { stdinError = error; });
+  child.stdin.on("close", () => {
+    stdinClosed = true;
+    finish();
+  });
+  child.stdin.end(input, (error?: Error | null) => {
+    if (error) stdinError ??= error;
+  });
 });
 
 function relaySupportError(machine: string): Error {

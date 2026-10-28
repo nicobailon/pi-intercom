@@ -7,6 +7,14 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 ### Added
 - Extension channels have `unregister()`. A session can leave a namespace it registered, which frees one of its 32 extension slots and, if it owned the namespace, hands ownership to the next owner-eligible member. See the README's Extension channels section. Thanks to [@wayne930242](https://github.com/wayne930242) for #184.
 
+### Changed
+- The README now explains the ask timeouts: the Pi tool waits 10 minutes and the CLI 120 seconds by default, and the broker reads its own `PI_INTERCOM_ASK_TIMEOUT_MS` when it starts, which limits how long a reply is accepted. It also covers how an asker can tell a delivered ask from an undelivered one and how disconnects are detected. Thanks to [@mimadiule](https://github.com/mimadiule) for issue #189.
+- The README now documents the mailbox for disconnected sessions: who can receive queued mail, what is queued, expiry, capacity, delivery order on reconnect, and what a broker restart loses. Thanks to [@mimadiule](https://github.com/mimadiule) for issue #188.
+
+### Fixed
+- A cross-machine send no longer crashes Pi when SSH or the remote relay closes its input before the message has finished writing. Failed commands retain their diagnostics, and incomplete writes cannot report success. Thanks to [@Oscar-Williams](https://github.com/Oscar-Williams) for #185.
+- After a reboot, the broker could refuse to start for hours when its old pid file pointed at a process the system had since given to another user. It now treats that pid as stale. Thanks to [@mimadiule](https://github.com/mimadiule) for issue #186.
+
 ## [0.18.1] - 2026-10-22
 
 ### Changed
