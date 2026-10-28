@@ -256,19 +256,18 @@ The planner typically uses `send`. If you prefer manual approval for outgoing no
 
 ### Ask timeouts and liveness
 
-An ask has two clocks, and they can run in different processes:
-
-| Clock | Runs in | Default | How to change it |
+| Timer | Runs in | Default | How to change it |
 | --- | --- | --- | --- |
 | How long `ask` and `contact_supervisor` wait | The asking Pi process | 10 minutes | `PI_INTERCOM_ASK_TIMEOUT_MS` in that process's environment, read when the extension loads |
 | How long `pi-intercom ask` waits | The CLI process | 120 seconds | `--timeout-ms`; the CLI ignores `PI_INTERCOM_ASK_TIMEOUT_MS` |
 | How long the broker accepts a reply to the ask | The broker | 10 minutes | `PI_INTERCOM_ASK_TIMEOUT_MS` in the environment of the Pi session that started the broker, read once at broker start |
+| How long the recipient's `reply`, `pending`, and `send` reply inference see the ask | The receiving Pi process | 10 minutes | `PI_INTERCOM_ASK_TIMEOUT_MS` in the recipient's environment |
 
-The recipient's `PI_INTERCOM_ASK_TIMEOUT_MS` has no effect on asks sent to it; it only applies to asks the recipient sends. Once the broker's window has passed, a reply to that ask is refused with `E_REPLY_TARGET`, even if the asker is still waiting, so a longer wait only helps when the broker was started with at least the same value. A new broker value takes effect after the broker restarts, which happens 5 seconds after the last session disconnects and no mail is queued. When the asker's wait times out, the ask stays open at the broker until its own window ends, and a reply in that time arrives as an ordinary message. Cancelling the tool call closes the ask at the broker right away.
+Once the broker's window has passed, a reply to that ask is refused with `E_REPLY_TARGET`, even if the asker is still waiting, so a longer wait only helps when the broker was started with at least the same value. After the recipient's own window, it can still answer with `send` and an explicit `replyTo` until the broker's window closes. A new value reaches the broker only when it is replaced: the broker exits 5 seconds after the last session disconnects (later if mail is still queued), and the next Pi session to connect starts a new one with its own environment. When the asker's wait times out, the ask stays open at the broker until the broker's window ends, and a reply in that time arrives as an ordinary message. Cancelling the tool call closes the ask at the broker right away.
 
-There is no ping frame, but an asker can still tell a delivered ask from one that never arrived. An ask fails right away when the target is not connected or delivery fails. A Pi recipient must also confirm receipt within 5 seconds, or the ask fails as unconfirmed. An ask that is still waiting after that reached the recipient's Pi process, and a timeout error names the last receipt it got, such as `injected` (handed to Pi) or `queued` (held for compaction or human-first delivery). A CLI recipient sends no receipts, so delivery to it is reported as soon as the broker writes the message.
+An asker can tell a delivered ask from one that never arrived. An ask fails right away when the target is not connected or delivery fails. A Pi recipient must also confirm receipt within 5 seconds, or the ask fails as unconfirmed. An ask that is still waiting after that reached the recipient's Pi process, and a timeout error names the last receipt it got, such as `injected` (handed to Pi) or `queued` (held for compaction or human-first delivery). A client that does not register `acknowledgesReceipts: true` (anything other than a Pi session, such as a custom client) sends no receipts, so the broker reports delivery to it as soon as it writes the message.
 
-Disconnects are detected by the heartbeats described in [How It Works](#how-it-works): each client sends a `list` request every 30 seconds and reconnects if the broker does not answer within 5 seconds, and the broker drops a session that sends nothing for 90 seconds. A recipient that exits mid-ask leaves the roster, but the waiting ask does not fail early; it runs until its timeout. An asker that loses its own broker connection fails its ask immediately.
+Disconnects are detected by the heartbeats described in [How It Works](#how-it-works): each client sends a `list` request every 30 seconds by default and drops the connection if the broker does not answer within 5 seconds; a Pi session then reconnects. The broker drops a session that sends nothing for three of its reported heartbeat intervals (90 seconds by default); a client that reports none is never dropped. A recipient that exits mid-ask leaves the roster, but the waiting ask does not fail early; it runs until its timeout. A Pi asker that loses its own broker connection fails its ask immediately. `pi-intercom ask` waits until `--timeout-ms` and reports a timeout.
 
 ## Workflow: Handing Over a Session
 
