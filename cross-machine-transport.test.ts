@@ -83,6 +83,42 @@ test("runCommand rejects once when spawning fails", async () => {
   await new Promise((resolve) => setTimeout(resolve, 20));
 });
 
+test("runCommand delivers all stdin to a reading child", async () => {
+  const input = "hello π\n".repeat(32 * 1024);
+  const result = await runCommand(process.execPath, ["-e", "process.stdin.pipe(process.stdout)"], input, 5_000);
+  assert.deepEqual(result, { stdout: input, stderr: "", code: 0 });
+});
+
+test("runCommand preserves diagnostics when a failing child closes stdin early", async () => {
+  const result = await runCommand(process.execPath, ["-e", `
+    require("node:fs").closeSync(0);
+    process.stdout.write('{"ok":false,"error":"relay unavailable"}');
+    process.stderr.write("relay unavailable");
+    process.exitCode = 7;
+  `], "x".repeat(1024 * 1024), 5_000);
+  assert.deepEqual(result, {
+    stdout: '{"ok":false,"error":"relay unavailable"}',
+    stderr: "relay unavailable",
+    code: 7,
+  });
+});
+
+test("runCommand rejects incomplete stdin even when the child exits successfully", async () => {
+  await assert.rejects(
+    runCommand(process.execPath, ["-e", 'require("node:fs").closeSync(0)'], "x".repeat(1024 * 1024), 5_000),
+    /EPIPE|EOF|ECONNRESET|closed|destroyed/i,
+  );
+});
+
+test("runCommand still reaps a child that closes stdin and then times out", async () => {
+  const result = await runCommand(process.execPath, ["-e", `
+    require("node:fs").closeSync(0);
+    process.stderr.write("stdin closed");
+    setTimeout(() => process.exit(8), 10_000);
+  `], "x".repeat(1024 * 1024), 1_000);
+  assert.deepEqual(result, { stdout: "", stderr: "stdin closed", code: 124, timedOut: true });
+});
+
 test("non-JSON and incompatible remote output report incompatible relay support", async () => {
   for (const stdout of ["", '{"ok":"yes"}', '{"version":2,"ok":true}']) {
     const run: CommandRunner = async (command, args) => discoveryResult(command, args) ?? { code: 1, stdout, stderr: "unknown command: relay" };
