@@ -2329,6 +2329,133 @@ test("late extension registration advertises before an onReady publish", { concu
   }
 });
 
+test("extension channel unregister withdraws the namespace and hands ownership to the next member", { concurrency: false }, async () => {
+  const { cleanup } = await setupClients();
+  const successor = new IntercomClient();
+  const successorMessages: BrokerMessage[] = [];
+  const harness = createExtensionHarness("unregister-worker");
+  const extensionEvents: unknown[] = [];
+  let channel: IntercomExtensionChannel | undefined;
+  const register = () => harness.pi.events.emit(INTERCOM_EXTENSION_REGISTER_EVENT, {
+    namespace: "unregister/v1",
+    ownerEligible: true,
+    onReady: (value: IntercomExtensionChannel) => { channel = value; },
+    onEvent: (event: unknown) => extensionEvents.push(event),
+  });
+  const lastOwner = () => successorMessages.filter((message) => message.type === "extension_owner").at(-1);
+  const waitForOwner = async (ownerId: string | undefined) => {
+    await waitForCondition(() => { const last = lastOwner(); return last?.type === "extension_owner" && last.ownerId === ownerId; }, `owner ${ownerId}`);
+    return lastOwner()!;
+  };
+
+  try {
+    successor.onBrokerMessage((message) => successorMessages.push(message));
+    successor.on("error", () => {});
+    const { default: piIntercomExtension } = await import("./index.ts");
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    register();
+    const first = channel;
+    assert.ok(first);
+    // Owners are elected in registration order, so the worker must own the
+    // namespace before the successor joins.
+    await waitForCondition(() => Boolean(first.snapshot().owner), "worker owner");
+    const workerOwner = first.snapshot().owner;
+    assert.ok(workerOwner);
+
+    await successor.connect({
+      name: "unregister-successor",
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+      extensions: [{ namespace: "unregister/v1", ownerEligible: true }],
+    });
+    const initial = await waitForOwner(workerOwner.sessionId);
+    assert.equal(initial.type === "extension_owner" && initial.ownerEpoch, workerOwner.epoch);
+
+    first.unregister();
+    const handover = await waitForOwner(successor.sessionId);
+    assert.notEqual(handover.type === "extension_owner" && handover.ownerEpoch, undefined);
+
+    // The handover above shows the broker took the withdrawal; here the
+    // unregistered handle no longer receives the namespace's messages.
+    const events = extensionEvents.length;
+    successor.sendExtensionMessage({
+      type: "extension_publish",
+      namespace: "unregister/v1",
+      audience: "capable",
+      payload: { after: "unregister" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(extensionEvents.length, events);
+
+    assert.throws(() => first.publish({}), /unregistered/);
+    assert.throws(() => first.commitState({}), /unregistered/);
+    assert.equal(first.snapshot().owner, undefined);
+    first.unregister();
+
+    // The namespace can be registered again; the stale handle stays dead.
+    register();
+    assert.notEqual(channel, first);
+    assert.throws(() => first.publish({}), /unregistered/);
+    channel?.unregister();
+    await harness.emitLifecycle("session_shutdown");
+  } finally {
+    await successor.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("extension channel unregister during the connect handshake still withdraws the namespace", { concurrency: false }, async () => {
+  const { cleanup } = await setupClients();
+  const observer = new IntercomClient();
+  const observerMessages: BrokerMessage[] = [];
+  const harness = createExtensionHarness("unregister-handshake-worker");
+  let channel: IntercomExtensionChannel | undefined;
+  const originalConnect = IntercomClient.prototype.connect;
+
+  try {
+    observer.onBrokerMessage((message) => observerMessages.push(message));
+    observer.on("error", () => {});
+    await observer.connect({
+      name: "unregister-handshake-observer",
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+      extensions: [{ namespace: "handshake/v1", ownerEligible: false }],
+    });
+    const { default: piIntercomExtension } = await import("./index.ts");
+    piIntercomExtension(harness.pi as never);
+    harness.pi.events.emit(INTERCOM_EXTENSION_REGISTER_EVENT, {
+      namespace: "handshake/v1",
+      ownerEligible: true,
+      onReady: (value: IntercomExtensionChannel) => { channel = value; },
+      onEvent: () => {},
+    });
+    // The register frame is built with the namespace; it is unregistered before the broker answers.
+    IntercomClient.prototype.connect = function (this: IntercomClient, ...args: Parameters<IntercomClient["connect"]>) {
+      IntercomClient.prototype.connect = originalConnect;
+      assert.ok(args[0].extensions?.some((extension) => extension.namespace === "handshake/v1"));
+      channel?.unregister();
+      return originalConnect.apply(this, args);
+    };
+    await harness.emitLifecycle("session_start");
+    await waitForSessionByName(observer, "unregister-handshake-worker");
+
+    const lastOwner = () => observerMessages.filter((message) => message.type === "extension_owner").at(-1);
+    await waitForCondition(() => { const last = lastOwner(); return last?.type === "extension_owner" && last.ownerId === undefined; }, "an owner election without an owner");
+    await harness.emitLifecycle("session_shutdown");
+  } finally {
+    IntercomClient.prototype.connect = originalConnect;
+    await observer.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
 test("extension outbox sends notify-only messages with trace and provenance", { concurrency: false }, async () => {
   const { planner, cleanup } = await setupClients();
   const { default: piIntercomExtension } = await import("./index.ts");
