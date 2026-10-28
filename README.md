@@ -240,7 +240,7 @@ This matters because the agent receiving the message doesn't need to reconstruct
 
 `send` is fire-and-forget — the tool returns immediately after delivery. If the target is disconnected and the broker holds the message in its mailbox, the result says the session is not connected and the message is waiting for it to reconnect, instead of saying it was sent. When the destination has exactly one pending inbound ask, `send` infers that it is the answer, attaches the ask's `replyTo`, and reports `Reply sent to <target> (inferred from pending ask)`. During a turn triggered by an inbound ask, `send` refuses a different non-reply target instead of treating CWD, roster position, or project hierarchy as reply authority. With zero or multiple matching asks, it remains an ordinary unthreaded send. An inferred answer still uses the `confirmSend` dialog when configured; only a caller-supplied `replyTo` skips confirmation.
 
-`ask` requires a currently connected recipient, then blocks until it responds (10-minute timeout by default; set `PI_INTERCOM_ASK_TIMEOUT_MS` to a positive millisecond value to change it). If the target is disconnected, `ask` fails immediately; use `send` when queued, non-blocking mailbox delivery is appropriate. The reply comes back as the tool result, so the agent continues in the same turn with full context. No confirmation dialog — if you're asking and waiting, the intent is clear.
+`ask` requires a currently connected recipient, then blocks until it responds (10-minute timeout by default; set `PI_INTERCOM_ASK_TIMEOUT_MS` to a positive millisecond value to change it; see [Ask timeouts and liveness](#ask-timeouts-and-liveness)). If the target is disconnected, `ask` fails immediately; use `send` when queued, non-blocking mailbox delivery is appropriate. The reply comes back as the tool result, so the agent continues in the same turn with full context. No confirmation dialog — if you're asking and waiting, the intent is clear.
 
 `reply` is receiver-side sugar for replying to an inbound ask. In the turn triggered by an incoming intercom ask, `intercom({ action: "reply", message: "..." })` targets that exact sender and message automatically. If you reply later, it falls back to the single unresolved inbound ask. If multiple asks are pending, use `intercom({ action: "pending" })` to inspect them and then call `reply` with `to` to disambiguate.
 
@@ -253,6 +253,22 @@ Pi sessions promise these receipts when they register, so a send to one reports 
 Cancellation is explicit: call `intercom({ action: "cancel", messageId })` to request cancellation of a message you originally sent. A held message is dropped with `cancelled`; an already-injected message reports `cancellation_requested` rather than pretending it removed work from Pi's queues. Supersede is also explicit: pass `supersedes: "old-message-id"` on a new `send` or `ask`. The broker only allows same sender → same receiver supersedes, marks the old message `superseded`, and sends the replacement with a new ID; a held old message is dropped, while an already-steered one may still be processed. Retries are never automatic; a retry should be a new authored message, optionally linked with `retryOf`.
 
 The planner typically uses `send`. If you prefer manual approval for outgoing non-reply messages, turn on `confirmSend: true`. The worker uses `ask` for everything (no confirmation needed, gets answers inline), so it can operate autonomously either way.
+
+### Ask timeouts and liveness
+
+An ask has two clocks, and they can run in different processes:
+
+| Clock | Runs in | Default | How to change it |
+| --- | --- | --- | --- |
+| How long `ask` and `contact_supervisor` wait | The asking Pi process | 10 minutes | `PI_INTERCOM_ASK_TIMEOUT_MS` in that process's environment, read when the extension loads |
+| How long `pi-intercom ask` waits | The CLI process | 120 seconds | `--timeout-ms`; the CLI ignores `PI_INTERCOM_ASK_TIMEOUT_MS` |
+| How long the broker accepts a reply to the ask | The broker | 10 minutes | `PI_INTERCOM_ASK_TIMEOUT_MS` in the environment of the Pi session that started the broker, read once at broker start |
+
+The recipient's `PI_INTERCOM_ASK_TIMEOUT_MS` has no effect on asks sent to it; it only applies to asks the recipient sends. Once the broker's window has passed, a reply to that ask is refused with `E_REPLY_TARGET`, even if the asker is still waiting, so a longer wait only helps when the broker was started with at least the same value. A new broker value takes effect after the broker restarts, which happens 5 seconds after the last session disconnects and no mail is queued. When the asker's wait times out, the ask stays open at the broker until its own window ends, and a reply in that time arrives as an ordinary message. Cancelling the tool call closes the ask at the broker right away.
+
+There is no ping frame, but an asker can still tell a delivered ask from one that never arrived. An ask fails right away when the target is not connected or delivery fails. A Pi recipient must also confirm receipt within 5 seconds, or the ask fails as unconfirmed. An ask that is still waiting after that reached the recipient's Pi process, and a timeout error names the last receipt it got, such as `injected` (handed to Pi) or `queued` (held for compaction or human-first delivery). A CLI recipient sends no receipts, so delivery to it is reported as soon as the broker writes the message.
+
+Disconnects are detected by the heartbeats described in [How It Works](#how-it-works): each client sends a `list` request every 30 seconds and reconnects if the broker does not answer within 5 seconds, and the broker drops a session that sends nothing for 90 seconds. A recipient that exits mid-ask leaves the roster, but the waiting ask does not fail early; it runs until its timeout. An asker that loses its own broker connection fails its ask immediately.
 
 ## Workflow: Handing Over a Session
 
