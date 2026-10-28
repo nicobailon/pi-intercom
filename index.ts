@@ -200,6 +200,17 @@ function queuedText(target: string, what = "message"): string {
   return `Session "${target}" is not connected. The ${what} is waiting in the broker mailbox until that session reconnects.`;
 }
 
+// The broker words "no open ask" ("a pending ask") differently from "an open ask between other sessions" ("the pending ask").
+function isClosedAskReply(result: SendResult): boolean {
+  return result.code === "E_REPLY_TARGET" && result.reason === "Reply target does not match a pending ask";
+}
+
+function closedAskText(target: string): string {
+  return `Reply to "${target}" was not delivered: the ask is no longer open (it expired, was cancelled, or was already answered). To deliver the content, send it as a new message without replyTo: intercom({ action: "send", to: "${target}", message: "..." }).`;
+}
+
+const LATE_REPLY_NOTE = "The ask was no longer open, so the reply was delivered as a regular message.";
+
 function deliveryDetails(result: SendResult): Record<string, unknown> {
   return {
     messageId: result.id,
@@ -209,6 +220,7 @@ function deliveryDetails(result: SendResult): Record<string, unknown> {
     outcomeKnown: result.outcomeKnown,
     ...(result.code ? { code: result.code } : {}),
     ...(result.reason ? { reason: result.reason } : {}),
+    ...(result.demoted ? { demoted: result.demoted } : {}),
   };
 }
 
@@ -664,6 +676,7 @@ function formatInboundDeliveryMetadata(message: Message): string {
   if (typeof message.senderSequence === "number") parts.push(`seq ${message.senderSequence}`);
   if (message.supersedes) parts.push(`supersedes ${message.supersedes}`);
   if (message.retryOf) parts.push(`retry of ${message.retryOf}`);
+  if (message.lateReplyTo) parts.push(`late reply to ${message.lateReplyTo}`);
   const sentAt = formatMessageTimestamp(message.timestamp);
   if (sentAt) parts.push(`sent ${sentAt}`);
   const brokerDeliveredAt = formatMessageTimestamp(message.brokerDeliveredAt);
@@ -1948,6 +1961,13 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
         retryOf,
       }));
       if (!result.delivered) {
+        if (effectiveReplyTo && isClosedAskReply(result)) {
+          dismissIncomingAsk(effectiveReplyTo);
+          return {
+            content: [{ type: "text", text: closedAskText(display) }],
+            details: { ...deliveryDetails(result), error: true },
+          };
+        }
         return {
           content: [{ type: "text", text: noMatchText ?? `${undeliveredText(display, result)}${resolution}` }],
           details: { ...deliveryDetails(result), ...(noMatchText ? { error: true } : {}) },
@@ -1969,7 +1989,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
             ? queuedText(display, inferredAsk ? "reply (inferred from pending ask)" : "message")
             : target.projectPane
               ? `Opened Herdr project pane ${target.projectPane.paneId} for ${target.projectPane.projectRoot} and sent message to ${targetDisplay}`
-              : inferredAsk ? `Reply sent to ${targetDisplay} (inferred from pending ask)` : `Message sent to ${display}${resolution}`,
+              : `${inferredAsk ? `Reply sent to ${targetDisplay} (inferred from pending ask)` : `Message sent to ${display}${resolution}`}${result.demoted ? ` ${LATE_REPLY_NOTE}` : ""}`,
         }],
         details: {
           ...deliveryDetails(result),
@@ -2950,12 +2970,13 @@ Usage:
               replyTo: target.message.id,
             });
             if (!result.delivered) {
-              if (result.reason === "Session not found") {
+              const closedAsk = isClosedAskReply(result);
+              if (closedAsk || result.reason === "Session not found") {
                 dismissIncomingAsk(target.message.id);
               }
               return {
-                content: [{ type: "text", text: undeliveredText(target.from.name || target.from.id, result) }],
-                details: deliveryDetails(result),
+                content: [{ type: "text", text: closedAsk ? closedAskText(target.from.name || target.from.id) : undeliveredText(target.from.name || target.from.id, result) }],
+                details: { ...deliveryDetails(result), ...(closedAsk ? { error: true } : {}) },
               };
             }
             dismissIncomingAsk(target.message.id);
@@ -2966,7 +2987,7 @@ Usage:
               timestamp: Date.now(),
             });
             return {
-              content: [{ type: "text", text: result.delivery === "queued" ? queuedText(target.from.name || target.from.id, "reply") : `Reply sent to ${target.from.name || target.from.id}` }],
+              content: [{ type: "text", text: result.delivery === "queued" ? queuedText(target.from.name || target.from.id, "reply") : `Reply sent to ${target.from.name || target.from.id}${result.demoted ? `. ${LATE_REPLY_NOTE}` : ""}` }],
               details: { ...deliveryDetails(result), replyTo: target.message.id },
             };
           } catch (error) {

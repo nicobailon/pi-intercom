@@ -51,6 +51,15 @@ test("expanded inline intercom messages show the full body without collapse cont
   assert.doesNotMatch(rendered, /Ctrl\+O/);
 });
 
+test("a late reply shows which ask it answered, expanded and collapsed", () => {
+  const lateReply: Message = { ...message, lateReplyTo: "ask-abcdefgh-1234" };
+  const expanded = new InlineMessageComponent(from, lateReply, theme as any).render(100).join("\n");
+  const collapsed = new InlineMessageComponent(from, lateReply, theme as any, undefined, undefined, true).render(100).join("\n");
+
+  assert.match(expanded, /Late reply to ask-abcd/);
+  assert.match(collapsed, /Late reply to ask-abcd/);
+});
+
 test("cross-machine messages label the asserted identity as unverified", () => {
   const component = new InlineMessageComponent(from, {
     ...message,

@@ -4306,6 +4306,71 @@ test("intercom reply targets exact replyTo when multiple asks are pending", { co
   }
 });
 
+test("intercom reply to an ask that is no longer open delivers it or explains how to send it", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("late-reply-worker");
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const worker = await waitForSessionByName(planner, "late-reply-worker");
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const pendingText = async () => (await intercomTool.execute("pending", { action: "pending" }, new AbortController().signal, undefined, harness.ctx)).content[0]?.text ?? "";
+
+    assert.equal((await planner.send(worker.id, { messageId: "cancelled-late-ask", text: "Still there?", expectsReply: true })).delivered, true);
+    planner.cancelAsk("cancelled-late-ask");
+    await planner.listSessions();
+    const lateReceived = once(planner, "message") as Promise<[SessionInfo, Message]>;
+    const late = await intercomTool.execute("late-reply", { action: "reply", message: "Late answer.", replyTo: "cancelled-late-ask" }, new AbortController().signal, undefined, harness.ctx);
+    assert.notEqual(late.details?.error, true);
+    assert.equal(late.details?.demoted, "late_reply");
+    assert.match(late.content[0]?.text ?? "", /no longer open, so the reply was delivered as a regular message/);
+    assert.equal((await lateReceived)[1].lateReplyTo, "cancelled-late-ask");
+    assert.doesNotMatch(await pendingText(), /cancelled-late-ask/);
+
+    // A disconnected asker's delivery routes are gone, so the broker cannot prove the ask and refuses the reply.
+    assert.equal((await orchestrator.send(worker.id, { messageId: "abandoned-ask", text: "Anyone?", expectsReply: true })).delivered, true);
+    orchestrator.cancelAsk("abandoned-ask");
+    await orchestrator.disconnect();
+    const refused = await intercomTool.execute("refused-reply", { action: "reply", message: "Too late.", replyTo: "abandoned-ask" }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(refused.details?.error, true);
+    assert.equal(refused.details?.code, "E_REPLY_TARGET");
+    assert.match(refused.content[0]?.text ?? "", /no longer open.*intercom\(\{ action: "send"/);
+    assert.doesNotMatch(await pendingText(), /abandoned-ask/);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("a late reply is labelled in the asker's inbound message metadata", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("late-asker");
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const askReceived = once(planner, "message") as Promise<[SessionInfo, Message]>;
+    const controller = new AbortController();
+    const askResult = intercomTool.execute("late-ask", { action: "ask", to: "planner", message: "Question?" }, controller.signal, undefined, harness.ctx);
+    const [asker, askMessage] = await askReceived;
+    controller.abort();
+    await askResult;
+    await planner.listSessions();
+
+    assert.equal((await planner.send(asker.id, { messageId: "late-answer", text: "Answer.", replyTo: askMessage.id })).demoted, "late_reply");
+    await waitForCondition(() => harness.sentMessages.some((entry) => entry.message.content?.includes("late-answer")), "late reply injection");
+    const injected = harness.sentMessages.find((entry) => entry.message.content?.includes("late-answer"))!;
+    assert.match(injected.message.content ?? "", new RegExp(`late reply to ${askMessage.id}`));
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
 test("intercom reply sends attachments", { concurrency: false }, async () => {
   const { planner, cleanup } = await setupClients();
   const { default: piIntercomExtension } = await import("./index.ts");

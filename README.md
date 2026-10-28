@@ -421,7 +421,7 @@ Only registered in sessions where `pi-subagents` supplied the required child bri
 
 **`handover`** — Summarizes the current session with the current model and sends the summary to the target, which acts on it. `message` is the optional next task. Targeting, confirmation, and delivery work exactly like `send`, including `name@machine` targets. `replyTo`, `supersedes`, `retryOf`, and `attachments` are rejected. See [Workflow: Handing Over a Session](#workflow-handing-over-a-session).
 
-**`reply`** — Replies to the current intercom-triggered message if there is one. Otherwise it falls back to the single unresolved inbound ask. If multiple asks are pending, pass `to` or inspect them with `pending` first. Under the hood this is still a normal `send` with the exact `replyTo` value.
+**`reply`** — Replies to the current intercom-triggered message if there is one. Otherwise it falls back to the single unresolved inbound ask. If multiple asks are pending, pass `to` or inspect them with `pending` first. Under the hood this is still a normal `send` with the exact `replyTo` value. If the ask is no longer open at the broker (it expired, was cancelled, or was already answered), the reply is still delivered as an ordinary message labelled as a late reply, as long as the asker is still connected to the same broker and the ask was sent within the last hour. It does not complete the asker's waiting `ask`. Otherwise `reply` fails with `E_REPLY_TARGET` and says to deliver the content with `send`.
 
 **`pending`** — Lists unresolved inbound asks with sender, message ID, elapsed time, and a short preview. Useful when replying after the original triggered turn.
 

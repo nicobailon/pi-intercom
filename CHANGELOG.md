@@ -6,6 +6,7 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ### Fixed
 - After a reboot, the broker could refuse to start for hours when its old pid file pointed at a process the system had since given to another user. It now treats that pid as stale. Thanks to [@mimadiule](https://github.com/mimadiule) for issue #186.
+- A reply sent after its ask had timed out, been cancelled, or already been answered was rejected and its content lost. It now reaches the asker as an ordinary message marked as a late reply. If the asker has disconnected or the broker has restarted, the reply tool says so and tells the agent to use `send` instead. Thanks to [@mimadiule](https://github.com/mimadiule) for issue #187.
 
 ## [0.18.1] - 2026-10-22
 
