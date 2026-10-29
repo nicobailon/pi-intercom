@@ -132,7 +132,7 @@ test("a disabled saved machine fails before remote agent listing", async () => {
 });
 
 const intercomList = JSON.stringify({ ok: true, sessions: [
-  { name: "pi-intercom-cli", id: "00000000-0000-4000-8000-000000000009", model: "pi-intercom-cli", status: "idle", cwd: "/" },
+  { name: "host", id: "00000000-0000-4000-8000-000000000009", model: "pi-intercom-cli", status: "idle", cwd: "/" },
   { name: "host", id: fakeSessionId, model: "claude", status: "idle", cwd: "/srv" },
 ] });
 
@@ -171,7 +171,7 @@ test("a failing Herdr machine list is reported instead of falling back to SSH", 
 });
 
 test("a direct SSH host that could start an ssh option or carry shell syntax is rejected before SSH runs", async () => {
-  for (const target of ["reviewer@-oProxyCommand=x", "reviewer@a;b", "reviewer@a$(id)", "reviewer@host:22"]) {
+  for (const target of ["reviewer@-v", "reviewer@-oProxyCommand=x", "reviewer@a;b", "reviewer@a$(id)", "reviewer@host:22"]) {
     let sshCalls = 0;
     const run: CommandRunner = async (command) => {
       if (command === "herdr") return { code: 0, stdout: machines, stderr: "" };
