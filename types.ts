@@ -97,6 +97,8 @@ export interface Message {
   /** Broker-set only: the ask this message answered after the ask was no longer open. Display-only. */
   lateReplyTo?: string;
   expectsReply?: boolean;
+  /** Sender asked that this message not start a turn in an idle receiver. */
+  noWake?: boolean;
   provenance?: MessageProvenance;
   crossMachine?: CrossMachineProvenance;
   content: {

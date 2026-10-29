@@ -2981,6 +2981,45 @@ test("on Pi 1.2.0 and newer, idle sessions wake through triggerTurn without a wa
   }
 });
 
+test("a noWake send reaches an idle session without starting a turn", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, orchestrator, cleanup } = await setupClients();
+
+  try {
+    for (const piVersion of ["1.1.0", "1.2.0"]) {
+      const name = `no-wake-worker-${piVersion}`;
+      const harness = createExtensionHarness(name, { hasUI: true, isIdle: () => true, sessionId: `session-${name}` });
+      try {
+        piIntercomExtension(harness.pi as never, piVersion);
+        await harness.emitLifecycle("session_start");
+        const worker = await waitForSessionByName(planner, name);
+
+        assert.equal((await planner.send(worker.id, { text: "Paused the job, no reply needed", noWake: true })).delivered, true);
+        await waitForCondition(() => harness.sentMessages.length === 1, "no-wake message");
+        assert.deepEqual(harness.sentMessages[0]?.options, { deliverAs: "steer" }, piVersion);
+        assert.match(harness.sentMessages[0]?.message.content ?? "", /sent without waking you/);
+        assert.deepEqual(harness.userMessages, [], piVersion);
+
+        assert.equal((await planner.send(worker.id, { text: "Handle this now" })).delivered, true);
+        await waitForCondition(() => harness.sentMessages.length === 2, "waking message");
+        assert.ok(harness.sentMessages[1]?.options?.triggerTurn || harness.userMessages.length === 1, `${piVersion} still wakes for a normal message`);
+
+        const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+        for (const noWake of [true, false]) {
+          const received = once(orchestrator, "message") as Promise<[SessionInfo, Message]>;
+          const result = await intercomTool.execute(`no-wake-${noWake}`, { action: "send", to: "orchestrator", message: "fyi", noWake }, new AbortController().signal, undefined, harness.ctx);
+          assert.notEqual(result.details?.error, true);
+          assert.equal((await received)[1].noWake, noWake ? true : undefined);
+        }
+      } finally {
+        await harness.emitLifecycle("session_shutdown");
+      }
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
 test("an idle wake sent by another extension covers intercom messages, and intercom's wake blocks theirs", { concurrency: false }, async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const { planner, cleanup } = await setupClients();

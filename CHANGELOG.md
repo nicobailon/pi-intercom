@@ -6,6 +6,7 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ### Added
 - Extension channels have `unregister()`. A session can leave a namespace it registered, which frees one of its 32 extension slots and, if it owned the namespace, hands ownership to the next owner-eligible member. See the README's Extension channels section. Thanks to [@wayne930242](https://github.com/wayne930242) for #184.
+- A sender can mark a message as information only. With `noWake: true` on `send` (or `pi-intercom send --no-wake`), an idle session gets the message without starting a new turn and reads it the next time it runs, so a "no reply needed" update no longer costs the receiver a full model request. Asks and replies always wake the receiver, and busy sessions get the message as before. Thanks to [@erikdarlingdata](https://github.com/erikdarlingdata) for issue #195.
 
 ### Changed
 - The bundled `pi-intercom` skill is a quarter of its old size and no longer says intercom is same-machine only, which made agents refuse to message sessions on other machines. It now covers sending and handing over to `name@machine`, asking a waiting subagent a follow-up question inside your reply, and steering a subagent after a progress update.
