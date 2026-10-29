@@ -19,7 +19,7 @@ export interface RemoteAgent {
 export interface DiscoveredRemoteAgent {
   machine: SavedMachine;
   agent: RemoteAgent;
-  /** No saved Herdr machine matched, so the machine name is used directly as an SSH host. */
+  /** Found in the machine's intercom roster over SSH rather than in Herdr. */
   viaSsh?: boolean;
 }
 
@@ -32,8 +32,6 @@ export interface DiscoveryDeps {
   }>;
   herdrBin: string;
   discoveryTimeoutMs?: number;
-  /** Remote pi-intercom command that lists sessions on a machine reached directly over SSH. */
-  remoteCommand?: string;
 }
 
 // A password or host-key prompt must fail instead of taking over Pi's terminal.
@@ -117,11 +115,10 @@ export async function listMachineAgents(machine: SavedMachine, deps: DiscoveryDe
   }
 }
 
-async function listSshAgents(host: string, deps: DiscoveryDeps): Promise<RemoteAgent[]> {
-  const remoteCommand = deps.remoteCommand ?? "pi-intercom";
+async function listSshAgents(host: string, deps: DiscoveryDeps & { remoteCommand: string }): Promise<RemoteAgent[]> {
   const result = await deps.run(
     "ssh",
-    [...DIRECT_SSH_OPTIONS, host, `${remoteCommand} list --json`],
+    [...DIRECT_SSH_OPTIONS, host, `${deps.remoteCommand} list --json`],
     undefined,
     deps.discoveryTimeoutMs ?? DISCOVERY_TIMEOUT_MS,
   );
@@ -138,50 +135,58 @@ async function listSshAgents(host: string, deps: DiscoveryDeps): Promise<RemoteA
       return [{
         name: typeof row.name === "string" && row.name && row.name !== "(unnamed)" ? row.name : row.id,
         sessionId: row.id,
-        ...(typeof row.cwd === "string" ? { cwd: row.cwd } : {}),
-        ...(typeof row.status === "string" ? { status: row.status } : {}),
       }];
     });
   }
   if (isRecord(listed) && listed.ok === false && typeof listed.error === "string") {
-    throw new Error(`pi-intercom on "${host}" could not list its sessions: ${listed.error.replace(/\s+/g, " ").trim()}`);
+    throw new Error(`\`${deps.remoteCommand} list\` on "${host}" failed: ${listed.error.replace(/\s+/g, " ").trim()}`);
   }
   const detail = result.timedOut ? "timed out" : result.stderr.trim() || `exit ${result.code}`;
   throw new Error(
-    `Could not list intercom sessions on "${host}" over SSH: ${detail.replace(/\.$/, "")}. "${host}" is not a saved Herdr machine, so it is used as an SSH host.`
-      + ` Check that \`ssh ${host}\` connects without a password or host-key prompt and that \`${remoteCommand} list\` works there;`
-      + " if non-interactive SSH cannot find it, set crossMachine.remoteCommand to its absolute path.",
+    `Could not list intercom sessions on "${host}" over SSH: ${detail.replace(/\.$/, "")}. Check that \`ssh ${host}\` connects without a password or host-key prompt`
+      + ` and that \`${deps.remoteCommand} list\` runs there (set crossMachine.remoteCommand to an absolute path if SSH's PATH lacks it).`,
   );
 }
 
-function selectAgent(agents: RemoteAgent[], agentTarget: string, where: string): RemoteAgent {
-  const bySessionId = FULL_SESSION_UUID.test(agentTarget);
+function findAgent(agents: RemoteAgent[], explicit: { agentTarget: string; machineLabel: string }, where: string): RemoteAgent | undefined {
+  const bySessionId = FULL_SESSION_UUID.test(explicit.agentTarget);
   const matches = agents.filter((agent) => bySessionId
-    ? agent.sessionId === agentTarget
-    : agent.name.toLowerCase() === agentTarget.toLowerCase());
-  if (matches.length === 0) {
-    throw new Error(`No live Pi agent on ${where} exactly matches "${agentTarget}". Run \`pi-intercom list\` on that machine to see session names.`);
-  }
+    ? agent.sessionId === explicit.agentTarget
+    : agent.name.toLowerCase() === explicit.agentTarget.toLowerCase());
   if (matches.length > 1) {
-    throw new Error(`Multiple live Pi agents on ${where} exactly match "${agentTarget}"; target is ambiguous.`);
+    throw new Error(`Multiple live Pi agents on ${where} exactly match "${explicit.agentTarget}"; target is ambiguous. Address it as \`<session-id>@${explicit.machineLabel}\`.`);
   }
-  return matches[0]!;
+  return matches[0];
 }
 
-export async function discoverRemoteAgent(target: string, deps: DiscoveryDeps): Promise<DiscoveredRemoteAgent> {
+export async function discoverRemoteAgent(
+  target: string,
+  deps: DiscoveryDeps & { remoteCommand: string },
+): Promise<DiscoveredRemoteAgent> {
   const explicit = parseCrossMachineTarget(target);
-  // Herdr is optional. Without it, or without a saved machine by this label, the label is an SSH host.
-  const saved = (await listSavedMachines(deps).catch(() => [])).filter((machine) => (
-    machine.label.toLowerCase() === explicit.machineLabel.toLowerCase()
-  ));
+  // Herdr is optional: without it, the machine label is used as an SSH host.
+  const saved = (await listSavedMachines(deps).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  })).filter((machine) => machine.label.toLowerCase() === explicit.machineLabel.toLowerCase());
   const selected = saved.filter((machine) => machine.enabled);
   if (selected.length > 1) {
     throw new Error(`Saved Herdr machine label "${explicit.machineLabel}" is ambiguous; expected exactly one enabled machine.`);
   }
   if (selected.length === 1) {
     const machine = selected[0]!;
-    const agents = await listMachineAgents(machine, deps);
-    return { machine, agent: selectAgent(agents, explicit.agentTarget, `saved Herdr machine "${machine.label}"`) };
+    const where = `saved Herdr machine "${machine.label}"`;
+    const herdrAgent = findAgent(await listMachineAgents(machine, deps), explicit, where);
+    if (herdrAgent) return { machine, agent: herdrAgent };
+    // A Pi session outside a Herdr pane is only in the machine's intercom roster.
+    const sshAgents = await listSshAgents(machine.target, deps).catch((error: Error) => {
+      throw new Error(`No live Pi agent on ${where} exactly matches "${explicit.agentTarget}" in \`herdr agent list\`. ${error.message}`);
+    });
+    const agent = findAgent(sshAgents, explicit, where);
+    if (!agent) {
+      throw new Error(`No live Pi agent on ${where} exactly matches "${explicit.agentTarget}" in \`herdr agent list\` or \`${deps.remoteCommand} list\`.`);
+    }
+    return { machine, agent, viaSsh: true };
   }
   if (saved.length > 0) {
     throw new Error(`Saved Herdr machine "${explicit.machineLabel}" is disabled; enable it in Herdr to send there.`);
@@ -189,12 +194,11 @@ export async function discoverRemoteAgent(target: string, deps: DiscoveryDeps): 
 
   const host = explicit.machineLabel;
   if (!SSH_HOST.test(host)) {
-    throw new Error(`"${host}" is not a saved Herdr machine or a valid SSH host name; use a host name or ~/.ssh/config alias (letters, digits, ".", "_", "-").`);
+    throw new Error(`"${host}" is not a saved Herdr machine or a plain SSH host name (letters, digits, ".", "_", "-").`);
   }
-  const agents = await listSshAgents(host, deps);
-  return {
-    machine: { label: host, target: host, enabled: true },
-    agent: selectAgent(agents, explicit.agentTarget, `"${host}"`),
-    viaSsh: true,
-  };
+  const agent = findAgent(await listSshAgents(host, deps), explicit, `"${host}"`);
+  if (!agent) {
+    throw new Error(`No live Pi agent on "${host}" exactly matches "${explicit.agentTarget}". Run \`${deps.remoteCommand} list\` there to see session names.`);
+  }
+  return { machine: { label: host, target: host, enabled: true }, agent, viaSsh: true };
 }

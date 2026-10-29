@@ -98,7 +98,7 @@ test("unnamed remote Pi sessions are listed and targetable by session id", async
   const run: CommandRunner = async (_command, args) => (
     args[0] === "machine" ? { code: 0, stdout: machines, stderr: "" } : { code: 0, stdout: unnamed, stderr: "" }
   );
-  const match = await discoverRemoteAgent(`${fakeSessionId}@workstation`, { run, herdrBin: "herdr" });
+  const match = await discoverRemoteAgent(`${fakeSessionId}@workstation`, { run, herdrBin: "herdr", remoteCommand: "pi-intercom" });
   assert.equal(match.agent.sessionId, fakeSessionId);
 });
 
@@ -110,7 +110,7 @@ test("explicit machine label restricts discovery to the unique known machine", a
     return { code: 0, stdout: agents, stderr: "" };
   };
 
-  const match = await discoverRemoteAgent("REVIEWER@workstation", { run, herdrBin: "herdr" });
+  const match = await discoverRemoteAgent("REVIEWER@workstation", { run, herdrBin: "herdr", remoteCommand: "pi-intercom" });
 
   assert.equal(match.machine.label, "Workstation");
   assert.deepEqual(calls.map((call) => call.args), [
@@ -127,7 +127,7 @@ test("a disabled saved machine fails before remote agent listing", async () => {
     remoteCalls += 1;
     return { code: 0, stdout: agents, stderr: "" };
   };
-  await assert.rejects(discoverRemoteAgent("reviewer@disabled", { run, herdrBin: "herdr" }), /is disabled/);
+  await assert.rejects(discoverRemoteAgent("reviewer@disabled", { run, herdrBin: "herdr", remoteCommand: "pi-intercom" }), /is disabled/);
   assert.equal(remoteCalls, 0);
 });
 
@@ -136,10 +136,9 @@ const intercomList = JSON.stringify({ ok: true, sessions: [
   { name: "host", id: fakeSessionId, model: "claude", status: "idle", cwd: "/srv" },
 ] });
 
-test("a machine Herdr does not know is reached directly over SSH and listed with pi-intercom", async () => {
+test("a machine Herdr does not know, or any machine without Herdr installed, is listed directly over SSH", async () => {
   const herdrOutcomes: Array<() => Promise<{ code: number; stdout: string; stderr: string }>> = [
     async () => { throw Object.assign(new Error("spawn herdr ENOENT"), { code: "ENOENT" }); },
-    async () => ({ code: 1, stdout: "", stderr: "herdr server not running" }),
     async () => ({ code: 0, stdout: machines, stderr: "" }),
   ];
   for (const herdr of herdrOutcomes) {
@@ -150,12 +149,25 @@ test("a machine Herdr does not know is reached directly over SSH and listed with
       return { code: 0, stdout: intercomList, stderr: "" };
     };
     const match = await discoverRemoteAgent("HOST@buildbox.local", { run, herdrBin: "herdr", remoteCommand: "/opt/bin/pi-intercom" });
-    assert.deepEqual(match.agent, { name: "host", sessionId: fakeSessionId, cwd: "/srv", status: "idle" });
+    assert.deepEqual(match.agent, { name: "host", sessionId: fakeSessionId });
     assert.equal(match.machine.target, "buildbox.local");
     assert.deepEqual(sshCalls, [
       ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "buildbox.local", "/opt/bin/pi-intercom list --json"],
     ]);
   }
+});
+
+test("a failing Herdr machine list is reported instead of falling back to SSH", async () => {
+  const commands: string[] = [];
+  const run: CommandRunner = async (command) => {
+    commands.push(command);
+    return { code: 1, stdout: "", stderr: "herdr server not running" };
+  };
+  await assert.rejects(
+    discoverRemoteAgent("host@buildbox", { run, herdrBin: "herdr", remoteCommand: "pi-intercom" }),
+    /Could not list Herdr saved machines: herdr server not running/,
+  );
+  assert.deepEqual(commands, ["herdr"]);
 });
 
 test("a direct SSH host that could start an ssh option or carry shell syntax is rejected before SSH runs", async () => {
@@ -166,7 +178,7 @@ test("a direct SSH host that could start an ssh option or carry shell syntax is 
       sshCalls += 1;
       return { code: 0, stdout: intercomList, stderr: "" };
     };
-    await assert.rejects(discoverRemoteAgent(target, { run, herdrBin: "herdr" }), /not a saved Herdr machine or a valid SSH host name/);
+    await assert.rejects(discoverRemoteAgent(target, { run, herdrBin: "herdr", remoteCommand: "pi-intercom" }), /not a saved Herdr machine or a plain SSH host name/);
     assert.equal(sshCalls, 0);
   }
 });
@@ -176,7 +188,7 @@ test("a direct SSH listing failure says how to make the host reachable", async (
     ? { code: 0, stdout: "[]", stderr: "" }
     : { code: 255, stdout: "", stderr: "Permission denied (publickey)." };
   await assert.rejects(
-    discoverRemoteAgent("host@buildbox", { run, herdrBin: "herdr" }),
+    discoverRemoteAgent("host@buildbox", { run, herdrBin: "herdr", remoteCommand: "pi-intercom" }),
     /Could not list intercom sessions on "buildbox" over SSH: Permission denied \(publickey\)\..*without a password or host-key prompt/,
   );
 });
@@ -197,7 +209,7 @@ test("malformed or non-explicit addresses fail closed without invoking Herdr", a
       calls += 1;
       return { code: 0, stdout: machines, stderr: "" };
     };
-    await assert.rejects(discoverRemoteAgent(target, { run, herdrBin: "herdr" }), /expected name@machine or full-session-uuid@machine/);
+    await assert.rejects(discoverRemoteAgent(target, { run, herdrBin: "herdr", remoteCommand: "pi-intercom" }), /expected name@machine or full-session-uuid@machine/);
     assert.equal(calls, 0);
   }
 });
@@ -208,8 +220,8 @@ test("duplicate exact agent names on the selected machine are ambiguous", async 
     return { code: 0, stdout: agentList([{ name: "reviewer" }, { name: "Reviewer" }]), stderr: "" };
   };
   await assert.rejects(
-    discoverRemoteAgent("reviewer@workstation", { run, herdrBin: "herdr" }),
-    /Multiple live Pi agents.*target is ambiguous/,
+    discoverRemoteAgent("reviewer@workstation", { run, herdrBin: "herdr", remoteCommand: "pi-intercom" }),
+    /Multiple live Pi agents.*target is ambiguous\. Address it as `<session-id>@workstation`/,
   );
 });
 
@@ -226,7 +238,7 @@ test("full session UUID selects the exact remote agent", async () => {
       stderr: "",
     };
   };
-  const match = await discoverRemoteAgent(`${fakeSessionId}@workstation`, { run, herdrBin: "herdr" });
+  const match = await discoverRemoteAgent(`${fakeSessionId}@workstation`, { run, herdrBin: "herdr", remoteCommand: "pi-intercom" });
   assert.equal(match.agent.name, "reviewer");
   assert.equal(match.agent.sessionId, fakeSessionId);
 });
@@ -241,19 +253,20 @@ test("timeout and command failures clearly identify the selected machine as unre
       return failure;
     };
     await assert.rejects(
-      discoverRemoteAgent("reviewer@workstation", { run, herdrBin: "herdr", discoveryTimeoutMs: 123 }),
+      discoverRemoteAgent("reviewer@workstation", { run, herdrBin: "herdr", remoteCommand: "pi-intercom", discoveryTimeoutMs: 123 }),
       /machine "Workstation" is unreachable: (timed out|connection refused)/,
     );
   }
 });
 
-test("a reachable selected machine reports an exact-match miss", async () => {
-  const run: CommandRunner = async (_command, args) => {
+test("a reachable selected machine reports an exact-match miss in Herdr and its intercom roster", async () => {
+  const run: CommandRunner = async (command, args) => {
     if (args[0] === "machine") return { code: 0, stdout: machines, stderr: "" };
+    if (command === "ssh") return { code: 0, stdout: JSON.stringify({ ok: true, sessions: [] }), stderr: "" };
     return { code: 0, stdout: agentList([]), stderr: "" };
   };
   await assert.rejects(
-    discoverRemoteAgent("missing@workstation", { run, herdrBin: "herdr" }),
-    /No live Pi agent.*exactly matches "missing"/,
+    discoverRemoteAgent("missing@workstation", { run, herdrBin: "herdr", remoteCommand: "pi-intercom" }),
+    /No live Pi agent.*exactly matches "missing" in `herdr agent list` or `pi-intercom list`/,
   );
 });
