@@ -116,12 +116,7 @@ export async function listMachineAgents(machine: SavedMachine, deps: DiscoveryDe
 }
 
 async function listSshAgents(host: string, deps: DiscoveryDeps & { remoteCommand: string }): Promise<RemoteAgent[]> {
-  const result = await deps.run(
-    "ssh",
-    [...DIRECT_SSH_OPTIONS, host, `${deps.remoteCommand} list --json`],
-    undefined,
-    deps.discoveryTimeoutMs ?? DISCOVERY_TIMEOUT_MS,
-  );
+  const result = await deps.run("ssh", [...DIRECT_SSH_OPTIONS, host, `${deps.remoteCommand} list --json`], undefined, deps.discoveryTimeoutMs ?? DISCOVERY_TIMEOUT_MS);
   let listed: unknown;
   try {
     listed = JSON.parse(result.stdout);
@@ -148,7 +143,7 @@ async function listSshAgents(host: string, deps: DiscoveryDeps & { remoteCommand
   );
 }
 
-function findAgent(agents: RemoteAgent[], explicit: { agentTarget: string; machineLabel: string }, where: string): RemoteAgent | undefined {
+function findAgent(agents: RemoteAgent[], explicit: ReturnType<typeof parseCrossMachineTarget>, where: string): RemoteAgent | undefined {
   const bySessionId = FULL_SESSION_UUID.test(explicit.agentTarget);
   const matches = agents.filter((agent) => bySessionId
     ? agent.sessionId === explicit.agentTarget

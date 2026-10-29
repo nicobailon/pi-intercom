@@ -80,9 +80,7 @@ export const runCommand: CommandRunner = (command, args, input, timeoutMs) => ne
     stdinClosed = true;
     finish();
   });
-  child.stdin.end(input, (error?: Error | null) => {
-    if (error) stdinError ??= error;
-  });
+  child.stdin.end(input);
 });
 
 function relaySupportError(machine: string): Error {

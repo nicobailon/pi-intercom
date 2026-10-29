@@ -2,7 +2,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 import net from "node:net";
-import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { assertNoLiveBroker } from "./runtime-claim.ts";
@@ -57,13 +56,10 @@ test("broker startup refuses to replace a live broker that owns the endpoint", a
 test("broker startup ignores a PID that now belongs to a process without the broker endpoint", async () => {
   const directory = mkdtempSync(path.join(tmpdir(), "pi-intercom-runtime-"));
   const pidPath = path.join(directory, "broker.pid");
-  const sleeper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
   try {
-    assert.ok(sleeper.pid);
-    writeFileSync(pidPath, `${sleeper.pid}\n`);
+    writeFileSync(pidPath, `${process.pid}\n`);
     await assert.doesNotReject(assertNoLiveBroker(pidPath, () => endpointIn(directory)));
   } finally {
-    sleeper.kill();
     rmSync(directory, { recursive: true, force: true });
   }
 });
