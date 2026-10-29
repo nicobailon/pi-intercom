@@ -85,6 +85,7 @@ export class InlineMessageComponent implements Component {
       }
       if (this.message.provenance?.type === "extension_outbox") meta.push(`Via ${this.message.provenance.extensionName}`);
       if (this.message.replyTo && !this.message.expectsReply) meta.push(`Reply to ${this.message.replyTo.slice(0, 8)}`);
+      if (this.message.lateReplyTo) meta.push(`Late reply to ${this.message.lateReplyTo.slice(0, 8)}`);
       meta.push("Ctrl+O to expand · Click message (fullscreen)");
 
       lines.push(frameLine(this.theme.fg("dim", ` ${meta.join(" · ")}`)));
@@ -120,6 +121,11 @@ export class InlineMessageComponent implements Component {
     if (this.message.replyTo && !this.message.expectsReply) {
       lines.push(frameLine(""));
       lines.push(frameLine(this.theme.fg("dim", ` Reply to ${this.message.replyTo.slice(0, 8)}`)));
+    }
+
+    if (this.message.lateReplyTo) {
+      lines.push(frameLine(""));
+      lines.push(frameLine(this.theme.fg("dim", ` Late reply to ${this.message.lateReplyTo.slice(0, 8)}`)));
     }
 
     if (this.message.provenance?.type === "extension_outbox") {

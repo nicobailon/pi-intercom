@@ -1,6 +1,8 @@
 import { getAskTimeoutMs } from "./config.ts";
 import type { Message, SessionInfo } from "./types.ts";
 
+const FIND_ASK_HINT = "Run `pending` to see waiting asks, or use `send` for a new message.";
+
 export interface IntercomContext {
   from: SessionInfo;
   message: Message;
@@ -41,7 +43,7 @@ function resolvePendingSender(pending: IntercomContext[], to: string): IntercomC
     throw new Error(`Multiple pending asks match ID prefix "${to}" — use a longer session ID prefix or specify \`replyTo\``);
   }
 
-  throw new Error(`No pending ask from "${to}"`);
+  throw new Error(`No pending ask from "${to}". ${FIND_ASK_HINT}`);
 }
 
 export class ReplyTracker {
@@ -91,7 +93,7 @@ export class ReplyTracker {
     if (options.replyTo) {
       const target = this.pendingAsks.get(options.replyTo);
       if (!target) {
-        throw new Error(`No pending ask with message ID "${options.replyTo}"`);
+        throw new Error(`No pending ask with message ID "${options.replyTo}". ${FIND_ASK_HINT}`);
       }
       if (options.to && !matchesPendingSender(target, options.to)) {
         throw new Error(`Pending ask "${options.replyTo}" is not from "${options.to}"`);
@@ -112,10 +114,10 @@ export class ReplyTracker {
       return pending[0]!;
     }
     if (pending.length === 0) {
-      throw new Error("No active intercom context to reply to");
+      throw new Error("No active intercom context to reply to: no ask is waiting on this session. Use `send` for a new message.");
     }
 
-    throw new Error("Multiple pending asks — specify `to`");
+    throw new Error("Multiple pending asks — specify `to`. Run `pending` to list them.");
   }
 
   findUniquePendingAskFrom(to: string, now = Date.now()): IntercomContext | null {

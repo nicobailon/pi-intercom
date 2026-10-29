@@ -397,7 +397,7 @@ export class IntercomClient extends EventEmitter {
         }
 
         this.pendingSends.delete(messageId);
-        pending.resolve({ id: messageId, delivered: true, delivery: delivery === "queued" ? "queued" : "socket_delivered", retryable: retryable === true, outcomeKnown: outcomeKnown !== false, ...(typeof brokerMessage.code === "string" ? { code: brokerMessage.code } : {}) });
+        pending.resolve({ id: messageId, delivered: true, delivery: delivery === "queued" ? "queued" : "socket_delivered", retryable: retryable === true, outcomeKnown: outcomeKnown !== false, ...(typeof brokerMessage.code === "string" ? { code: brokerMessage.code } : {}), ...(brokerMessage.demoted === "late_reply" ? { demoted: "late_reply" as const } : {}) });
         break;
       }
 

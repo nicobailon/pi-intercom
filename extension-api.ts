@@ -88,6 +88,17 @@ export interface IntercomExtensionChannel {
   publish(payload: unknown, options?: { audience?: "owner" | "capable"; ownerOnly?: boolean }): void;
   commitState(payload: unknown, expectedRevision?: number): void;
   listSessions(): Promise<SessionInfo[]>;
+  /**
+   * Withdraws this namespace from the session. The broker stops routing the
+   * namespace to this session and, if it was the owner, elects the next
+   * owner-eligible member (or leaves the namespace without an owner when none
+   * is left). The namespace no longer counts toward the broker's
+   * per-session extension limit, and the same namespace can be registered
+   * again. After this call `publish` and `commitState` throw and the
+   * registration's `onEvent` is not called. Calling it again is a no-op.
+   * Persisted namespace state is kept.
+   */
+  unregister(): void;
 }
 
 export interface IntercomExtensionRegistration {

@@ -113,3 +113,15 @@ test("broker startup tolerates absent, invalid, and stale PID files", async () =
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("broker startup ignores a PID file pointing at another user's process", { skip: process.platform === "win32" || process.getuid?.() === 0 }, async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "pi-intercom-runtime-"));
+  const pidPath = path.join(directory, "broker.pid");
+  try {
+    // pid 1 is owned by root, so signal 0 from a non-root user fails with EPERM.
+    writeFileSync(pidPath, "1\n");
+    await assert.doesNotReject(assertNoLiveBroker(pidPath, () => endpointIn(directory)));
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

@@ -200,6 +200,17 @@ function queuedText(target: string, what = "message"): string {
   return `Session "${target}" is not connected. The ${what} is waiting in the broker mailbox until that session reconnects.`;
 }
 
+// The broker words "no open ask" ("a pending ask") differently from "an open ask between other sessions" ("the pending ask").
+function isClosedAskReply(result: SendResult): boolean {
+  return result.code === "E_REPLY_TARGET" && result.reason === "Reply target does not match a pending ask";
+}
+
+function closedAskText(target: string): string {
+  return `Reply to "${target}" was not delivered: the broker can no longer match it to an open ask, for example because the asker disconnected or the broker restarted. To deliver the content, send it as a new message without replyTo: intercom({ action: "send", to: "${target}", message: "..." }).`;
+}
+
+const LATE_REPLY_NOTE = "The ask was no longer open, so the reply was delivered as a regular message.";
+
 function deliveryDetails(result: SendResult): Record<string, unknown> {
   return {
     messageId: result.id,
@@ -209,6 +220,7 @@ function deliveryDetails(result: SendResult): Record<string, unknown> {
     outcomeKnown: result.outcomeKnown,
     ...(result.code ? { code: result.code } : {}),
     ...(result.reason ? { reason: result.reason } : {}),
+    ...(result.demoted ? { demoted: result.demoted } : {}),
   };
 }
 
@@ -664,6 +676,7 @@ function formatInboundDeliveryMetadata(message: Message): string {
   if (typeof message.senderSequence === "number") parts.push(`seq ${message.senderSequence}`);
   if (message.supersedes) parts.push(`supersedes ${message.supersedes}`);
   if (message.retryOf) parts.push(`retry of ${message.retryOf}`);
+  if (message.lateReplyTo) parts.push(`late reply to ${message.lateReplyTo}`);
   const sentAt = formatMessageTimestamp(message.timestamp);
   if (sentAt) parts.push(`sent ${sentAt}`);
   const brokerDeliveredAt = formatMessageTimestamp(message.brokerDeliveredAt);
@@ -916,10 +929,17 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     }
   }
   function createExtensionChannel(namespace: string): IntercomExtensionChannel {
-    return {
+    // A channel only acts for the registration it was created for. After
+    // unregister(), neither the old handle nor a later registration of the same
+    // namespace can be driven through it.
+    const liveExtension = () => {
+      const extension = localExtensions.get(namespace);
+      return extension?.channel === channel ? extension : undefined;
+    };
+    const channel: IntercomExtensionChannel = {
       namespace,
       snapshot() {
-        const extension = localExtensions.get(namespace);
+        const extension = liveExtension();
         return {
           connected: Boolean(client?.isConnected()),
           supported: Boolean(client?.supportsFeature(EXTENSION_BUS_FEATURE)),
@@ -928,9 +948,10 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
         };
       },
       publish(payload, options = {}) {
+        const extension = liveExtension();
+        if (!extension) throw new Error(`Intercom extension channel is unregistered: ${namespace}`);
         const activeClient = client;
         if (!activeClient?.isConnected()) throw new Error("Intercom is not connected");
-        const extension = localExtensions.get(namespace);
         const ownerOnly = options.ownerOnly ?? false;
         const ownerEpoch = ownerOnly ? extension?.owner?.epoch : undefined;
         if (ownerOnly && !ownerEpoch) throw new Error(`No owner is available for ${namespace}`);
@@ -943,9 +964,10 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
         });
       },
       commitState(payload, expectedRevision) {
+        const extension = liveExtension();
+        if (!extension) throw new Error(`Intercom extension channel is unregistered: ${namespace}`);
         const activeClient = client;
         if (!activeClient?.isConnected()) throw new Error("Intercom is not connected");
-        const extension = localExtensions.get(namespace);
         const ownerEpoch = extension?.owner?.epoch;
         if (!ownerEpoch || extension.owner?.sessionId !== activeClient.sessionId) {
           throw new Error(`Current session is not the owner of ${namespace}`);
@@ -963,7 +985,18 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
         if (!activeClient?.isConnected()) throw new Error("Intercom is not connected");
         return activeClient.listSessions();
       },
+      unregister() {
+        if (!liveExtension()) return;
+        localExtensions.delete(namespace);
+        const activeClient = client;
+        // Offline or on an older broker there is nothing to withdraw: the
+        // capability list is rebuilt from localExtensions on the next register.
+        if (activeClient?.isConnected() && activeClient.supportsFeature(EXTENSION_BUS_FEATURE)) {
+          activeClient.updateExtensionCapabilities(currentExtensionCapabilities());
+        }
+      },
     };
+    return channel;
   }
   function currentExtensionCapabilities() {
     return [...localExtensions.values()].map(({ registration }) => ({
@@ -993,11 +1026,14 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
       emitLocalExtensionEvent(registration.namespace, { type: "connection", connected: true, supported });
     }
   }
+  // Whether the last register frame listed any namespace: an unregister() during the handshake must still reach the broker.
+  let registrationAdvertisedExtensions = false;
   function buildRegistration(): SessionRegistration {
     const liveContext = getLiveContext();
     if (!liveContext || !currentSessionId || sessionStartedAt === null) {
       throw new Error("Intercom runtime not initialized");
     }
+    registrationAdvertisedExtensions = localExtensions.size > 0;
 
     const identity = buildPresenceIdentity(pi, currentIntercomSessionId ?? currentSessionId);
     const tmuxPane = currentTmuxPane();
@@ -1453,7 +1489,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
       switch (message.type) {
         case "registered": {
           const supported = message.features?.includes(EXTENSION_BUS_FEATURE) ?? false;
-          if (supported && localExtensions.size > 0) {
+          if (supported && (localExtensions.size > 0 || registrationAdvertisedExtensions)) {
             nextClient.updateExtensionCapabilities(currentExtensionCapabilities());
           }
           for (const namespace of localExtensions.keys()) {
@@ -1801,7 +1837,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
       return { id: existing.session.id, label: options.to || existing.session.name || existing.session.id };
     }
     if (!options.openProjectPaneIfMissing) {
-      throw new Error(`${existing.reason ?? `No intercom session is connected in ${targetCwd}.`} Pass openProjectPaneIfMissing: true to open a Herdr project pane and start Pi there.`);
+      throw new Error(`${existing.reason ?? `No intercom session is connected in ${targetCwd}.`} If the user wants a long-lived peer there in its own Herdr pane, pass openProjectPaneIfMissing: true; otherwise tell the user no session is running there.`);
     }
 
     const beforeSessionIds = new Set(sessions.map((session) => session.id));
@@ -1948,6 +1984,13 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
         retryOf,
       }));
       if (!result.delivered) {
+        if (effectiveReplyTo && isClosedAskReply(result)) {
+          dismissIncomingAsk(effectiveReplyTo);
+          return {
+            content: [{ type: "text", text: closedAskText(display) }],
+            details: { ...deliveryDetails(result), error: true },
+          };
+        }
         return {
           content: [{ type: "text", text: noMatchText ?? `${undeliveredText(display, result)}${resolution}` }],
           details: { ...deliveryDetails(result), ...(noMatchText ? { error: true } : {}) },
@@ -1969,7 +2012,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
             ? queuedText(display, inferredAsk ? "reply (inferred from pending ask)" : "message")
             : target.projectPane
               ? `Opened Herdr project pane ${target.projectPane.paneId} for ${target.projectPane.projectRoot} and sent message to ${targetDisplay}`
-              : inferredAsk ? `Reply sent to ${targetDisplay} (inferred from pending ask)` : `Message sent to ${display}${resolution}`,
+              : `${inferredAsk ? `Reply sent to ${targetDisplay} (inferred from pending ask)` : `Message sent to ${display}${resolution}`}${result.demoted ? `. ${LATE_REPLY_NOTE}` : ""}`,
         }],
         details: {
           ...deliveryDetails(result),
@@ -2837,6 +2880,13 @@ Usage:
             };
           }
 
+          if (to?.includes("@")) {
+            return {
+              content: [{ type: "text", text: `Cross-machine ask is not supported. Use send to ${to}; the peer's answer arrives as a new message.` }],
+              details: { error: true },
+            };
+          }
+
           if (_signal?.aborted) {
             return {
               content: [{ type: "text", text: "Cancelled" }],
@@ -2950,12 +3000,13 @@ Usage:
               replyTo: target.message.id,
             });
             if (!result.delivered) {
-              if (result.reason === "Session not found") {
+              const closedAsk = isClosedAskReply(result);
+              if (closedAsk || result.reason === "Session not found") {
                 dismissIncomingAsk(target.message.id);
               }
               return {
-                content: [{ type: "text", text: undeliveredText(target.from.name || target.from.id, result) }],
-                details: deliveryDetails(result),
+                content: [{ type: "text", text: closedAsk ? closedAskText(target.from.name || target.from.id) : undeliveredText(target.from.name || target.from.id, result) }],
+                details: { ...deliveryDetails(result), ...(closedAsk ? { error: true } : {}) },
               };
             }
             dismissIncomingAsk(target.message.id);
@@ -2966,7 +3017,7 @@ Usage:
               timestamp: Date.now(),
             });
             return {
-              content: [{ type: "text", text: result.delivery === "queued" ? queuedText(target.from.name || target.from.id, "reply") : `Reply sent to ${target.from.name || target.from.id}` }],
+              content: [{ type: "text", text: result.delivery === "queued" ? queuedText(target.from.name || target.from.id, "reply") : `Reply sent to ${target.from.name || target.from.id}${result.demoted ? `. ${LATE_REPLY_NOTE}` : ""}` }],
               details: { ...deliveryDetails(result), replyTo: target.message.id },
             };
           } catch (error) {

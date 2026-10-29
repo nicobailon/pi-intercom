@@ -4,8 +4,20 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+### Added
+- Extension channels have `unregister()`. A session can leave a namespace it registered, which frees one of its 32 extension slots and, if it owned the namespace, hands ownership to the next owner-eligible member. See the README's Extension channels section. Thanks to [@wayne930242](https://github.com/wayne930242) for #184.
+
+### Changed
+- The bundled `pi-intercom` skill is a quarter of its old size and no longer says intercom is same-machine only, which made agents refuse to message sessions on other machines. It now covers sending and handing over to `name@machine`, asking a waiting subagent a follow-up question inside your reply, and steering a subagent after a progress update.
+- Intercom errors now say what to do next: a failed `reply` points to `pending` or `send`, an `ask` to another machine says to use `send`, an `ask` to a subagent that is waiting on you says to answer it with `reply`, and a message to a directory with no session asks the agent to open a new Pi pane only when the user wants one.
+- The README now explains the ask timeouts: the Pi tool waits 10 minutes and the CLI 120 seconds by default, and the broker reads its own `PI_INTERCOM_ASK_TIMEOUT_MS` when it starts, which limits how long a reply is accepted. It also covers how an asker can tell a delivered ask from an undelivered one and how disconnects are detected. Thanks to [@mimadiule](https://github.com/mimadiule) for issue #189.
+- The README now documents the mailbox for disconnected sessions: who can receive queued mail, what is queued, expiry, capacity, delivery order on reconnect, and what a broker restart loses. Thanks to [@mimadiule](https://github.com/mimadiule) for issue #188.
+
 ### Fixed
-- The broker refused to start with `Refusing to replace live intercom broker process <pid>` when its `broker.pid` file named a process that was not the broker. After a reboot the operating system can give that PID to an unrelated program, and every intercom client then kept failing until the file was deleted by hand. The broker now treats the recorded process as live only if it also answers on the broker's own endpoint, so a stale `broker.pid` no longer blocks a new broker on Windows, macOS, or Linux, while a running broker is still never replaced.
+- A cross-machine send no longer crashes Pi when SSH or the remote relay closes its input before the message has finished writing. Failed commands retain their diagnostics, and incomplete writes cannot report success. Thanks to [@Oscar-Williams](https://github.com/Oscar-Williams) for #185.
+- After a reboot, the broker could refuse to start for hours when its old pid file pointed at a process the system had since given to another user. It now treats that pid as stale. Thanks to [@mimadiule](https://github.com/mimadiule) for issue #186.
+- After a reboot, the broker could also refuse to start when its old pid file pointed at an unrelated program of the same user, and intercom stayed down until the file was deleted by hand. The broker now counts the recorded process as a running broker only if it also answers on the broker's own socket or pipe, so a stale pid file no longer blocks it, while a running broker is still never replaced. Thanks to [@wayne930242](https://github.com/wayne930242) for #198.
+- A reply sent after its ask had timed out, been cancelled, or already been answered was rejected and its content lost. It now reaches the asker as an ordinary message marked as a late reply. If the asker has disconnected or the broker has restarted, the reply fails and the tool tells the agent to use `send` instead. Thanks to [@mimadiule](https://github.com/mimadiule) for issue #187.
 
 ## [0.18.1] - 2026-10-22
 
