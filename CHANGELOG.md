@@ -8,6 +8,8 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 - Extension channels have `unregister()`. A session can leave a namespace it registered, which frees one of its 32 extension slots and, if it owned the namespace, hands ownership to the next owner-eligible member. See the README's Extension channels section. Thanks to [@wayne930242](https://github.com/wayne930242) for #184.
 
 ### Changed
+- The bundled `pi-intercom` skill is a quarter of its old size and no longer says intercom is same-machine only, which made agents refuse to message sessions on other machines. It now covers sending and handing over to `name@machine`, asking a waiting subagent a follow-up question inside your reply, and steering a subagent after a progress update.
+- Intercom errors now say what to do next: a failed `reply` points to `pending` or `send`, an `ask` to another machine says to use `send`, an `ask` to a subagent that is waiting on you says to answer it with `reply`, and a message to a directory with no session asks the agent to open a new Pi pane only when the user wants one.
 - The README now explains the ask timeouts: the Pi tool waits 10 minutes and the CLI 120 seconds by default, and the broker reads its own `PI_INTERCOM_ASK_TIMEOUT_MS` when it starts, which limits how long a reply is accepted. It also covers how an asker can tell a delivered ask from an undelivered one and how disconnects are detected. Thanks to [@mimadiule](https://github.com/mimadiule) for issue #189.
 - The README now documents the mailbox for disconnected sessions: who can receive queued mail, what is queued, expiry, capacity, delivery order on reconnect, and what a broker restart loses. Thanks to [@mimadiule](https://github.com/mimadiule) for issue #188.
 
