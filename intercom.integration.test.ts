@@ -5483,6 +5483,14 @@ test("confirmSend decline blocks explicit cross-machine transport after fail-clo
         message: "hello",
       }, new AbortController().signal, undefined, harness.ctx);
       assert.equal(malformed.details?.error, true);
+
+      const remoteAsk = await intercomTool.execute("remote-ask", {
+        action: "ask",
+        to: "reviewer@workstation",
+        message: "hello?",
+      }, new AbortController().signal, undefined, harness.ctx);
+      assert.equal(remoteAsk.details?.error, true);
+      assert.match(remoteAsk.content[0]?.text ?? "", /Use send to reviewer@workstation/);
       assert.equal(confirmCalls.length, 0);
 
       const declined = await intercomTool.execute("remote-declined", {

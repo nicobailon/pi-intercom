@@ -1837,7 +1837,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
       return { id: existing.session.id, label: options.to || existing.session.name || existing.session.id };
     }
     if (!options.openProjectPaneIfMissing) {
-      throw new Error(`${existing.reason ?? `No intercom session is connected in ${targetCwd}.`} Pass openProjectPaneIfMissing: true to open a Herdr project pane and start Pi there.`);
+      throw new Error(`${existing.reason ?? `No intercom session is connected in ${targetCwd}.`} If the user wants a long-lived peer there in its own Herdr pane, pass openProjectPaneIfMissing: true; otherwise tell the user no session is running there.`);
     }
 
     const beforeSessionIds = new Set(sessions.map((session) => session.id));
@@ -2876,6 +2876,13 @@ Usage:
           if (replyWaiter) {
             return {
               content: [{ type: "text", text: "Already waiting for a reply" }],
+              details: { error: true },
+            };
+          }
+
+          if (to?.includes("@")) {
+            return {
+              content: [{ type: "text", text: `Cross-machine ask is not supported. Use send to ${to}; the peer's answer arrives as a new message.` }],
               details: { error: true },
             };
           }
