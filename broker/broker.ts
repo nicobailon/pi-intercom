@@ -260,7 +260,6 @@ class IntercomBroker {
 
   constructor() {
     ensureIntercomRuntimeDir(INTERCOM_DIR);
-    assertNoLiveBroker(PID_PATH);
     ensurePendingAskRecordDir();
     this.prunePendingAskRecords();
     this.extensionStateManager = new ExtensionStateManager(INTERCOM_DIR);
@@ -1899,4 +1898,5 @@ class IntercomBroker {
   }
 }
 
+await assertNoLiveBroker(PID_PATH);
 new IntercomBroker().start();

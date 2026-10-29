@@ -4,6 +4,9 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+### Fixed
+- The broker refused to start with `Refusing to replace live intercom broker process <pid>` when its `broker.pid` file named a process that was not the broker. After a reboot the operating system can give that PID to an unrelated program, and every intercom client then kept failing until the file was deleted by hand. The broker now treats the recorded process as live only if it also answers on the broker's own endpoint, so a stale `broker.pid` no longer blocks a new broker on Windows, macOS, or Linux, while a running broker is still never replaced.
+
 ## [0.18.1] - 2026-10-22
 
 ### Changed
