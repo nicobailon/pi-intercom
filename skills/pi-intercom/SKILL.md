@@ -24,7 +24,7 @@ intercom({ action: "reply", message, to? })        # answers an ask; `to` picks 
 ## Targeting
 
 - `to` plus `cwd` uses the directory as a guard.
-- `name@machine` or `<session-id>@machine` reaches a session on a machine saved in Herdr. Only `send` and `handover` work across machines: no `ask`, `replyTo`, attachments or `cwd`.
+- `name@machine` or `<session-id>@machine` reaches a session on another machine: a saved Herdr machine, or any host `ssh machine` reaches without a prompt. Only `send` and `handover` work across machines: no `ask`, `replyTo`, attachments or `cwd`.
 - Address sessions by name or id. Herdr pane ids in `list` show location only.
 
 ## Asking and replying
