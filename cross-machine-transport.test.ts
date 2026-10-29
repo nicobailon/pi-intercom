@@ -56,6 +56,42 @@ test("discovers only the selected machine and sends hostile message text only on
   assert.equal(calls.filter((call) => call.command === "herdr").every((call) => call.timeoutMs === DISCOVERY_TIMEOUT_MS), true);
 });
 
+test("delivers to a machine without Herdr over non-interactive SSH, addressed by session id", async () => {
+  const sshCalls: Array<{ args: string[]; stdin?: string }> = [];
+  const run: CommandRunner = async (command, args, stdin) => {
+    if (command === "herdr") throw Object.assign(new Error("spawn herdr ENOENT"), { code: "ENOENT" });
+    sshCalls.push({ args, stdin });
+    if (args.at(-1)!.endsWith(" list --json")) {
+      return { code: 0, stdout: JSON.stringify({ ok: true, sessions: [{ name: "host", id: fakeSessionId, model: "m", cwd: "/" }] }), stderr: "" };
+    }
+    return { code: 0, stdout: '{"ok":true}', stderr: "" };
+  };
+  const result = await sendCrossMachine("host@buildbox", "hi", origin, { run, herdrBin: "herdr", remoteCommand: "pi-intercom" });
+  assert.equal(result.machine.label, "buildbox");
+  assert.deepEqual(sshCalls.at(-1)!.args, ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "buildbox", "pi-intercom relay --envelope-stdin --json"]);
+  assert.equal(JSON.parse(sshCalls.at(-1)!.stdin!).target, fakeSessionId);
+});
+
+test("finds a Pi session outside a Herdr pane in a saved machine's intercom roster over the saved SSH target", async () => {
+  const sshCalls: string[][] = [];
+  const run: CommandRunner = async (command, args) => {
+    if (command === "herdr") {
+      return args[0] === "machine" ? { code: 0, stdout: machines, stderr: "" } : { code: 0, stdout: JSON.stringify({ result: { agents: [] } }), stderr: "" };
+    }
+    sshCalls.push(args);
+    if (args.at(-1)!.endsWith(" list --json")) {
+      return { code: 0, stdout: JSON.stringify({ ok: true, sessions: [{ name: "host", id: fakeSessionId, model: "m", cwd: "/" }] }), stderr: "" };
+    }
+    return { code: 0, stdout: '{"ok":true}', stderr: "" };
+  };
+  const result = await sendCrossMachine("host@workstation", "hi", origin, { run, herdrBin: "herdr", remoteCommand: "pi-intercom" });
+  assert.equal(result.machine.label, "workstation");
+  assert.deepEqual(sshCalls, [
+    ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "workstation.example", "pi-intercom list --json"],
+    ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "workstation.example", "pi-intercom relay --envelope-stdin --json"],
+  ]);
+});
+
 test("rejects empty or control-character remote commands before invoking SSH", async () => {
   for (const remoteCommand of ["", "   ", "pi-intercom\0--bad", "pi-intercom\t--bad", "pi-intercom\x1f--bad", "pi-intercom\x7f--bad"]) {
     const calls: string[] = [];
