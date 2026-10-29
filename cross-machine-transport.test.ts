@@ -16,6 +16,7 @@ const agents = JSON.stringify({ id: "cli:agent:list", result: { agents: [{
   agent_session: { agent: "pi", kind: "path", source: "herdr:pi", value: `/home/user/.pi/agent/sessions/session_${fakeSessionId}.jsonl` },
 }] } });
 const origin = { name: "worker", sessionId: fakeSessionId, machine: "laptop" };
+const intercomList = JSON.stringify({ ok: true, sessions: [{ name: "host", id: fakeSessionId, model: "m", cwd: "/" }] });
 
 function discoveryResult(command: string, args: string[]) {
   if (args[0] === "machine") return { code: 0, stdout: machines, stderr: "" };
@@ -61,10 +62,7 @@ test("delivers to a machine without Herdr over non-interactive SSH, addressed by
   const run: CommandRunner = async (command, args, stdin) => {
     if (command === "herdr") throw Object.assign(new Error("spawn herdr ENOENT"), { code: "ENOENT" });
     sshCalls.push({ args, stdin });
-    if (args.at(-1)!.endsWith(" list --json")) {
-      return { code: 0, stdout: JSON.stringify({ ok: true, sessions: [{ name: "host", id: fakeSessionId, model: "m", cwd: "/" }] }), stderr: "" };
-    }
-    return { code: 0, stdout: '{"ok":true}', stderr: "" };
+    return { code: 0, stdout: args.at(-1)!.endsWith(" list --json") ? intercomList : '{"ok":true}', stderr: "" };
   };
   const result = await sendCrossMachine("host@buildbox", "hi", origin, { run, herdrBin: "herdr", remoteCommand: "pi-intercom" });
   assert.equal(result.machine.label, "buildbox");
@@ -79,10 +77,7 @@ test("finds a Pi session outside a Herdr pane in a saved machine's intercom rost
       return args[0] === "machine" ? { code: 0, stdout: machines, stderr: "" } : { code: 0, stdout: JSON.stringify({ result: { agents: [] } }), stderr: "" };
     }
     sshCalls.push(args);
-    if (args.at(-1)!.endsWith(" list --json")) {
-      return { code: 0, stdout: JSON.stringify({ ok: true, sessions: [{ name: "host", id: fakeSessionId, model: "m", cwd: "/" }] }), stderr: "" };
-    }
-    return { code: 0, stdout: '{"ok":true}', stderr: "" };
+    return { code: 0, stdout: args.at(-1)!.endsWith(" list --json") ? intercomList : '{"ok":true}', stderr: "" };
   };
   const result = await sendCrossMachine("host@workstation", "hi", origin, { run, herdrBin: "herdr", remoteCommand: "pi-intercom" });
   assert.equal(result.machine.label, "workstation");

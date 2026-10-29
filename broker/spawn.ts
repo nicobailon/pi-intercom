@@ -223,52 +223,47 @@ function connectToBrokerTarget(target: BrokerConnectTarget): net.Socket {
     : net.connect({ host: target.host, port: target.port });
 }
 
-function checkSocketConnectable(): Promise<boolean> {
-  return new Promise((resolve) => {
-    let target: BrokerConnectTarget;
-    try {
-      target = getBrokerConnectTarget();
-    } catch {
-      resolve(false);
-      return;
-    }
+type EndpointState = "broker" | "absent" | "unresponsive";
 
+/**
+ * "absent": nothing listens, or whatever owns the endpoint closed or answered without a broker
+ * health reply. "unresponsive": connected but silent for 1s, or failed in an unexpected way.
+ */
+export function probeBrokerEndpoint(target: BrokerConnectTarget): Promise<EndpointState> {
+  return new Promise((resolve) => {
     const socket = connectToBrokerTarget(target);
     const requestId = randomUUID();
-    const expectedStateId = typeof target === "string" ? undefined : target.stateId;
-    let settled = false;
-    const finish = (isConnected: boolean) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
+    const finish = (state: EndpointState) => {
       clearTimeout(timeout);
-      socket.off("connect", onConnect);
-      socket.off("error", onError);
-      socket.off("data", reader);
       socket.destroy();
-      resolve(isConnected);
+      resolve(state);
     };
-    const onConnect = () => {
-      try {
-        writeMessage(socket, {
-          type: "health",
-          requestId,
-          ...(expectedStateId ? { stateId: expectedStateId } : {}),
-        });
-      } catch {
-        finish(false);
-      }
-    };
-    const onError = () => finish(false);
-    const reader = createMessageReader((message) => {
-      finish(isBrokerHealthOkMessage(message, requestId));
-    }, () => finish(false));
-    socket.on("connect", onConnect);
-    socket.on("error", onError);
-    socket.on("data", reader);
-    const timeout = setTimeout(() => finish(false), 1000);
+    socket.on("connect", () => writeMessage(socket, {
+      type: "health",
+      requestId,
+      ...(typeof target === "string" || !target.stateId ? {} : { stateId: target.stateId }),
+    }));
+    socket.on("data", createMessageReader(
+      (message) => finish(isBrokerHealthOkMessage(message, requestId) ? "broker" : "absent"),
+      () => finish("absent"),
+    ));
+    socket.on("error", (error) => {
+      const code = (error as NodeJS.ErrnoException).code;
+      finish(code === "ENOENT" || code === "ECONNREFUSED" ? "absent" : "unresponsive");
+    });
+    socket.on("close", () => finish("absent"));
+    const timeout = setTimeout(() => finish("unresponsive"), 1000);
   });
+}
+
+async function checkSocketConnectable(): Promise<boolean> {
+  let target: BrokerConnectTarget;
+  try {
+    target = getBrokerConnectTarget();
+  } catch {
+    return false;
+  }
+  return await probeBrokerEndpoint(target) === "broker";
 }
 
 function acquireSpawnLock(): boolean {

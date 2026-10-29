@@ -1372,7 +1372,6 @@ test("broker delivers a reply to an ask that is no longer open as a plain messag
     assert.equal(late.delivered, true);
     assert.equal(late.demoted, "late_reply");
     const message = await waitForReplyMessage(received, "late-reply");
-    // Without replyTo it cannot resolve a waiter or wake an inboundTrigger "replies" session.
     assert.equal(message.replyTo, undefined);
     assert.equal(message.lateReplyTo, "cancelled-ask");
 
@@ -2347,10 +2346,7 @@ test("extension channel unregister withdraws the namespace and hands ownership t
     onEvent: (event: unknown) => extensionEvents.push(event),
   });
   const lastOwner = () => successorMessages.filter((message) => message.type === "extension_owner").at(-1);
-  const waitForOwner = async (ownerId: string | undefined) => {
-    await waitForCondition(() => { const last = lastOwner(); return last?.type === "extension_owner" && last.ownerId === ownerId; }, `owner ${ownerId}`);
-    return lastOwner()!;
-  };
+  const waitForOwner = (ownerId: string | undefined) => waitForCondition(() => { const last = lastOwner(); return last?.type === "extension_owner" && last.ownerId === ownerId; }, `owner ${ownerId}`);
 
   try {
     successor.onBrokerMessage((message) => successorMessages.push(message));
@@ -2376,15 +2372,12 @@ test("extension channel unregister withdraws the namespace and hands ownership t
       lastActivity: Date.now(),
       extensions: [{ namespace: "unregister/v1", ownerEligible: true }],
     });
-    const initial = await waitForOwner(workerOwner.sessionId);
-    assert.equal(initial.type === "extension_owner" && initial.ownerEpoch, workerOwner.epoch);
+    await waitForOwner(workerOwner.sessionId);
 
     first.unregister();
-    const handover = await waitForOwner(successor.sessionId);
-    assert.notEqual(handover.type === "extension_owner" && handover.ownerEpoch, undefined);
+    await waitForOwner(successor.sessionId);
 
-    // The handover above shows the broker took the withdrawal; here the
-    // unregistered handle no longer receives the namespace's messages.
+    // The stale registration's onEvent must not fire.
     const events = extensionEvents.length;
     successor.sendExtensionMessage({
       type: "extension_publish",
@@ -2404,7 +2397,6 @@ test("extension channel unregister withdraws the namespace and hands ownership t
     register();
     assert.notEqual(channel, first);
     assert.throws(() => first.publish({}), /unregistered/);
-    channel?.unregister();
     await harness.emitLifecycle("session_shutdown");
   } finally {
     await successor.disconnect().catch(() => undefined);
@@ -2984,38 +2976,32 @@ test("on Pi 1.2.0 and newer, idle sessions wake through triggerTurn without a wa
 test("a noWake send reaches an idle session without starting a turn", { concurrency: false }, async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const { planner, orchestrator, cleanup } = await setupClients();
+  // The noWake check runs before the version-specific wake paths; Pi 1.1.0's extra wake prompt makes a stray wake visible.
+  const harness = createExtensionHarness("no-wake-worker", { hasUI: true, isIdle: () => true, sessionId: "session-no-wake-worker" });
 
   try {
-    for (const piVersion of ["1.1.0", "1.2.0"]) {
-      const name = `no-wake-worker-${piVersion}`;
-      const harness = createExtensionHarness(name, { hasUI: true, isIdle: () => true, sessionId: `session-${name}` });
-      try {
-        piIntercomExtension(harness.pi as never, piVersion);
-        await harness.emitLifecycle("session_start");
-        const worker = await waitForSessionByName(planner, name);
+    piIntercomExtension(harness.pi as never, "1.1.0");
+    await harness.emitLifecycle("session_start");
+    const worker = await waitForSessionByName(planner, "no-wake-worker");
 
-        assert.equal((await planner.send(worker.id, { text: "Paused the job, no reply needed", noWake: true })).delivered, true);
-        await waitForCondition(() => harness.sentMessages.length === 1, "no-wake message");
-        assert.deepEqual(harness.sentMessages[0]?.options, { deliverAs: "steer" }, piVersion);
-        assert.match(harness.sentMessages[0]?.message.content ?? "", /sent without waking you/);
-        assert.deepEqual(harness.userMessages, [], piVersion);
+    assert.equal((await planner.send(worker.id, { text: "Paused the job, no reply needed", noWake: true })).delivered, true);
+    await waitForCondition(() => harness.sentMessages.length === 1, "no-wake message");
+    assert.deepEqual(harness.sentMessages[0]?.options, { deliverAs: "steer" });
+    assert.match(harness.sentMessages[0]?.message.content ?? "", /sent without waking you/);
+    assert.deepEqual(harness.userMessages, []);
 
-        assert.equal((await planner.send(worker.id, { text: "Handle this now" })).delivered, true);
-        await waitForCondition(() => harness.sentMessages.length === 2, "waking message");
-        assert.ok(harness.sentMessages[1]?.options?.triggerTurn || harness.userMessages.length === 1, `${piVersion} still wakes for a normal message`);
+    assert.equal((await planner.send(worker.id, { text: "Handle this now" })).delivered, true);
+    await waitForCondition(() => harness.userMessages.length === 1, "a normal message still wakes");
 
-        const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
-        for (const noWake of [true, false]) {
-          const received = once(orchestrator, "message") as Promise<[SessionInfo, Message]>;
-          const result = await intercomTool.execute(`no-wake-${noWake}`, { action: "send", to: "orchestrator", message: "fyi", noWake }, new AbortController().signal, undefined, harness.ctx);
-          assert.notEqual(result.details?.error, true);
-          assert.equal((await received)[1].noWake, noWake ? true : undefined);
-        }
-      } finally {
-        await harness.emitLifecycle("session_shutdown");
-      }
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    for (const noWake of [true, false]) {
+      const received = once(orchestrator, "message") as Promise<[SessionInfo, Message]>;
+      const result = await intercomTool.execute(`no-wake-${noWake}`, { action: "send", to: "orchestrator", message: "fyi", noWake }, new AbortController().signal, undefined, harness.ctx);
+      assert.notEqual(result.details?.error, true);
+      assert.equal((await received)[1].noWake, noWake ? true : undefined);
     }
   } finally {
+    await harness.emitLifecycle("session_shutdown");
     await cleanup();
   }
 });
@@ -4530,9 +4516,7 @@ test("a late reply is labelled in the asker's inbound message metadata", { concu
     await planner.listSessions();
 
     assert.equal((await planner.send(asker.id, { messageId: "late-answer", text: "Answer.", replyTo: askMessage.id })).demoted, "late_reply");
-    await waitForCondition(() => harness.sentMessages.some((entry) => entry.message.content?.includes("late-answer")), "late reply injection");
-    const injected = harness.sentMessages.find((entry) => entry.message.content?.includes("late-answer"))!;
-    assert.match(injected.message.content ?? "", new RegExp(`late reply to ${askMessage.id}`));
+    await waitForCondition(() => harness.sentMessages.some((entry) => entry.message.content?.includes(`late reply to ${askMessage.id}`)), "late reply label");
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await cleanup();

@@ -170,16 +170,9 @@ function triggerTurnRunsPromptLifecycle(piVersion: string): boolean {
   return major > 1 || (major === 1 && Number(match[2]) >= 2);
 }
 
-export function explicitCrossMachineSendRestriction(options: {
-  to?: string;
-  cwd?: string;
-  openProjectPaneIfMissing?: boolean;
-  attachments?: readonly unknown[];
-  replyTo?: string;
-  supersedes?: string;
-  retryOf?: string;
-  noWake?: boolean;
-}): string | undefined {
+export function explicitCrossMachineSendRestriction(
+  options: Pick<DeliveryRequest, "to" | "cwd" | "openProjectPaneIfMissing" | "replyTo" | "supersedes" | "retryOf" | "noWake"> & { attachments?: readonly unknown[] },
+): string | undefined {
   if (!options.to?.includes("@")) return undefined;
   if (options.cwd || options.openProjectPaneIfMissing) {
     return "Cross-machine send does not support cwd or opening project panes.";
@@ -935,9 +928,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     }
   }
   function createExtensionChannel(namespace: string): IntercomExtensionChannel {
-    // A channel only acts for the registration it was created for. After
-    // unregister(), neither the old handle nor a later registration of the same
-    // namespace can be driven through it.
+    // Stale handles (after unregister or re-registration) must not act on the namespace.
     const liveExtension = () => {
       const extension = localExtensions.get(namespace);
       return extension?.channel === channel ? extension : undefined;
@@ -959,7 +950,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
         const activeClient = client;
         if (!activeClient?.isConnected()) throw new Error("Intercom is not connected");
         const ownerOnly = options.ownerOnly ?? false;
-        const ownerEpoch = ownerOnly ? extension?.owner?.epoch : undefined;
+        const ownerEpoch = ownerOnly ? extension.owner?.epoch : undefined;
         if (ownerOnly && !ownerEpoch) throw new Error(`No owner is available for ${namespace}`);
         activeClient.sendExtensionMessage({
           type: "extension_publish",
@@ -974,7 +965,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
         if (!extension) throw new Error(`Intercom extension channel is unregistered: ${namespace}`);
         const activeClient = client;
         if (!activeClient?.isConnected()) throw new Error("Intercom is not connected");
-        const ownerEpoch = extension?.owner?.epoch;
+        const ownerEpoch = extension.owner?.epoch;
         if (!ownerEpoch || extension.owner?.sessionId !== activeClient.sessionId) {
           throw new Error(`Current session is not the owner of ${namespace}`);
         }
