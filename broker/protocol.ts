@@ -149,6 +149,10 @@ export function isMessage(value: unknown): value is Message {
     return false;
   }
 
+  if (value.noWake !== undefined && typeof value.noWake !== "boolean") {
+    return false;
+  }
+
   if (value.provenance !== undefined && !isMessageProvenance(value.provenance)) {
     return false;
   }
@@ -172,6 +176,7 @@ export function messageDeliveryFingerprint(message: Message, targetId: string): 
     attachments: message.content.attachments,
     replyTo: message.replyTo,
     expectsReply: message.expectsReply,
+    noWake: message.noWake,
     supersedes: message.supersedes,
     retryOf: message.retryOf,
     provenance: message.provenance,

@@ -25,6 +25,7 @@ interface SendOptions {
   attachments?: Attachment[];
   replyTo?: string;
   expectsReply?: boolean;
+  noWake?: boolean;
   messageId?: string;
   supersedes?: string;
   retryOf?: string;
@@ -652,6 +653,7 @@ export class IntercomClient extends EventEmitter {
       retryOf: options.retryOf,
       replyTo: options.replyTo,
       expectsReply: options.expectsReply,
+      noWake: options.noWake,
       provenance: options.provenance,
       crossMachine: options.crossMachine,
       content: {

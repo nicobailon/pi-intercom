@@ -36,7 +36,7 @@ interface FakeClientOptions {
 
 class FakeClient implements CliClient {
   registrations: SessionRegistration[] = [];
-  sends: Array<{ to: string; text: string; expectsReply?: boolean; crossMachine?: CrossMachineProvenance }> = [];
+  sends: Array<{ to: string; text: string; expectsReply?: boolean; noWake?: boolean; crossMachine?: CrossMachineProvenance }> = [];
   disconnected = false;
   private readonly options: FakeClientOptions;
   private listeners: Array<(from: SessionInfo, message: Message) => void> = [];
@@ -55,8 +55,8 @@ class FakeClient implements CliClient {
     return this.options.sessions ?? [];
   }
 
-  async send(to: string, options: { text: string; expectsReply?: boolean; crossMachine?: CrossMachineProvenance }): Promise<{ id: string; delivered: boolean; reason?: string }> {
-    this.sends.push({ to, text: options.text, expectsReply: options.expectsReply, ...(options.crossMachine ? { crossMachine: options.crossMachine } : {}) });
+  async send(to: string, options: { text: string; expectsReply?: boolean; noWake?: boolean; crossMachine?: CrossMachineProvenance }): Promise<{ id: string; delivered: boolean; reason?: string }> {
+    this.sends.push({ to, text: options.text, expectsReply: options.expectsReply, ...(options.noWake ? { noWake: true } : {}), ...(options.crossMachine ? { crossMachine: options.crossMachine } : {}) });
     if (this.options.sendError) {
       throw this.options.sendError;
     }
@@ -198,6 +198,19 @@ test("runCli send reports delivery", async () => {
   assert.equal(code, 0);
   assert.match(out.text(), /^delivered to worker \(sent-1\)\n$/);
   assert.deepEqual(client.sends, [{ to: "worker", text: "build failed", expectsReply: undefined }]);
+});
+
+test("runCli send --no-wake marks only a local send as no-wake", async () => {
+  const client = new FakeClient();
+  assert.equal(await runCli(["send", "--to", "worker", "--text", "paused the job", "--no-wake"], { client, out: new MemorySink(), err: new MemorySink() }), 0);
+  assert.deepEqual(client.sends, [{ to: "worker", text: "paused the job", expectsReply: undefined, noWake: true }]);
+
+  for (const argv of [["ask", "--to", "worker", "--text", "status?", "--no-wake"], ["send", "--to", "worker@laptop", "--text", "hi", "--no-wake"]]) {
+    const err = new MemorySink();
+    assert.equal(await runCli(argv, { client, out: new MemorySink(), err }), 1);
+    assert.match(err.text(), /--no-wake is (only valid for send|not supported for cross-machine send)/);
+  }
+  assert.equal(client.sends.length, 1);
 });
 
 test("runCli send exits 1 on delivery failure", async () => {

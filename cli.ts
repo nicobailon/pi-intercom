@@ -4,7 +4,7 @@
  *
  * Commands:
  *   npx --yes tsx ~/.pi/agent/npm/node_modules/pi-intercom/cli.ts list [--json]
- *   npx --yes tsx ~/.pi/agent/npm/node_modules/pi-intercom/cli.ts send --to worker --text "build failed" [--name <bridge-name>] [--json]
+ *   npx --yes tsx ~/.pi/agent/npm/node_modules/pi-intercom/cli.ts send --to worker --text "build failed" [--no-wake] [--name <bridge-name>] [--json]
  *   npx --yes tsx ~/.pi/agent/npm/node_modules/pi-intercom/cli.ts ask --to worker --text "status?" [--timeout-ms N] [--name <bridge-name>] [--json]
  *
  * The CLI registers as a regular session, so it shows up in the roster and
@@ -34,7 +34,7 @@ import { parseCrossMachineTarget } from "./cross-machine-discovery.ts";
 import type { CrossMachineProvenance, Message, SessionInfo, SessionRegistration } from "./types.ts";
 
 export const CLI_USAGE = `usage: pi-intercom <list|send|ask> [--to <name|session-id>] [--text <message>]
-                        [--timeout-ms <n>] [--name <session-name>] [--json]`;
+                        [--timeout-ms <n>] [--no-wake] [--name <session-name>] [--json]`;
 
 export const DEFAULT_ASK_TIMEOUT_MS = 120_000;
 
@@ -46,6 +46,7 @@ export interface CliOptions {
   timeoutMs: number;
   name: string;
   json: boolean;
+  noWake: boolean;
 }
 
 export class CliUsageError extends Error {}
@@ -59,6 +60,7 @@ export function parseCliArgs(argv: readonly string[]): CliOptions {
     timeoutMs: DEFAULT_ASK_TIMEOUT_MS,
     name: "pi-intercom-cli",
     json: false,
+    noWake: false,
   };
 
   const [command, ...rest] = argv;
@@ -82,6 +84,10 @@ export function parseCliArgs(argv: readonly string[]): CliOptions {
     }
     if (arg === "--envelope-stdin") {
       opts.envelopeStdin = true;
+      continue;
+    }
+    if (arg === "--no-wake") {
+      opts.noWake = true;
       continue;
     }
     const value = rest[i + 1];
@@ -112,6 +118,7 @@ export function parseCliArgs(argv: readonly string[]): CliOptions {
     }
   } else {
     if (opts.envelopeStdin) throw new CliUsageError(`--envelope-stdin is only valid for relay\n${CLI_USAGE}`);
+    if (opts.noWake && opts.command !== "send") throw new CliUsageError(`--no-wake is only valid for send\n${CLI_USAGE}`);
     if (opts.command !== "list") {
       if (!opts.to) throw new CliUsageError(`--to is required for ${opts.command}\n${CLI_USAGE}`);
       if (!opts.text) throw new CliUsageError(`--text is required for ${opts.command}\n${CLI_USAGE}`);
@@ -126,7 +133,7 @@ export interface CliClient {
   sessionId?: string | null;
   connect(session: SessionRegistration, sessionId?: string): Promise<void>;
   listSessions(options?: { timeoutMs?: number }): Promise<SessionInfo[]>;
-  send(to: string, options: { text: string; expectsReply?: boolean; crossMachine?: CrossMachineProvenance }): Promise<{ id: string; delivered: boolean; reason?: string }>;
+  send(to: string, options: { text: string; expectsReply?: boolean; noWake?: boolean; crossMachine?: CrossMachineProvenance }): Promise<{ id: string; delivered: boolean; reason?: string }>;
   on(event: "message", listener: (from: SessionInfo, message: Message) => void): unknown;
   disconnect(): Promise<void>;
 }
@@ -185,6 +192,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
     if (opts.command === "ask" && opts.to!.includes("@")) throw new CliUsageError("ask only supports local names or session ids");
     if (opts.command === "send" && opts.to!.includes("@")) {
       parseCrossMachineTarget(opts.to!);
+      if (opts.noWake) throw new CliUsageError("--no-wake is not supported for cross-machine send");
     }
   } catch (error) {
     return reportFailure(error instanceof Error ? error.message : String(error));
@@ -242,7 +250,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
           return reportFailure(`explicit cross-machine delivery failed: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
-      const result = await deps.client.send(opts.to as string, { text: opts.text as string });
+      const result = await deps.client.send(opts.to as string, { text: opts.text as string, ...(opts.noWake ? { noWake: true } : {}) });
       if (!result.delivered) {
         return reportFailure(`delivery failed: ${result.reason ?? "unknown reason"}`);
       }
