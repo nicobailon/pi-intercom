@@ -80,7 +80,11 @@ export const runCommand: CommandRunner = (command, args, input, timeoutMs) => ne
     stdinClosed = true;
     finish();
   });
-  child.stdin.end(input);
+  // Only this callback sees ECANCELED when stdin is destroyed without an 'error' event
+  // (the child exits 0 while another process still holds the pipe).
+  child.stdin.end(input, (error?: Error | null) => {
+    if (error) stdinError ??= error;
+  });
 });
 
 function relaySupportError(machine: string): Error {

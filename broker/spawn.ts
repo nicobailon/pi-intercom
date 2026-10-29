@@ -223,15 +223,17 @@ function connectToBrokerTarget(target: BrokerConnectTarget): net.Socket {
     : net.connect({ host: target.host, port: target.port });
 }
 
+type EndpointState = "broker" | "absent" | "unresponsive";
+
 /**
  * "absent": nothing listens, or whatever owns the endpoint closed or answered without a broker
  * health reply. "unresponsive": connected but silent for 1s, or failed in an unexpected way.
  */
-export function probeBrokerEndpoint(target: BrokerConnectTarget): Promise<"broker" | "absent" | "unresponsive"> {
+export function probeBrokerEndpoint(target: BrokerConnectTarget): Promise<EndpointState> {
   return new Promise((resolve) => {
     const socket = connectToBrokerTarget(target);
     const requestId = randomUUID();
-    const finish = (state: "broker" | "absent" | "unresponsive") => {
+    const finish = (state: EndpointState) => {
       clearTimeout(timeout);
       socket.destroy();
       resolve(state);
