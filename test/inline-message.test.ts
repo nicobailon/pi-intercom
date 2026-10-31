@@ -331,3 +331,82 @@ test("collapsed inline hint retains Ctrl+O and advertises fullscreen message cli
   assert.match(output, /Ctrl\+O/);
   assert.match(output, /click.*message.*fullscreen/i);
 });
+
+for (const collapsed of [true, false]) {
+  test(`unchanged ${collapsed ? "collapsed" : "expanded"} redraws do not repeat text styling or grapheme layout`, (t) => {
+    const styledInputs: string[] = [];
+    const countingTheme = {
+      fg(name: keyof typeof roleCodes, text: string): string {
+        styledInputs.push(text);
+        return `\u001b[${roleCodes[name]}m${text}\u001b[0m`;
+      },
+    };
+    const segment = Intl.Segmenter.prototype.segment;
+    const segmentation = t.mock.method(Intl.Segmenter.prototype, "segment", function (this: Intl.Segmenter, text: string) {
+      return segment.call(this, text);
+    });
+    const component = new InlineMessageComponent(from, clickMessage, countingTheme as any, "intercom reply", undefined, collapsed);
+    const first = component.render(100);
+    assert.match(first.join("\n"), /Preview start/);
+    assert.ok(segmentation.mock.callCount() > 0, "cold rendering exercises real ANSI/grapheme processing");
+    segmentation.mock.resetCalls();
+    styledInputs.length = 0;
+
+    for (let i = 0; i < 20; i++) assert.deepEqual(component.render(100), first);
+
+    assert.equal(segmentation.mock.callCount(), 0, "unchanged redraws reuse completed layout");
+    assert.ok(styledInputs.every((text) => text.length === 0), "palette checks must not restyle message text");
+    component.invalidate();
+    assert.deepEqual(component.render(100), first);
+    assert.ok(segmentation.mock.callCount() > 0, "explicit invalidation rebuilds rendered rows");
+  });
+
+  test(`${collapsed ? "collapsed" : "expanded"} cached rows follow each role of a mutable theme proxy`, () => {
+    const palette: Record<string, number> = { ...roleCodes };
+    const mutableTheme = new Proxy({}, {
+      get(_target, property) {
+        if (property !== "fg") return undefined;
+        return (name: string, text: string) => `\u001b[${palette[name]}m${text}\u001b[0m`;
+      },
+    });
+    const component = new InlineMessageComponent(from, clickMessage, mutableTheme as any, "intercom reply", undefined, collapsed);
+    let before = component.render(100);
+    assert.deepEqual(component.render(100), before);
+
+    for (const role of ["toolTitle", "text", "muted", "dim"]) {
+      palette[role] += 60;
+      const after = component.render(100);
+      const fresh = new InlineMessageComponent(from, clickMessage, mutableTheme as any, "intercom reply", undefined, collapsed).render(100);
+      assert.notDeepEqual(after, before, `${role} changes remain visible without replacing the proxy`);
+      assert.deepEqual(after, fresh);
+      assert.deepEqual(component.render(100), after);
+      before = after;
+    }
+  });
+}
+
+test("cached rows follow resize, shared expansion and sender header changes", () => {
+  const sender = { ...from };
+  const state = { expanded: false };
+  const palette = styledTheme();
+  const component = new InlineMessageComponent(sender, clickMessage, palette as any, "intercom reply", undefined, true, state);
+
+  for (const expanded of [false, true, false]) {
+    state.expanded = expanded;
+    for (const width of [0, 1, 2, 3, 18, 100, 31, 100]) {
+      const fresh = new InlineMessageComponent(sender, clickMessage, palette as any, "intercom reply", undefined, !expanded).render(width);
+      const actual = component.render(width);
+      assert.deepEqual(actual, fresh, `${width} columns, expanded=${expanded}`);
+      assert.deepEqual(component.render(width), fresh, "the next unchanged frame stays equal");
+      for (const line of actual) assert.ok(visibleWidth(line) <= width);
+    }
+  }
+
+  for (const update of [{ name: "renamed sender" }, { cwd: "/another/project" }, { name: "", id: "replacement-session-id" }]) {
+    Object.assign(sender, update);
+    for (const width of [100, 2, 100]) {
+      const fresh = new InlineMessageComponent(sender, clickMessage, palette as any, "intercom reply", undefined, true).render(width);
+      assert.deepEqual(component.render(width), fresh);
+    }
+  }
+});
