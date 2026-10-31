@@ -17,9 +17,8 @@ import {
   type BrokerConnectTarget,
 } from "./paths.ts";
 import { getAskTimeoutMs } from "../config.ts";
-import { sameCwd } from "../cwd.ts";
-import { EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, SESSION_HELD_ERROR_CODE } from "../types.ts";
-import type { DeliveryState, SessionInfo, Message, BrokerMessage, ExtensionCapability, MessageControl, MessageReceiptStatus } from "../types.ts";
+import { isFullSessionId, EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, SESSION_HELD_ERROR_CODE } from "../types.ts";
+import type { DeliveryRouting, DeliveryState, SessionInfo, Message, BrokerMessage, ExtensionCapability, MessageControl, MessageReceiptStatus } from "../types.ts";
 import { ExtensionStateManager } from "./extension-state.ts";
 import { assertNoLiveBroker } from "./runtime-claim.ts";
 import { resolveHerdrLocations } from "../herdr-location.ts";
@@ -96,6 +95,7 @@ interface PendingReceipt {
 }
 
 interface DeliveryRecord {
+  routing?: DeliveryRouting;
   fingerprint: string;
   state: DeliveryState;
   demoted?: "late_reply";
@@ -729,6 +729,7 @@ class IntercomBroker {
           this.writeDeliveryFailure(socket, messageId, "Invalid message format", "E_INVALID_MESSAGE");
           break;
         }
+        const requested = clientMessage.to;
         // lateReplyTo is broker-owned: only a late reply demoted below carries it.
         delete message.lateReplyTo;
         const fromSession = this.sessions.get(currentKey);
@@ -773,7 +774,9 @@ class IntercomBroker {
           clientMessage.to = targetId;
         }
 
-        const targets = this.findSessions(clientMessage.to, fromSession.scopeId);
+        const disconnectedTargets = this.findDisconnectedSessions(clientMessage.to, fromSession.scopeId);
+        const disconnectedExact = disconnectedTargets.some((session) => session.info.id === clientMessage.to);
+        const targets = disconnectedExact ? [] : this.findSessions(clientMessage.to, fromSession.scopeId);
         if (targets.length === 1) {
           const target = targets[0];
           const fingerprint = messageDeliveryFingerprint(message, target.info.id);
@@ -834,7 +837,7 @@ class IntercomBroker {
             from: fromSession.info,
             message: deliveredMessage,
           });
-          this.completeSocketDelivery(socket, currentKey, fromSession.scopeId, target, message, fingerprint);
+          this.completeSocketDelivery(socket, currentKey, fromSession.scopeId, target, message, fingerprint, requested);
           break;
         }
 
@@ -843,7 +846,6 @@ class IntercomBroker {
           break;
         }
 
-        const disconnectedTargets = this.findDisconnectedSessions(clientMessage.to, fromSession.scopeId);
         if (disconnectedTargets.length === 1) {
           const disconnectedTarget = disconnectedTargets[0]!;
           const target = disconnectedTarget.info;
@@ -868,26 +870,12 @@ class IntercomBroker {
             this.writeDeliveryFailure(socket, message.id, "Target session is not currently connected; blocking asks are not queued", "E_TARGET_DISCONNECTED");
             break;
           }
-          const liveMailboxTarget = this.findUniqueLiveSessionForDisconnectedSession(disconnectedTarget, currentKey);
-          if (liveMailboxTarget) {
-            const deliveredMessage: Message = {
-              ...message,
-              brokerReceivedAt,
-              brokerDeliveredAt: Date.now(),
-            };
-            this.messageReceiptRoutes.set(message.id, { from: currentKey, to: liveMailboxTarget.key, createdAt: brokerReceivedAt });
-            writeMessage(liveMailboxTarget.socket, {
-              type: "message",
-              from: fromSession.info,
-              message: deliveredMessage,
-            });
-            this.completeSocketDelivery(socket, currentKey, fromSession.scopeId, liveMailboxTarget, message, fingerprint);
-            break;
-          }
           this.queueMailboxMessage(fromSession, disconnectedTarget, message, brokerReceivedAt);
           this.releaseReplyEdge(message.replyTo, fromSession.scopeId);
           this.recordDelivery(currentKey, message.id, fingerprint, "queued");
-          this.writeDeliverySuccess(socket, message.id, "queued");
+          const routing: DeliveryRouting = { requested, resolved: { sessionId: target.id, ...(target.endpointEpoch ? { endpointEpoch: target.endpointEpoch } : {}) } };
+          this.deliveryRecords.get(this.deliveryRecordKey(currentKey, message.id))!.routing = routing;
+          this.writeDeliverySuccess(socket, message.id, "queued", undefined, routing);
           break;
         }
 
@@ -912,7 +900,12 @@ class IntercomBroker {
         const receiver = this.sessions.get(currentKey);
         const sender = route ? this.sessions.get(route.from) : undefined;
         if (route?.to === currentKey && receiver?.socket === socket && RECEIPT_PROOF_STATUSES.has(clientMessage.receipt.status)) {
-          this.confirmPendingReceipt(this.deliveryRecordKey(route.from, clientMessage.receipt.messageId), socket);
+          const key = this.deliveryRecordKey(route.from, clientMessage.receipt.messageId);
+          this.confirmPendingReceipt(key, socket);
+          const record = this.deliveryRecords.get(key);
+          if (record?.state === "socket_delivered" && record.routing && !record.routing.delivered) {
+            record.routing.delivered = { sessionId: receiver.info.id, ...(receiver.info.endpointEpoch ? { endpointEpoch: receiver.info.endpointEpoch } : {}) };
+          }
         }
         if (route?.to === currentKey && receiver?.socket === socket && sender) {
           writeMessage(sender.socket, {
@@ -1149,8 +1142,8 @@ class IntercomBroker {
     });
   }
 
-  private writeDeliverySuccess(socket: net.Socket, messageId: string, delivery: "socket_delivered" | "queued", demoted?: "late_reply"): void {
-    writeMessage(socket, { type: "delivered", messageId, delivery, retryable: false, outcomeKnown: true, ...(demoted ? { demoted } : {}) });
+  private writeDeliverySuccess(socket: net.Socket, messageId: string, delivery: "socket_delivered" | "queued", demoted?: "late_reply", routing?: DeliveryRouting): void {
+    writeMessage(socket, { type: "delivered", messageId, delivery, retryable: false, outcomeKnown: true, ...(demoted ? { demoted } : {}), ...(routing ? { routing } : {}) });
   }
 
   private writeDeliveryFailure(socket: net.Socket, messageId: string, reason: string, code: string, retryable = false): void {
@@ -1178,14 +1171,17 @@ class IntercomBroker {
 
   // A receiver that promised receipts must confirm before the sender hears "delivered":
   // a socket whose process died still accepts writes.
-  private completeSocketDelivery(senderSocket: net.Socket, fromKey: string, scopeId: string | undefined, target: ConnectedSession, message: Message, fingerprint: string): void {
+  private completeSocketDelivery(senderSocket: net.Socket, fromKey: string, scopeId: string | undefined, target: ConnectedSession, message: Message, fingerprint: string, requested: string): void {
     const key = this.deliveryRecordKey(fromKey, message.id);
     const demoted = message.lateReplyTo ? "late_reply" : undefined;
     this.recordDelivery(fromKey, message.id, fingerprint, target.acknowledgesReceipts ? "unknown" : "socket_delivered");
+    const resolved = { sessionId: target.info.id, ...(target.info.endpointEpoch ? { endpointEpoch: target.info.endpointEpoch } : {}) };
+    const routing: DeliveryRouting = { requested, resolved, ...(!target.acknowledgesReceipts ? { delivered: resolved } : {}) };
+    this.deliveryRecords.get(key)!.routing = routing;
     if (demoted) this.deliveryRecords.get(key)!.demoted = demoted;
     if (!target.acknowledgesReceipts) {
       this.releaseReplyEdge(message.replyTo, scopeId);
-      this.writeDeliverySuccess(senderSocket, message.id, "socket_delivered", demoted);
+      this.writeDeliverySuccess(senderSocket, message.id, "socket_delivered", demoted, routing);
       return;
     }
     const timer = setTimeout(() => {
@@ -1215,7 +1211,9 @@ class IntercomBroker {
     }
     // Release the answered ask only now, so a retry of an unconfirmed reply still matches it.
     this.releaseReplyEdge(pending.replyTo, pending.scopeId);
-    if (pending.senderSocket.writable) this.writeDeliverySuccess(pending.senderSocket, pending.messageId, "socket_delivered", pending.demoted);
+    const routing = this.deliveryRecords.get(key)?.routing;
+    if (routing?.resolved) routing.delivered = routing.resolved;
+    if (pending.senderSocket.writable) this.writeDeliverySuccess(pending.senderSocket, pending.messageId, "socket_delivered", pending.demoted, routing);
   }
 
   private failPendingReceipt(key: string, reason: string, code: string): void {
@@ -1226,7 +1224,7 @@ class IntercomBroker {
     // An unconfirmed ask keeps its edge, so a receiver that was only slow can still
     // reply. pruneAskEdges expires it after the ask timeout if no reply comes.
     if (pending.senderSocket.writable) {
-      writeMessage(pending.senderSocket, { type: "delivery_failed", messageId: pending.messageId, reason, delivery: "unknown", code, retryable: true, outcomeKnown: false });
+      writeMessage(pending.senderSocket, { type: "delivery_failed", messageId: pending.messageId, reason, delivery: "unknown", code, retryable: true, outcomeKnown: false, ...(this.deliveryRecords.get(key)?.routing ? { routing: this.deliveryRecords.get(key)!.routing } : {}) });
     }
   }
 
@@ -1267,7 +1265,7 @@ class IntercomBroker {
       return false;
     }
     if (record.state === "socket_delivered" || record.state === "queued") {
-      this.writeDeliverySuccess(socket, messageId, record.state, record.demoted);
+      this.writeDeliverySuccess(socket, messageId, record.state, record.demoted, record.routing);
     } else {
       this.writeDeliveryFailure(socket, messageId, record.reason ?? "Previous delivery failed", record.code ?? "E_DELIVERY_FAILED", record.retryable);
     }
@@ -1308,8 +1306,6 @@ class IntercomBroker {
 
   private flushMailboxForSession(session: ConnectedSession, now = Date.now()): void {
     this.pruneMailboxMessages(now);
-    const sessionName = session.info.name?.toLowerCase();
-    const uniqueMailboxIdentity = this.findLiveSessionsSharingMailboxIdentity(session).length === 1;
 
     for (let index = 0; index < this.mailboxMessages.length;) {
       const entry = this.mailboxMessages[index]!;
@@ -1317,21 +1313,7 @@ class IntercomBroker {
         index += 1;
         continue;
       }
-      const matchesId = entry.targetKey === session.key;
-      const matchesSenderIdentity = Boolean(
-        sessionName
-        && sameScope(entry.fromScopeId, session.scopeId)
-        && entry.from.name?.toLowerCase() === sessionName
-        && sameCwd(entry.from.cwd, session.info.cwd),
-      );
-      const matchesUniqueName = Boolean(
-        uniqueMailboxIdentity
-        && sessionName
-        && !matchesSenderIdentity
-        && entry.target.name?.toLowerCase() === sessionName
-        && sameCwd(entry.target.cwd, session.info.cwd),
-      );
-      if (!matchesId && !matchesUniqueName) {
+      if (entry.targetKey !== session.key) {
         index += 1;
         continue;
       }
@@ -1363,6 +1345,8 @@ class IntercomBroker {
         createdAt: entry.message.brokerReceivedAt ?? entry.queuedAt,
       });
       this.updateDeliveryRecord(entry.fromKey, entry.message.id, "socket_delivered");
+      const routing = this.deliveryRecords.get(this.deliveryRecordKey(entry.fromKey, entry.message.id))?.routing;
+      if (routing && !session.acknowledgesReceipts) routing.delivered = { sessionId: session.info.id, ...(session.info.endpointEpoch ? { endpointEpoch: session.info.endpointEpoch } : {}) };
     }
   }
 
@@ -1453,6 +1437,8 @@ class IntercomBroker {
       return [byId];
     }
 
+    if (isFullSessionId(nameOrId)) return [];
+
     const lowerName = nameOrId.toLowerCase();
     const byName = Array.from(this.sessions.values()).filter(session => sameScope(session.scopeId, scopeId) && session.info.name?.toLowerCase() === lowerName);
     if (byName.length > 0) {
@@ -1471,6 +1457,8 @@ class IntercomBroker {
       return [byId];
     }
 
+    if (isFullSessionId(nameOrId)) return [];
+
     const lowerName = nameOrId.toLowerCase();
     const byName = Array.from(this.disconnectedSessions.values()).filter(session => sameScope(session.scopeId, scopeId) && session.info.name?.toLowerCase() === lowerName);
     if (byName.length > 0) {
@@ -1480,36 +1468,6 @@ class IntercomBroker {
     return Array.from(this.disconnectedSessions.entries())
       .filter(([, session]) => sameScope(session.scopeId, scopeId) && session.info.id.startsWith(nameOrId))
       .map(([, session]) => session);
-  }
-
-  private findUniqueLiveSessionForDisconnectedSession(disconnected: DisconnectedSession, senderKey?: string): ConnectedSession | null {
-    const matches = this.findLiveSessionsSharingMailboxIdentity(disconnected)
-      .filter((session) => session.key !== senderKey);
-    return matches.length === 1 ? matches[0]! : null;
-  }
-
-  /**
-   * Mailbox identity is an explicit name plus directory, never name alone. A
-   * runtime fallback alias is derived from the session id rather than chosen as
-   * a durable identity, so it must not transfer mail to another process. This
-   * also prevents two unnamed UUIDv7 sessions started close together from
-   * inheriting each other's mailbox through a shared short alias.
-   *
-   * Directories compare through sameCwd so a relaunch that reports the same
-   * directory differently (trailing slash, "."/"..", or a symlink such as macOS
-   * /tmp vs /private/tmp) still matches.
-   */
-  private findLiveSessionsSharingMailboxIdentity(sessionInfo: ConnectedSession | DisconnectedSession): ConnectedSession[] {
-    const lowerName = sessionInfo.info.name?.toLowerCase();
-    if (!lowerName || sessionInfo.info.runtimeFallbackAlias) {
-      return [];
-    }
-    return Array.from(this.sessions.values()).filter(session =>
-      sameScope(session.scopeId, sessionInfo.scopeId)
-      && !session.info.runtimeFallbackAlias
-      && session.info.name?.toLowerCase() === lowerName
-      && sameCwd(session.info.cwd, sessionInfo.info.cwd)
-    );
   }
 
   private broadcast(msg: BrokerMessage, exclude?: string, scopeId?: string): void {

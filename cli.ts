@@ -31,7 +31,7 @@ import {
 } from "./cross-machine-envelope.ts";
 import { sendCrossMachine, type CrossMachineDelivery } from "./cross-machine-transport.ts";
 import { parseCrossMachineTarget } from "./cross-machine-discovery.ts";
-import type { CrossMachineProvenance, Message, SessionInfo, SessionRegistration } from "./types.ts";
+import type { DeliveryDetails, CrossMachineProvenance, Message, SessionInfo, SessionRegistration } from "./types.ts";
 
 export const CLI_USAGE = `usage: pi-intercom <list|send|ask> [--to <name|session-id>] [--text <message>]
                         [--timeout-ms <n>] [--no-wake] [--name <session-name>] [--json]`;
@@ -133,7 +133,7 @@ export interface CliClient {
   sessionId?: string | null;
   connect(session: SessionRegistration, sessionId?: string): Promise<void>;
   listSessions(options?: { timeoutMs?: number }): Promise<SessionInfo[]>;
-  send(to: string, options: { text: string; expectsReply?: boolean; noWake?: boolean; crossMachine?: CrossMachineProvenance }): Promise<{ id: string; delivered: boolean; reason?: string }>;
+  send(to: string, options: { text: string; expectsReply?: boolean; noWake?: boolean; crossMachine?: CrossMachineProvenance }): Promise<{ id: string; delivered: boolean; reason?: string } & Partial<DeliveryDetails>>;
   on(event: "message", listener: (from: SessionInfo, message: Message) => void): unknown;
   disconnect(): Promise<void>;
 }
@@ -173,9 +173,9 @@ function sessionRow(session: SessionInfo): { name: string; id: string; model: st
 export async function runCli(argv: readonly string[], deps: CliDeps): Promise<number> {
   const out = deps.out ?? process.stdout;
   const err = deps.err ?? process.stderr;
-  const reportFailure = (message: string, code = 1, reason?: string): number => {
+  const reportFailure = (message: string, code = 1, reason?: string, receipt?: { id: string } & Partial<DeliveryDetails>): number => {
     if (argv.includes("--json")) {
-      out.write(`${JSON.stringify({ ok: false, error: message, ...(reason ? { reason } : {}) })}\n`);
+      out.write(`${JSON.stringify({ ok: false, error: message, ...(reason ? { reason } : {}), ...(receipt ? { id: receipt.id, delivery: receipt.delivery, routing: receipt.routing } : {}) })}\n`);
     } else {
       err.write(`${message}\n`);
     }
@@ -231,8 +231,8 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
           trust: envelope.trust,
         },
       });
-      if (!result.delivered) return reportFailure(`relay delivery failed: ${result.reason ?? "unknown reason"}`);
-      if (opts.json) out.write(`${JSON.stringify({ ok: true, delivered: true, id: result.id, origin: relaySenderName(envelope.origin), trust: envelope.trust })}\n`);
+      if (!result.delivered) return reportFailure(`relay delivery failed: ${result.reason ?? "unknown reason"}`, 1, undefined, result);
+      if (opts.json) out.write(`${JSON.stringify({ ok: true, delivered: true, id: result.id, delivery: result.delivery, routing: result.routing, origin: relaySenderName(envelope.origin), trust: envelope.trust })}\n`);
       else out.write(`relayed from ${relaySenderName(envelope.origin)} to ${envelope.target} (${result.id})\n`);
       return 0;
     }
@@ -243,7 +243,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
         try {
           const sessions = await deps.client.listSessions();
           const remote = await deps.crossMachineSend(opts.to as string, opts.text as string, resolveOrigin(sessions, opts.name, deps.machineName ?? "localhost", deps.client.sessionId));
-          if (opts.json) out.write(`${JSON.stringify({ ok: true, delivered: true, crossMachine: true, machine: remote.machine.label, target: remote.agent.name })}\n`);
+          if (opts.json) out.write(`${JSON.stringify({ ok: true, delivered: true, crossMachine: true, machine: remote.machine.label, target: remote.agent.name, id: remote.id, delivery: remote.delivery, routing: remote.routing })}\n`);
           else out.write(`delivered to ${relaySenderName({ name: remote.agent.name, machine: remote.machine.label })} over SSH\n`);
           return 0;
         } catch (error) {
@@ -252,10 +252,10 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
       }
       const result = await deps.client.send(opts.to as string, { text: opts.text as string, ...(opts.noWake ? { noWake: true } : {}) });
       if (!result.delivered) {
-        return reportFailure(`delivery failed: ${result.reason ?? "unknown reason"}`);
+        return reportFailure(`delivery failed: ${result.reason ?? "unknown reason"}`, 1, undefined, result);
       }
       if (opts.json) {
-        out.write(`${JSON.stringify({ ok: true, delivered: true, id: result.id }, null, 2)}\n`);
+        out.write(`${JSON.stringify({ ok: true, delivered: true, id: result.id, delivery: result.delivery, routing: result.routing }, null, 2)}\n`);
       } else {
         out.write(`delivered to ${opts.to} (${result.id})\n`);
       }
@@ -267,6 +267,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
       | { kind: "timeout" }
       | { kind: "delivery-failure"; reason: string }
       | { kind: "reply"; from: SessionInfo; text: string };
+    let askReceipt: ({ id: string } & Partial<DeliveryDetails>) | undefined;
     let settled = false;
     const reply = await new Promise<AskOutcome>((resolve) => {
       let sentId: string | undefined;
@@ -292,6 +293,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
 
       deps.client.send(opts.to as string, { text: opts.text as string, expectsReply: true }).then(
         (result) => {
+          askReceipt = result;
           if (!result.delivered) {
             settle({ kind: "delivery-failure", reason: result.reason ?? "unknown reason" });
           } else {
@@ -307,13 +309,13 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
     });
 
     if (reply.kind === "timeout") {
-      return reportFailure(`ask timed out after ${opts.timeoutMs} ms waiting for a reply from ${opts.to}`, 2, "timeout");
+      return reportFailure(`ask timed out after ${opts.timeoutMs} ms waiting for a reply from ${opts.to}`, 2, "timeout", askReceipt);
     }
     if (reply.kind === "delivery-failure") {
-      return reportFailure(`delivery failed: ${reply.reason}`);
+      return reportFailure(`delivery failed: ${reply.reason}`, 1, undefined, askReceipt);
     }
     if (opts.json) {
-      out.write(`${JSON.stringify({ ok: true, from: reply.from.name ?? reply.from.id, text: reply.text }, null, 2)}\n`);
+      out.write(`${JSON.stringify({ ok: true, from: reply.from.name ?? reply.from.id, text: reply.text, ...(askReceipt?.routing ? { id: askReceipt.id, delivery: askReceipt.delivery, routing: askReceipt.routing } : {}) }, null, 2)}\n`);
     } else {
       out.write(`${reply.text}\n`);
     }

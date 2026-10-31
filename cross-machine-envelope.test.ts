@@ -104,3 +104,10 @@ test("relay parser rejects unsupported versions and trust claims", () => {
   assert.throws(() => parseRelayEnvelope(JSON.stringify(envelope({ version: 2 }))), /Unsupported cross-machine relay envelope version/);
   assert.throws(() => parseRelayEnvelope(JSON.stringify(envelope({ trust: "verified" }))), /Unsupported cross-machine relay envelope trust/);
 });
+
+test("origin lookup rejects duplicate names unless a full environment ID selects the source", () => {
+  const sessions = [{ id: fakeSessionId, name: "worker" }, { id: "other-worker", name: "WORKER" }];
+  assert.throws(() => resolveOrigin(sessions, "worker", "laptop", undefined, {}), /Multiple.*origin.*PI_INTERCOM_SESSION_ID/);
+  assert.equal(resolveOrigin(sessions, "worker", "laptop", undefined, { PI_INTERCOM_SESSION_ID: fakeSessionId }).sessionId, fakeSessionId);
+  assert.equal(resolveOrigin(sessions, "worker", "laptop", undefined, { PI_SESSION_ID: fakeSessionId }).sessionId, fakeSessionId);
+});

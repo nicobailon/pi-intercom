@@ -1,4 +1,4 @@
-const FULL_SESSION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+import { isFullSessionId } from "./types.ts";
 const SESSION_ID_IN_PATH = /_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i;
 export const DISCOVERY_TIMEOUT_MS = 5_000;
 
@@ -144,7 +144,7 @@ async function listSshAgents(host: string, deps: DiscoveryDeps & { remoteCommand
 }
 
 function findAgent(agents: RemoteAgent[], explicit: ReturnType<typeof parseCrossMachineTarget>, where: string): RemoteAgent | undefined {
-  const bySessionId = FULL_SESSION_UUID.test(explicit.agentTarget);
+  const bySessionId = isFullSessionId(explicit.agentTarget);
   const matches = agents.filter((agent) => bySessionId
     ? agent.sessionId === explicit.agentTarget
     : agent.name.toLowerCase() === explicit.agentTarget.toLowerCase());

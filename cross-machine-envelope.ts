@@ -43,9 +43,13 @@ export function resolveOrigin(
   env: NodeJS.ProcessEnv = process.env,
 ): CrossMachineOrigin {
   const envSessionId = env.PI_INTERCOM_SESSION_ID?.trim() || env.PI_SESSION_ID?.trim();
-  const source = envSessionId
-    ? sessions.find((session) => session.id === envSessionId)
-    : sessions.find((session) => session.id !== excludeSessionId && !session.runtimeFallbackAlias && session.name?.toLowerCase() === fallbackName.toLowerCase());
+  const matches = envSessionId
+    ? sessions.filter((session) => session.id === envSessionId)
+    : sessions.filter((session) => session.id !== excludeSessionId && !session.runtimeFallbackAlias && session.name?.toLowerCase() === fallbackName.toLowerCase());
+  if (matches.length > 1) {
+    throw new Error(`Multiple sessions match cross-machine origin "${fallbackName}". Set PI_INTERCOM_SESSION_ID to the source session ID.`);
+  }
+  const source = matches[0];
   return {
     name: source?.name?.trim() || fallbackName,
     sessionId: source?.id || envSessionId || "unknown",

@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "child_process";
 import { realpathSync, statSync } from "fs";
 import { resolve } from "path";
 import { sameCwd } from "./cwd.ts";
+import { isFullSessionId } from "./types.ts";
 import type { SessionInfo } from "./types.ts";
 
 const DEFAULT_PROJECT_AGENT_TIMEOUT_MS = 20_000;
@@ -202,6 +203,10 @@ export function resolveTargetInCwd(input: {
 
   const byId = inCwd.find((session) => session.id === target);
   if (byId) return { kind: "found", session: byId, targetCwd: input.targetCwd };
+
+  if (isFullSessionId(target)) {
+    return { kind: "missing", targetCwd: input.targetCwd, reason: `No intercom session matching "${target}" is connected in ${input.targetCwd}.` };
+  }
 
   const lowerName = target.toLowerCase();
   const byName = inCwd.filter((session) => session.name?.toLowerCase() === lowerName);

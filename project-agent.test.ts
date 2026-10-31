@@ -132,14 +132,35 @@ test("waitForProjectSession honors the target guard after opening a project pane
     },
   };
 
-  const resolved = await waitForProjectSession(client, {
-    projectRoot: "/repo-b",
-    currentSessionId: "self",
-    beforeSessionIds: new Set(before.map((item) => item.id)),
-    to: "worker",
-    pollMs: 1,
-    timeoutMs: 100,
-  });
+  // Production polling is unrefed; keep this isolated test alive until it resolves.
+  const keepAlive = setInterval(() => undefined, 1000);
+  try {
+    const resolved = await waitForProjectSession(client, {
+      projectRoot: "/repo-b",
+      currentSessionId: "self",
+      beforeSessionIds: new Set(before.map((item) => item.id)),
+      to: "worker",
+      pollMs: 1,
+      timeoutMs: 100,
+    });
 
-  assert.equal(resolved.id, "worker-id");
+    assert.equal(resolved.id, "worker-id");
+  } finally {
+    clearInterval(keepAlive);
+  }
+});
+
+test("project routing uses cwd within a shared Herdr Space and rejects ambiguity inside one root", () => {
+  const sessions = [session("first-id", "worker", "/repo-a"), session("second-id", "worker", "/repo-b"), session("third-id", "other", "/repo-b")]
+    .map((item) => ({ ...item, herdrWorkspaceId: "shared-space", herdrPaneId: item.id, herdrLocation: { status: "unavailable" as const, paneId: item.id, reason: "pane_missing" as const } }));
+  assert.equal(resolveTargetInCwd({ sessions, currentSessionId: "self", targetCwd: "/repo-a" }).session?.id, "first-id");
+  assert.throws(() => resolveTargetInCwd({ sessions, currentSessionId: "self", targetCwd: "/repo-b" }), /Multiple intercom sessions/);
+  sessions[2]!.name = "worker";
+  assert.throws(() => resolveTargetInCwd({ sessions, currentSessionId: "self", targetCwd: "/repo-b", to: "worker" }), /Multiple intercom sessions named/);
+  assert.equal(resolveTargetInCwd({ sessions, currentSessionId: "self", targetCwd: "/repo-b", to: "second-id" }).session?.id, "second-id");
+});
+
+test("project routing never treats a missing full UUID as a name", () => {
+  const id = "f293d8c2-0000-4000-8000-000000000002";
+  assert.equal(resolveTargetInCwd({ sessions: [session("other", id, "/repo")], currentSessionId: "self", targetCwd: "/repo", to: id }).kind, "missing");
 });

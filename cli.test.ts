@@ -12,7 +12,7 @@ import {
   type CliClient,
 } from "./cli.ts";
 import { parseCrossMachineTarget } from "./cross-machine-discovery.ts";
-import type { CrossMachineProvenance, Message, SessionInfo, SessionRegistration } from "./types.ts";
+import type { DeliveryDetails, CrossMachineProvenance, Message, SessionInfo, SessionRegistration } from "./types.ts";
 
 class MemorySink {
   chunks: string[] = [];
@@ -26,7 +26,7 @@ class MemorySink {
 
 interface FakeClientOptions {
   sessions?: SessionInfo[];
-  sendResult?: { id: string; delivered: boolean; reason?: string };
+  sendResult?: { id: string; delivered: boolean; reason?: string } & Partial<DeliveryDetails>;
   replyOnSend?: { from: SessionInfo; text: string };
   unrelatedReplyOnSend?: boolean;
   sendError?: Error;
@@ -55,7 +55,7 @@ class FakeClient implements CliClient {
     return this.options.sessions ?? [];
   }
 
-  async send(to: string, options: { text: string; expectsReply?: boolean; noWake?: boolean; crossMachine?: CrossMachineProvenance }): Promise<{ id: string; delivered: boolean; reason?: string }> {
+  async send(to: string, options: { text: string; expectsReply?: boolean; noWake?: boolean; crossMachine?: CrossMachineProvenance }): Promise<{ id: string; delivered: boolean; reason?: string } & Partial<DeliveryDetails>> {
     this.sends.push({ to, text: options.text, expectsReply: options.expectsReply, ...(options.noWake ? { noWake: true } : {}), ...(options.crossMachine ? { crossMachine: options.crossMachine } : {}) });
     if (this.options.sendError) {
       throw this.options.sendError;
@@ -440,4 +440,25 @@ test("packed artifact contains an executable pi-intercom bin and its runtime mod
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }
+});
+
+test("CLI exposes routing receipts for send, queued delivery, failure and ask", async () => {
+  const identity = { sessionId: "f293d8c2-0000-4000-8000-000000000009", endpointEpoch: "owner-epoch" };
+  for (const delivery of ["socket_delivered", "queued", "failed"] as const) {
+    const routing = { requested: "worker", ...(delivery !== "failed" ? { resolved: identity } : {}), ...(delivery === "socket_delivered" ? { delivered: identity } : {}) };
+    const client = new FakeClient({ sendResult: { id: "sent-1", delivered: delivery !== "failed", delivery, routing } });
+    const out = new MemorySink();
+    assert.equal(await runCli(["send", "--to", "worker", "--text", "receipt", "--json"], { client, out }), delivery === "failed" ? 1 : 0);
+    assert.deepEqual(JSON.parse(out.text()).routing, routing);
+    assert.equal(JSON.parse(out.text()).id, "sent-1");
+  }
+  const routing = { requested: "worker", resolved: identity, delivered: identity };
+  const client = new FakeClient({ sendResult: { id: "sent-1", delivered: true, routing }, replyOnSend: { from: sessionFixture(), text: "yes" } });
+  const out = new MemorySink();
+  assert.equal(await runCli(["ask", "--to", "worker", "--text", "receipt", "--json"], { client, out }), 0);
+  assert.deepEqual(JSON.parse(out.text()).routing, routing);
+  const timeoutOut = new MemorySink();
+  const timeoutClient = new FakeClient({ sendResult: { id: "sent-1", delivered: true, routing } });
+  assert.equal(await runCli(["ask", "--to", "worker", "--text", "receipt", "--json", "--timeout-ms", "1"], { client: timeoutClient, out: timeoutOut }), 2);
+  assert.deepEqual(JSON.parse(timeoutOut.text()).routing, routing);
 });
