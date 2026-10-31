@@ -1,3 +1,7 @@
+export function isFullSessionId(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+}
+
 export const EXTENSION_BUS_FEATURE = "extension-bus-v1";
 export const EXACT_SEND_FEATURE = "exact-send-v1";
 /** Broker refused a register because another live process holds the session id. */
@@ -5,7 +9,31 @@ export const SESSION_HELD_ERROR_CODE = "E_SESSION_HELD";
 
 export type DeliveryState = "socket_delivered" | "queued" | "failed" | "unknown";
 
+export interface DeliveryRouting {
+  requested: string;
+  /** Full broker identity; machine is unknown when omitted. */
+  resolved?: { sessionId: string; endpointEpoch?: string; machine?: string };
+  /** Socket delivery or receiver receipt, never model processing. Absent while queued or unknown. */
+  delivered?: { sessionId: string; endpointEpoch?: string; machine?: string };
+}
+
+export function isDeliveryRouting(value: unknown): value is DeliveryRouting {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const routing = value as Record<string, unknown>;
+  const validIdentity = (identity: unknown) => {
+    if (!identity || typeof identity !== "object" || Array.isArray(identity)) return false;
+    const fields = identity as Record<string, unknown>;
+    return typeof fields.sessionId === "string" && fields.sessionId.length > 0
+      && (fields.machine === undefined || (typeof fields.machine === "string" && fields.machine.length > 0))
+      && (fields.endpointEpoch === undefined || (typeof fields.endpointEpoch === "string" && fields.endpointEpoch.length > 0));
+  };
+  return typeof routing.requested === "string"
+    && (routing.resolved === undefined || validIdentity(routing.resolved))
+    && (routing.delivered === undefined || validIdentity(routing.delivered));
+}
+
 export interface DeliveryDetails {
+  routing?: DeliveryRouting;
   delivery: DeliveryState;
   code?: string;
   retryable: boolean;

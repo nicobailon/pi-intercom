@@ -10,7 +10,7 @@ import { HandoverPicker, type HandoverPickerResult, type RemoteSessionLister } f
 import { ComposeOverlay, type ComposeResult } from "./ui/compose.ts";
 import { InlineMessageComponent } from "./ui/inline-message.ts";
 import { getAskTimeoutMs, getIntercomScopeId, loadConfig, setIntercomScopeId, type IntercomConfig } from "./config.ts";
-import { EXTENSION_BUS_FEATURE } from "./types.ts";
+import { isFullSessionId, EXTENSION_BUS_FEATURE } from "./types.ts";
 import type { Attachment, BrokerMessage, Message, MessageControl, MessageReceiptStatus, SessionInfo, SessionRegistration } from "./types.ts";
 import {
   INTERCOM_EXTENSION_REGISTER_EVENT,
@@ -211,6 +211,7 @@ const LATE_REPLY_NOTE = "The ask was no longer open, so the reply was delivered 
 
 function deliveryDetails(result: SendResult): Record<string, unknown> {
   return {
+    ...(result.routing ? { routing: result.routing } : {}),
     messageId: result.id,
     delivered: result.delivered,
     delivery: result.delivery,
@@ -1180,8 +1181,8 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
   function resolveOutboxTarget(sessions: SessionInfo[], currentId: string, to: string): { ok: true; target: OutboxTarget } | { ok: false; code: "target_not_found" | "target_ambiguous" | "self_target"; detail: string } {
     const byId = sessions.find((session) => session.id === to);
     const lowerName = to.toLowerCase();
-    const byName = byId ? [] : sessions.filter((session) => session.name?.toLowerCase() === lowerName);
-    const byPrefix = byId || byName.length > 0 ? [] : sessions.filter((session) => session.id.startsWith(to));
+    const byName = byId || isFullSessionId(to) ? [] : sessions.filter((session) => session.name?.toLowerCase() === lowerName);
+    const byPrefix = byId || isFullSessionId(to) || byName.length > 0 ? [] : sessions.filter((session) => session.id.startsWith(to));
     const matches = byId ? [byId] : byName.length > 0 ? byName : byPrefix;
     if (matches.length === 0) {
       return { ok: false, code: "target_not_found", detail: `Session "${to}" is not currently connected.` };
@@ -1455,8 +1456,8 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     emitMessageReceipt(receivedMessage.id, "receiver_received");
     if (replyWaiter) {
       const senderTarget = from.name || from.id;
-      const fromMatches = senderTarget.toLowerCase() === replyWaiter.from.toLowerCase()
-        || from.id === replyWaiter.from;
+      const fromMatches = from.id === replyWaiter.from
+        || (!isFullSessionId(replyWaiter.from) && senderTarget.toLowerCase() === replyWaiter.from.toLowerCase());
       const replyMatches = receivedMessage.replyTo === replyWaiter.replyTo;
       if (fromMatches && replyMatches) {
         emitMessageReceipt(receivedMessage.id, "acknowledged", "matched reply waiter");
@@ -1688,6 +1689,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     if (byId) {
       return byId.id;
     }
+    if (isFullSessionId(nameOrId)) return null;
     const lowerName = nameOrId.toLowerCase();
     const byName = sessions.filter(s => s.name?.toLowerCase() === lowerName);
     if (byName.length > 1) {
@@ -1718,7 +1720,8 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
   async function sendWithNamePrefixFallback(activeClient: IntercomClient, target: PrefixTarget, attempt: (target: string) => Promise<SendResult>): Promise<PrefixSend> {
     const { rawTo, firstTarget, display } = target;
     const result = await attempt(firstTarget);
-    if (result.delivered || firstTarget !== rawTo || result.code !== "E_TARGET_NOT_FOUND") {
+    if (rawTo) result.routing = { ...result.routing, requested: rawTo };
+    if (result.delivered || firstTarget !== rawTo || isFullSessionId(rawTo) || result.code !== "E_TARGET_NOT_FOUND") {
       return { result, display, resolution: "" };
     }
     const sessions = await activeClient.listSessions();
@@ -1733,7 +1736,9 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     if (!match || match.id === activeClient.sessionId) {
       return { result, display, resolution: "", noMatchText: describeNoSessionMatch(sessions, rawTo) };
     }
-    return { result: await attempt(match.id), display: match.name!, resolution: ` ("${rawTo}" resolved to "${match.name}")` };
+    const fallbackResult = await attempt(match.id);
+    fallbackResult.routing = { ...fallbackResult.routing, requested: rawTo };
+    return { result: fallbackResult, display: match.name!, resolution: ` ("${rawTo}" resolved to "${match.name}")` };
   }
   /** Blocking variant: each attempt registers its reply waiter before sending and releases it when refused, so a retry can register its own. */
   async function askWithNamePrefixFallback(activeClient: IntercomClient, target: PrefixTarget, payload: Omit<Parameters<IntercomClient["send"]>[1], "messageId" | "expectsReply">, wait: {
@@ -1928,10 +1933,12 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
             message: { text: message },
             timestamp: Date.now(),
             crossMachine: true,
+            messageId: remote.id,
+            routing: remote.routing,
           });
           return {
             content: [{ type: "text", text: `Message sent to ${remoteTarget} over SSH (origin identity is SSH-asserted)` }],
-            details: { delivered: true, crossMachine: true, machine: remote.machine.label, target: remote.agent.name, trust: "ssh-asserted" },
+            details: { delivered: true, crossMachine: true, machine: remote.machine.label, target: remote.agent.name, trust: "ssh-asserted", messageId: remote.id, delivery: remote.delivery, routing: remote.routing },
           };
         } catch (remoteError) {
           return {
@@ -2002,6 +2009,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
         to: display,
         message: { text: message, attachments, replyTo: effectiveReplyTo, supersedes, retryOf },
         messageId: result.id,
+        ...(result.routing ? { routing: result.routing } : {}),
         timestamp: Date.now(),
       });
       if (effectiveReplyTo) {
@@ -2958,6 +2966,7 @@ Usage:
               to: askTarget,
               message: { text: message, attachments, replyTo, supersedes, retryOf },
               messageId: sendResult.id,
+              routing: sendResult.routing,
               timestamp: Date.now(),
             });
             const replyMessage = await sent.reply;
@@ -2973,7 +2982,7 @@ Usage:
             });
             return {
               content: [{ type: "text", text: `**Reply from ${askTarget}${resolution}:**\n${replyText}${replyAttachments}` }],
-              details: target.projectPane ? { openedProjectPane: true, paneId: target.projectPane.paneId, projectRoot: target.projectPane.projectRoot } : {},
+              details: { ...deliveryDetails(sendResult), ...(target.projectPane ? { openedProjectPane: true, paneId: target.projectPane.paneId, projectRoot: target.projectPane.projectRoot } : {}) },
             };
           } catch (error) {
             rejectReplyWaiter(toError(error));
@@ -3005,6 +3014,7 @@ Usage:
               attachments,
               replyTo: target.message.id,
             });
+            result.routing = { ...result.routing, requested: to ?? target.from.id };
             if (!result.delivered) {
               const closedAsk = isClosedAskReply(result);
               if (closedAsk || result.reason === "Session not found") {
@@ -3020,6 +3030,7 @@ Usage:
               to: target.from.name || target.from.id,
               message: { text: message, attachments, replyTo: target.message.id },
               messageId: result.id,
+              routing: result.routing,
               timestamp: Date.now(),
             });
             return {

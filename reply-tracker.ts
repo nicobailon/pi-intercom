@@ -1,4 +1,5 @@
 import { getAskTimeoutMs } from "./config.ts";
+import { isFullSessionId } from "./types.ts";
 import type { Message, SessionInfo } from "./types.ts";
 
 const FIND_ASK_HINT = "Run `pending` to see waiting asks, or use `send` for a new message.";
@@ -10,7 +11,9 @@ export interface IntercomContext {
 }
 
 function matchesPendingSender(context: IntercomContext, to: string): boolean {
-  if (context.from.id === to || context.from.id.startsWith(to)) {
+  if (context.from.id === to) return true;
+  if (isFullSessionId(to)) return false;
+  if (context.from.id.startsWith(to)) {
     return true;
   }
 
@@ -24,6 +27,10 @@ function resolvePendingSender(pending: IntercomContext[], to: string): IntercomC
   }
   if (exactIdMatches.length > 1) {
     throw new Error(`Multiple pending asks from session ID "${to}" — specify \`replyTo\``);
+  }
+
+  if (isFullSessionId(to)) {
+    throw new Error(`No pending ask from "${to}". ${FIND_ASK_HINT}`);
   }
 
   const lowerTo = to.toLowerCase();
@@ -125,7 +132,7 @@ export class ReplyTracker {
       if (now - context.receivedAt > this.askTimeoutMs) {
         return false;
       }
-      return context.from.id === to || context.from.name?.toLowerCase() === to.toLowerCase();
+      return context.from.id === to || (!isFullSessionId(to) && context.from.name?.toLowerCase() === to.toLowerCase());
     });
     return candidates.length === 1 ? candidates[0]! : null;
   }

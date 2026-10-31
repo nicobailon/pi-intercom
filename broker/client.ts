@@ -5,7 +5,7 @@ import { writeMessage, createMessageReader } from "./framing.ts";
 import { getBrokerConnectTarget, type BrokerConnectTarget } from "./paths.ts";
 import { isMessage, isMessageControl, isMessageReceipt, isSessionInfo } from "./protocol.ts";
 import { getIntercomScopeId } from "../config.ts";
-import { EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, SESSION_HELD_ERROR_CODE, type DeliveryDetails } from "../types.ts";
+import { isDeliveryRouting, isFullSessionId, EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, SESSION_HELD_ERROR_CODE, type DeliveryDetails } from "../types.ts";
 import type {
   Attachment,
   BrokerMessage,
@@ -391,6 +391,9 @@ export class IntercomClient extends EventEmitter {
           throw new Error("Invalid delivered message");
         }
 
+        if (brokerMessage.routing !== undefined && !isDeliveryRouting(brokerMessage.routing)) {
+          throw new Error("Invalid delivery routing");
+        }
         const pending = this.pendingSends.get(messageId);
         if (!pending) {
           // Late send responses are harmless once the caller has already timed out.
@@ -398,7 +401,7 @@ export class IntercomClient extends EventEmitter {
         }
 
         this.pendingSends.delete(messageId);
-        pending.resolve({ id: messageId, delivered: true, delivery: delivery === "queued" ? "queued" : "socket_delivered", retryable: retryable === true, outcomeKnown: outcomeKnown !== false, ...(typeof brokerMessage.code === "string" ? { code: brokerMessage.code } : {}), ...(brokerMessage.demoted === "late_reply" ? { demoted: "late_reply" as const } : {}) });
+        pending.resolve({ ...(brokerMessage.routing ? { routing: brokerMessage.routing } : {}), id: messageId, delivered: true, delivery: delivery === "queued" ? "queued" : "socket_delivered", retryable: retryable === true, outcomeKnown: outcomeKnown !== false, ...(typeof brokerMessage.code === "string" ? { code: brokerMessage.code } : {}), ...(brokerMessage.demoted === "late_reply" ? { demoted: "late_reply" as const } : {}) });
         break;
       }
 
@@ -408,6 +411,9 @@ export class IntercomClient extends EventEmitter {
           throw new Error("Invalid delivery_failed message");
         }
 
+        if (brokerMessage.routing !== undefined && !isDeliveryRouting(brokerMessage.routing)) {
+          throw new Error("Invalid delivery routing");
+        }
         const pending = this.pendingSends.get(messageId);
         if (!pending) {
           // Late send responses are harmless once the caller has already timed out.
@@ -415,7 +421,7 @@ export class IntercomClient extends EventEmitter {
         }
 
         this.pendingSends.delete(messageId);
-        pending.resolve({ id: messageId, delivered: false, reason, delivery: delivery === "unknown" ? "unknown" : "failed", retryable: retryable === true, outcomeKnown: outcomeKnown !== false, ...(typeof brokerMessage.code === "string" ? { code: brokerMessage.code } : {}) });
+        pending.resolve({ ...(brokerMessage.routing ? { routing: brokerMessage.routing } : {}), id: messageId, delivered: false, reason, delivery: delivery === "unknown" ? "unknown" : "failed", retryable: retryable === true, outcomeKnown: outcomeKnown !== false, ...(typeof brokerMessage.code === "string" ? { code: brokerMessage.code } : {}) });
         break;
       }
 
@@ -665,7 +671,7 @@ export class IntercomClient extends EventEmitter {
     const sendOnce = (targetId?: string, targetEpoch?: string): Promise<SendResult> => new Promise((resolve, reject) => {
       const wrappedResolve = (result: SendResult) => {
         clearTimeout(timeout);
-        resolve(result);
+        resolve({ ...result, routing: { ...(targetId && targetEpoch ? { resolved: { sessionId: targetId, endpointEpoch: targetEpoch } } : {}), ...result.routing, requested: to } });
       };
       const wrappedReject = (error: Error) => {
         clearTimeout(timeout);
@@ -695,8 +701,8 @@ export class IntercomClient extends EventEmitter {
     const resolveTarget = async (): Promise<{ id: string; epoch: string } | null> => {
       const sessions = await this.listSessions();
       const byId = sessions.find((session) => session.id === to);
-      const byName = byId ? [] : sessions.filter((session) => session.name?.toLowerCase() === to.toLowerCase());
-      const byPrefix = byId || byName.length > 0 ? [] : sessions.filter((session) => session.id.startsWith(to));
+      const byName = byId || isFullSessionId(to) ? [] : sessions.filter((session) => session.name?.toLowerCase() === to.toLowerCase());
+      const byPrefix = byId || isFullSessionId(to) || byName.length > 0 ? [] : sessions.filter((session) => session.id.startsWith(to));
       const matches = byId ? [byId] : byName.length > 0 ? byName : byPrefix;
       const target = matches.length === 1 ? matches[0]! : null;
       return target?.endpointEpoch ? { id: target.id, epoch: target.endpointEpoch } : null;
@@ -704,10 +710,7 @@ export class IntercomClient extends EventEmitter {
 
     const target = await resolveTarget();
     if (!target) return sendOnce();
-    const result = await sendOnce(target.id, target.epoch);
-    if (result.code !== "E_TARGET_REBOUND") return result;
-    const reboundTarget = await resolveTarget();
-    return reboundTarget ? sendOnce(reboundTarget.id, reboundTarget.epoch) : result;
+    return sendOnce(target.id, target.epoch);
   }
 
   cancelMessage(messageId: string): Promise<SendResult> {

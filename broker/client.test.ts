@@ -81,3 +81,16 @@ test("cancelAsk ignores synchronous socket write failures", () => {
 
   assert.doesNotThrow(() => client.cancelAsk("ask-1"));
 });
+
+test("delivery responses validate optional routing identities", () => {
+  const client = new IntercomClient();
+  (client as any)._sessionId = "session-1";
+  for (const type of ["delivered", "delivery_failed"]) {
+    const frame = { type, messageId: "receipt", reason: "failed" };
+    assert.doesNotThrow(() => (client as any).handleBrokerMessage(frame));
+    for (const routing of [[], { requested: "alias", resolved: { sessionId: 42 } }, { requested: "alias", delivered: { sessionId: "id", endpointEpoch: false } }]) {
+      assert.throws(() => (client as any).handleBrokerMessage({ ...frame, routing }), /Invalid delivery routing/);
+    }
+    assert.doesNotThrow(() => (client as any).handleBrokerMessage({ ...frame, routing: { requested: "alias", resolved: { sessionId: "id", endpointEpoch: "epoch" } } }));
+  }
+});

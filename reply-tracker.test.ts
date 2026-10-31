@@ -262,3 +262,14 @@ test("findUniquePendingAskFrom does not mutate tracker state", () => {
 
   assert.deepEqual(tracker.listPending(1002).map((context) => context.message.id), ["ask-1"]);
 });
+
+test("full UUID reply selection never falls back to a sender name", () => {
+  const tracker = new ReplyTracker();
+  const id = "f293d8c2-0000-4000-8000-000000000003";
+  tracker.recordIncomingMessage(createSession("unrelated", id), createMessage("wrong-ask", "Alias collision"), 1000);
+  assert.throws(() => tracker.resolveReplyTarget({ to: id }, 1001), /No pending ask/);
+  assert.throws(() => tracker.resolveReplyTarget({ to: id, replyTo: "wrong-ask" }, 1001), /is not from/);
+  assert.equal(tracker.findUniquePendingAskFrom(id, 1001), null);
+  tracker.recordIncomingMessage(createSession(id, "original"), createMessage("right-ask", "Exact UUID"), 1000);
+  assert.equal(tracker.resolveReplyTarget({ to: id }, 1001).message.id, "right-ask");
+});

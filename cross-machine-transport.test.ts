@@ -171,3 +171,17 @@ test("structured remote failure preserves the reported error", async () => {
     /Remote intercom delivery via workstation failed: target rejected the envelope version/,
   );
 });
+
+
+test("routing receipts use only the remote relay response and preserve unknown old remotes", async () => {
+  const routing = { requested: fakeSessionId, resolved: { sessionId: fakeSessionId, endpointEpoch: "epoch", machine: "remote-owner" }, delivered: { sessionId: fakeSessionId, endpointEpoch: "epoch", machine: "remote-owner" } };
+  for (const response of [{ ok: true }, { ok: true, id: "remote-msg", delivery: "socket_delivered", routing }, { ok: true, id: "queued-msg", delivery: "queued", routing: { requested: fakeSessionId, resolved: routing.resolved } }]) {
+    const run: CommandRunner = async (command, args) => discoveryResult(command, args) ?? { code: 0, stdout: JSON.stringify(response), stderr: "" };
+    const result = await sendCrossMachine("reviewer@workstation", "receipt", origin, { run });
+    assert.deepEqual(result.routing, response.routing ? { ...response.routing, requested: "reviewer@workstation" } : undefined);
+    assert.equal(result.id, response.id);
+    assert.equal(result.delivery, response.delivery);
+  }
+  const run: CommandRunner = async (command, args) => discoveryResult(command, args) ?? { code: 0, stdout: JSON.stringify({ ok: true, routing: { requested: "x", delivered: { sessionId: 42 } } }), stderr: "" };
+  await assert.rejects(sendCrossMachine("reviewer@workstation", "receipt", origin, { run }), /no compatible relay support/);
+});

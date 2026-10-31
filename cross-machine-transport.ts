@@ -1,3 +1,4 @@
+import { isDeliveryRouting, type DeliveryRouting, type DeliveryState } from "./types.ts";
 import { spawn } from "node:child_process";
 import { DIRECT_SSH_OPTIONS, discoverRemoteAgent, type RemoteAgent, type SavedMachine } from "./cross-machine-discovery.ts";
 import type { CrossMachineEnvelope, CrossMachineOrigin } from "./cross-machine-envelope.ts";
@@ -25,6 +26,9 @@ export interface CrossMachineDelivery {
   machine: SavedMachine;
   agent: RemoteAgent;
   stdout: string;
+  id?: string;
+  delivery?: DeliveryState;
+  routing?: DeliveryRouting;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -129,5 +133,12 @@ export async function sendCrossMachine(
     if (typeof response.error !== "string") throw relaySupportError(match.machine.label);
     throw new Error(`Remote intercom delivery via ${match.machine.label} failed: ${response.error}`);
   }
-  return { ...match, stdout: delivered.stdout };
+  if (response.routing !== undefined && !isDeliveryRouting(response.routing)) throw relaySupportError(match.machine.label);
+  return {
+    ...match,
+    stdout: delivered.stdout,
+    ...(typeof response.id === "string" ? { id: response.id } : {}),
+    ...(response.delivery === "queued" || response.delivery === "socket_delivered" ? { delivery: response.delivery } : {}),
+    ...(response.routing ? { routing: { ...response.routing, requested: target } } : {}),
+  };
 }
