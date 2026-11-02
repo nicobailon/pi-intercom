@@ -137,51 +137,66 @@ test("openHerdrAppPane starts pi beside the caller's terminal and focuses it", a
   }
 });
 
-function placementClients(spaces: Array<Record<string, unknown>>) {
-  const hc = recordingClient((args) => args[0] === "get"
-    ? { ok: true, data: { labels: { "herdr.space": "sp-caller", "herdr.tab": "tb-caller" } } }
-    : { ok: true, data: { address: "t9" } });
+/** Each space: `folder` is where `ls` says it was made (stale on purpose), `cwd` where its first terminal's program runs now. */
+function placementClients(spaces: Array<{ id: string; folder: string; cwd: string; machine?: string }>) {
+  const hc = recordingClient((args) => {
+    if (args[0] === "get" && args[1] === "t3") return { ok: true, data: { labels: { "herdr.space": "sp-caller", "herdr.tab": "tb-caller" } } };
+    if (args[0] === "get") {
+      const space = spaces.find((item) => `t-${item.id}` === args[1])!;
+      return { ok: true, data: { cwd: space.folder, foreground: { cwd: space.cwd } } };
+    }
+    return { ok: true, data: { address: "t9" } };
+  });
+  const listed = spaces.map((space) => ({
+    id: space.id,
+    folder: space.folder,
+    machine: space.machine ?? null,
+    tabs: [{ id: `tb-${space.id}`, terminals: [{ terminal: `t-${space.id}`, pane: `p-${space.id}` }] }],
+  }));
   const app = recordingClient((args) => args[0] === "ls"
-    ? { ok: true, data: { spaces } }
+    ? { ok: true, data: { spaces: listed } }
     : args[1] === "space.new" ? { ok: true, data: { space: "sp-new", tab: "tb-new", terminal: "t5" } } : { ok: true, data: {} });
-  return { hc, app };
+  const run = () => hc.calls.find((args) => args[0] === "run");
+  return { hc, app, run };
 }
 
-test("placement space keeps the pane beside the caller when its space has exactly this folder", async () => {
+test("placement space keeps the pane beside the caller when its space is in this folder", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-intercom-placement-"));
-  const { hc, app } = placementClients([{ id: "sp-caller", folder: root, machine: null }]);
+  const { hc, app, run } = placementClients([{ id: "sp-caller", folder: "/made-elsewhere", cwd: root }]);
   try {
     await openHerdrAppPane({ cwd: root, terminalId: "t3", placement: "space", focus: false, hc, app });
-    assert.ok(hc.calls[1]!.includes("herdr.tab=tb-caller"));
+    assert.ok(run()!.includes("herdr.tab=tb-caller"));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("placement space opens a tab in the local space that has this folder", async () => {
+test("placement space opens a tab in the local space whose first terminal is in this folder, ignoring stale space folders", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-intercom-placement-"));
-  const { hc, app } = placementClients([
-    { id: "sp-caller", folder: join(root, ".."), machine: null },
-    { id: "sp-remote", folder: root, machine: "vps" },
-    { id: "sp-project", folder: root, machine: null },
+  const { hc, app, run } = placementClients([
+    // Made in the target folder, but its terminal has moved on: must not match.
+    { id: "sp-caller", folder: root, cwd: "/home" },
+    { id: "sp-stale", folder: root, cwd: "/srv" },
+    { id: "sp-remote", folder: "/x", cwd: root, machine: "vps" },
+    { id: "sp-project", folder: "/home", cwd: root },
   ]);
   try {
     await openHerdrAppPane({ cwd: root, terminalId: "t3", placement: "space", focus: false, hc, app });
-    const run = hc.calls[1]!;
-    assert.ok(run.includes("herdr.space=sp-project"));
-    assert.ok(!run.some((arg) => arg.startsWith("herdr.tab=")));
+    assert.ok(run()!.includes("herdr.space=sp-project"));
+    assert.ok(!run()!.some((arg) => arg.startsWith("herdr.tab=")));
+    assert.ok(!hc.calls.some((args) => args[1] === "t-sp-remote"), "remote spaces are not inspected");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("placement space creates a space named after the folder when none has it", async () => {
+test("placement space creates a space named after the folder when no space is in it", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-intercom-placement-"));
-  const { hc, app } = placementClients([{ id: "sp-caller", folder: "/elsewhere", machine: null }]);
+  const { hc, app, run } = placementClients([{ id: "sp-caller", folder: root, cwd: "/elsewhere" }]);
   try {
     const launched = await openHerdrAppPane({ cwd: root, terminalId: "t3", placement: "space", hc, app });
     assert.equal(launched.paneId, "t5");
-    assert.equal(hc.calls.length, 1);
+    assert.equal(run(), undefined);
     const spaceNew = app.calls[1]!;
     assert.deepEqual(spaceNew.slice(0, 2), ["do", "space.new"]);
     assert.deepEqual(JSON.parse(spaceNew[2]!), { name: basename(launched.projectRoot), folder: launched.projectRoot, argv: ["sh", "-c", "pi"] });

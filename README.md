@@ -502,7 +502,7 @@ Create `~/.pi/agent/intercom/config.json`:
 | `status` | — | Optional custom status suffix shown after the automatic lifecycle status, for example `thinking · researching` |
 | `crossMachine.machineName` | lowercased short hostname | Name peers use for this host in their Herdr saved-machine lists |
 | `crossMachine.remoteCommand` | `"pi-intercom"` | Command invoked through non-interactive SSH on remote machines |
-| `herdr.projectPlacement` | `"pane"` | Herdr app only. `"pane"` opens project panes beside the caller. `"space"` does that only when the target folder is exactly the folder of the caller's space; otherwise it opens a new tab in the local space whose folder is the target, or creates a space named after the folder. A new space is always shown and focused, whatever `focus` says |
+| `herdr.projectPlacement` | `"pane"` | Herdr app only. `"pane"` opens project panes beside the caller. `"space"` does that only when the caller's space is in the target folder; otherwise it opens a new tab in the first local space that is in it, or creates a space named after the folder. A space is in the folder where its first terminal's program runs now (exact match, not subfolders), as Herdr names spaces; the `folder` a space was made in is ignored because it goes stale. A new space is always shown and focused, whatever `focus` says |
 
 If `config.json` cannot be parsed or contains an invalid value, pi-intercom logs the error and fails closed for inbound broker auto-triggering by using `inboundTrigger: "never"` until the config is fixed.
 Obsolete `toolVisibility` values are ignored; the generic `intercom` tool remains stable in the active tool set for prompt-cache friendliness.

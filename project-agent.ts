@@ -306,7 +306,7 @@ export async function openHerdrAppPane(input: {
   const command = projectCommand();
   let labels = ["--label", `herdr.space=${space}`, "--label", `herdr.tab=${tab}`];
   if (input.placement === "space") {
-    const target = await spaceForFolder(app, space, projectRoot, input.signal);
+    const target = await spaceForFolder(app, hc, space, projectRoot, input.signal);
     if (target === "new") {
       // space.new shows and focuses the new space itself, whatever `focus` says.
       const args = { name: basename(projectRoot) || undefined, folder: projectRoot, argv: ["sh", "-c", command] };
@@ -340,20 +340,31 @@ export async function openHerdrAppPane(input: {
   return { paneId: terminal, projectRoot, command };
 }
 
+type ListedSpace = { id?: unknown; machine?: unknown; tabs?: Array<{ terminals?: Array<{ terminal?: unknown }> }> };
+
 /**
  * For placement "space": undefined keeps the pane beside the caller (the
- * caller's space has exactly this folder), a space id reuses the local space
- * that has it, and "new" asks for a new space.
+ * caller's space is in this folder), a space id reuses the first local space
+ * in it, and "new" asks for a new space. A space is where its first terminal's
+ * program runs now, as Herdr names it; `ls`'s `folder` is only where the space
+ * was made and goes stale.
  */
-async function spaceForFolder(app: HerdrClient, callerSpace: string, folder: string, signal?: AbortSignal): Promise<string | undefined> {
-  const listed = await app.run<{ spaces?: Array<{ id?: unknown; folder?: unknown; machine?: unknown }> }>(["ls"], { timeoutMs: 5_000, signal });
+async function spaceForFolder(app: HerdrClient, hc: HerdrClient, callerSpace: string, folder: string, signal?: AbortSignal): Promise<string | undefined> {
+  const listed = await app.run<{ spaces?: ListedSpace[] }>(["ls"], { timeoutMs: 5_000, signal });
   if (listed.ok === false) throw new Error(formatHerdrError(listed.error));
-  const spaces = Array.isArray(listed.data.spaces) ? listed.data.spaces : [];
-  const hasFolder = (space: { folder?: unknown; machine?: unknown }) =>
-    space.machine == null && typeof space.folder === "string" && sameCwd(space.folder, folder);
-  if (spaces.some((space) => space.id === callerSpace && hasFolder(space))) return undefined;
-  const existing = spaces.find(hasFolder)?.id;
-  return typeof existing === "string" ? existing : "new";
+  const spaces = (Array.isArray(listed.data.spaces) ? listed.data.spaces : [])
+    .filter((space): space is ListedSpace & { id: string } => space.machine == null && typeof space.id === "string");
+  const inFolder = await Promise.all(spaces.map(async (space) => {
+    const first = space.tabs?.[0]?.terminals?.[0]?.terminal;
+    if (typeof first !== "string") return false;
+    const got = await hc.run<{ cwd?: unknown; foreground?: { cwd?: unknown } }>(["get", first, "--json"], { timeoutMs: 5_000, signal });
+    // hc's own cwd lags behind a program that changed directory; the foreground process's is current.
+    const cwd = got.ok ? got.data.foreground?.cwd ?? got.data.cwd : undefined;
+    return typeof cwd === "string" && sameCwd(cwd, folder);
+  }));
+  if (spaces.some((space, index) => space.id === callerSpace && inFolder[index])) return undefined;
+  const existing = spaces.find((_, index) => inFolder[index]);
+  return existing ? existing.id : "new";
 }
 
 export async function waitForProjectSession(client: ListSessionsClient, input: {
