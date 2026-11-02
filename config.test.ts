@@ -162,3 +162,19 @@ test("loadConfig rejects invalid busyDelivery values", async () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("loadConfig reads herdr.projectPlacement, defaulting to pane", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-intercom-config-"));
+  try {
+    mkdirSync(join(root, "intercom"), { recursive: true });
+    await withAgentDir(root, () => {
+      assert.equal(loadConfig().herdr.projectPlacement, "pane");
+      writeFileSync(join(root, "intercom", "config.json"), JSON.stringify({ herdr: { projectPlacement: "space" } }));
+      assert.equal(loadConfig().herdr.projectPlacement, "space");
+      writeFileSync(join(root, "intercom", "config.json"), JSON.stringify({ herdr: { projectPlacement: "tab" } }));
+      assert.throws(() => loadConfig(), /"herdr.projectPlacement" must be "pane" or "space"/);
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

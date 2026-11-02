@@ -423,7 +423,7 @@ The supervisor can reply with plain JSON or a fenced `json` block. If the reply 
 | `openProjectPaneIfMissing` | boolean | For `send`/`ask` with `cwd`, open a visible Herdr project pane and launch Pi when no matching live session exists |
 | `focus` | boolean | For `openProjectPaneIfMissing`, focus the new Herdr pane. Defaults to true |
 
-**Herdr TUI and Herdr app.** Project panes work under both. Under the Herdr TUI (`HERDR_PANE_ID` set; needs `herdr` 0.7.5+ on `PATH` or `HERDR_BIN`), pi-intercom splits the current pane to the right and runs Pi in it. Under the Herdr desktop app (`HC_TERMINAL_ID` set by herdr-core; needs `hc` and `herdr-app` on `PATH`), it starts Pi with `hc run --bg --keep --no-parent`, labeled with the caller's `herdr.space` and `herdr.tab` so the window shows it beside the caller, then focuses it with `herdr-app do pane.focus` unless `focus` is false. When a TUI runs inside an app terminal, the TUI wins. `PI_INTERCOM_PI_BIN` (or `PI_BIN`) overrides the `pi` command in both.
+**Herdr TUI and Herdr app.** Project panes work under both. Under the Herdr TUI (`HERDR_PANE_ID` set; needs `herdr` 0.7.5+ on `PATH` or `HERDR_BIN`), pi-intercom splits the current pane to the right and runs Pi in it. Under the Herdr desktop app (`HC_TERMINAL_ID` set by herdr-core; needs `hc` and `herdr-app` on `PATH`), it starts Pi with `hc run --bg --keep --no-parent`, labeled with the caller's `herdr.space` and `herdr.tab` so the window shows it beside the caller, then focuses it with `herdr-app do pane.focus` unless `focus` is false. Set `herdr.projectPlacement` to `"space"` to open other folders in their own space instead (see Configuration). When a TUI runs inside an app terminal, the TUI wins. `PI_INTERCOM_PI_BIN` (or `PI_BIN`) overrides the `pi` command in both.
 
 ### contact_supervisor
 
@@ -502,6 +502,7 @@ Create `~/.pi/agent/intercom/config.json`:
 | `status` | — | Optional custom status suffix shown after the automatic lifecycle status, for example `thinking · researching` |
 | `crossMachine.machineName` | lowercased short hostname | Name peers use for this host in their Herdr saved-machine lists |
 | `crossMachine.remoteCommand` | `"pi-intercom"` | Command invoked through non-interactive SSH on remote machines |
+| `herdr.projectPlacement` | `"pane"` | Herdr app only. `"pane"` opens project panes beside the caller. `"space"` does that only when the target folder is exactly the folder of the caller's space; otherwise it opens a new tab in the local space whose folder is the target, or creates a space named after the folder. A new space is always shown and focused, whatever `focus` says |
 
 If `config.json` cannot be parsed or contains an invalid value, pi-intercom logs the error and fails closed for inbound broker auto-triggering by using `inboundTrigger: "never"` until the config is fixed.
 Obsolete `toolVisibility` values are ignored; the generic `intercom` tool remains stable in the active tool set for prompt-cache friendliness.

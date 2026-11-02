@@ -1841,7 +1841,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     }
 
     const beforeSessionIds = new Set(sessions.map((session) => session.id));
-    const projectPane = await openProjectPane({ cwd: targetCwd, focus: options.focus, signal: options.signal });
+    const projectPane = await openProjectPane({ cwd: targetCwd, focus: options.focus, placement: config.herdr.projectPlacement, signal: options.signal });
     const session = await waitForProjectSession(activeClient, {
       projectRoot: projectPane.projectRoot,
       currentSessionId,
