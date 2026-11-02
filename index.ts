@@ -34,7 +34,7 @@ import { homedir } from "node:os";
 import { join as joinPath, resolve as resolvePath } from "node:path";
 import { sameCwd } from "./cwd.ts";
 import { formatContextUsage } from "./format-context.ts";
-import { openProjectPane, resolveTargetInCwd, waitForProjectSession, type ProjectPaneLaunch } from "./project-agent.ts";
+import { currentHerdrHost, openProjectPane, resolveTargetInCwd, waitForProjectSession, type ProjectPaneLaunch } from "./project-agent.ts";
 import { relaySenderName } from "./cross-machine-envelope.ts";
 import { runCommand, sendCrossMachine } from "./cross-machine-transport.ts";
 import { listMachineAgents, listSavedMachines, parseCrossMachineTarget } from "./cross-machine-discovery.ts";
@@ -614,14 +614,6 @@ function currentTmuxPane(): string | undefined {
   const pane = process.env.TMUX_PANE?.trim();
   return pane ? pane : undefined;
 }
-// Herdr exports a launch-time pane alias to hosted processes. Its visible,
-// workspace-qualified id can change when the pane moves, so registration also
-// carries the stable Pi session file and the broker resolves both against a
-// fresh snapshot. Workspace and tab ids are intentionally never registered.
-function currentHerdrPane(): string | undefined {
-  const pane = process.env.HERDR_PANE_ID?.trim();
-  return pane ? pane : undefined;
-}
 function formatIntercomContactSnippet(sessionId: string): string {
   return `Use pi-intercom: intercom({ action: "send", to: "${sessionId}", message: "..." })`;
 }
@@ -1034,7 +1026,14 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
 
     const identity = buildPresenceIdentity(pi, currentIntercomSessionId ?? currentSessionId);
     const tmuxPane = currentTmuxPane();
-    const herdrPaneId = currentHerdrPane();
+    // Herdr TUI exports a launch-time pane alias whose visible id changes when
+    // the pane moves, so registration also carries the stable Pi session file and
+    // the broker resolves both against a fresh snapshot. The Herdr app's
+    // herdr-core terminal address is stable across moves. Workspace and tab are
+    // never registered.
+    const herdrHost = currentHerdrHost();
+    const herdrPaneId = herdrHost?.kind === "tui" ? herdrHost.paneId : undefined;
+    const herdrTerminalId = herdrHost?.kind === "app" ? herdrHost.terminalId : undefined;
     const herdrSessionPath = herdrPaneId ? liveContext.sessionManager.getSessionFile() : undefined;
     return {
       ...identity,
@@ -1046,6 +1045,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
       status: currentStatus(),
       ...(tmuxPane ? { tmuxPane } : {}),
       ...(herdrPaneId ? { herdrPaneId } : {}),
+      ...(herdrTerminalId ? { herdrTerminalId } : {}),
       ...(herdrSessionPath ? { herdrSessionPath } : {}),
       // handleIncomingMessage confirms every message it accepts; one that lands mid-reload goes unconfirmed.
       acknowledgesReceipts: true,
@@ -1841,7 +1841,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     }
 
     const beforeSessionIds = new Set(sessions.map((session) => session.id));
-    const projectPane = await openProjectPane({ cwd: targetCwd, focus: options.focus, signal: options.signal });
+    const projectPane = await openProjectPane({ cwd: targetCwd, focus: options.focus, placement: config.herdr.projectPlacement, signal: options.signal });
     const session = await waitForProjectSession(activeClient, {
       projectRoot: projectPane.projectRoot,
       currentSessionId,

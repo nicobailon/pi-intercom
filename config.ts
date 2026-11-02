@@ -41,6 +41,13 @@ export interface CrossMachineConfig {
   remoteCommand: string;
 }
 
+export type ProjectPlacement = "pane" | "space";
+
+export interface HerdrConfig {
+  /** Herdr app: where a project pane opens for a folder outside the caller's space. */
+  projectPlacement: ProjectPlacement;
+}
+
 export interface IntercomConfig {
   /** Broker command used to spawn the broker process (e.g. "npx" or "bun") */
   brokerCommand: string;
@@ -71,6 +78,9 @@ export interface IntercomConfig {
 
   /** Cross-machine discovery and SSH relay settings. */
   crossMachine: CrossMachineConfig;
+
+  /** Herdr integration settings. */
+  herdr: HerdrConfig;
 }
 
 export function getConfigPath(intercomDir: string = getIntercomDirPath()): string {
@@ -89,12 +99,13 @@ const defaults: IntercomConfig = {
     machineName: defaultMachineName(hostname()),
     remoteCommand: "pi-intercom",
   },
+  herdr: { projectPlacement: "pane" },
 };
 
 export function loadConfig(): IntercomConfig {
   const configPath = getConfigPath();
   if (!existsSync(configPath)) {
-    return { ...defaults, crossMachine: { ...defaults.crossMachine } };
+    return { ...defaults, crossMachine: { ...defaults.crossMachine }, herdr: { ...defaults.herdr } };
   }
   
   try {
@@ -108,6 +119,7 @@ export function loadConfig(): IntercomConfig {
     const config: IntercomConfig = {
       ...defaults,
       crossMachine: { ...defaults.crossMachine },
+      herdr: { ...defaults.herdr },
     };
 
     if (Object.hasOwn(parsedConfig, "brokerCommand")) {
@@ -209,6 +221,20 @@ export function loadConfig(): IntercomConfig {
           throw new Error(`"crossMachine.remoteCommand" must be a non-empty string`);
         }
         config.crossMachine.remoteCommand = crossMachine.remoteCommand.trim();
+      }
+    }
+
+    if (Object.hasOwn(parsedConfig, "herdr")) {
+      const value = parsedConfig.herdr;
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        throw new Error(`"herdr" must be an object`);
+      }
+      const herdr = value as Record<string, unknown>;
+      if (Object.hasOwn(herdr, "projectPlacement")) {
+        if (herdr.projectPlacement !== "pane" && herdr.projectPlacement !== "space") {
+          throw new Error(`"herdr.projectPlacement" must be "pane" or "space"`);
+        }
+        config.herdr.projectPlacement = herdr.projectPlacement;
       }
     }
 
