@@ -38,11 +38,13 @@ const sharedHomeDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-home-"));
 const previousHome = process.env.HOME;
 const previousUserProfile = process.env.USERPROFILE;
 const previousHerdrPaneId = process.env.HERDR_PANE_ID;
+const previousHcTerminalId = process.env.HC_TERMINAL_ID;
 process.env.HOME = sharedHomeDir;
 process.env.USERPROFILE = sharedHomeDir;
 // Synthetic extension harnesses are not running in the parent test runner's
-// Herdr pane. Individual Herdr integration cases register an explicit pane id.
+// Herdr pane or Herdr app terminal. Individual Herdr integration cases register an explicit pane id.
 delete process.env.HERDR_PANE_ID;
+delete process.env.HC_TERMINAL_ID;
 const { IntercomClient, IntercomSessionHeldError } = await import("./broker/client.ts");
 const { getTsxLoaderPath } = await import("./broker/spawn.ts");
 const tsxImportArgs = ["--import", pathToFileURL(getTsxLoaderPath()).href];
@@ -52,6 +54,8 @@ process.on("exit", () => {
   process.env.USERPROFILE = previousUserProfile;
   if (previousHerdrPaneId === undefined) delete process.env.HERDR_PANE_ID;
   else process.env.HERDR_PANE_ID = previousHerdrPaneId;
+  if (previousHcTerminalId === undefined) delete process.env.HC_TERMINAL_ID;
+  else process.env.HC_TERMINAL_ID = previousHcTerminalId;
   rmSync(sharedHomeDir, { recursive: true, force: true });
 });
 
