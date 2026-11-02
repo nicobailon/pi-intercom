@@ -26,11 +26,26 @@ export interface HerdrClient {
 type SpawnHerdr = (command: string, args: readonly string[], options: { shell: false; windowsHide: true; env: NodeJS.ProcessEnv }) => ChildProcess;
 
 export interface ProjectPaneLaunch {
+  /** Herdr TUI pane id, or herdr-core terminal address under the Herdr app. */
   paneId: string;
   projectRoot: string;
   command: string;
-  herdrVersion: string;
 }
+
+/** Which Herdr hosts this process. The TUI wins when nested inside an app terminal. */
+export type HerdrHost = { kind: "tui"; paneId: string } | { kind: "app"; terminalId: string };
+
+export function currentHerdrHost(env: NodeJS.ProcessEnv = process.env): HerdrHost | undefined {
+  const paneId = env.HERDR_PANE_ID?.trim();
+  if (paneId) return { kind: "tui", paneId };
+  const terminalId = env.HC_TERMINAL_ID?.trim();
+  if (terminalId) return { kind: "app", terminalId };
+  return undefined;
+}
+
+const TUI_MISSING = "Herdr is not installed or is not on PATH. Install Herdr 0.7.5+ or set HERDR_BIN. With the Herdr desktop app, run Pi in a Herdr terminal.";
+const HC_MISSING = "herdr-core's 'hc' is not on PATH. Install the Herdr desktop app (herdr-app with herdr-core).";
+const APP_MISSING = "'herdr-app' is not on PATH. Install the Herdr desktop app.";
 
 export interface ProjectTargetResolution {
   kind: "found" | "missing";
@@ -65,8 +80,9 @@ function normalizeCode(raw: unknown): HerdrErrorCode {
   return "VALIDATION_ERROR";
 }
 
-export function createHerdrClient(options: { bin?: string; spawn?: SpawnHerdr } = {}): HerdrClient {
+export function createHerdrClient(options: { bin?: string; spawn?: SpawnHerdr; missingMessage?: string } = {}): HerdrClient {
   const bin = options.bin ?? process.env.HERDR_BIN ?? "herdr";
+  const missingMessage = options.missingMessage ?? TUI_MISSING;
   const spawnImpl = options.spawn ?? spawn;
   return {
     run<T>(args: string[], runOptions: { timeoutMs?: number; signal?: AbortSignal; textOk?: boolean } = {}): Promise<HerdrResult<T>> {
@@ -77,7 +93,7 @@ export function createHerdrClient(options: { bin?: string; spawn?: SpawnHerdr } 
         } catch (cause) {
           const code = (cause as NodeJS.ErrnoException | undefined)?.code;
           resolveResult(error("HERDR_UNAVAILABLE", code === "ENOENT"
-            ? "Herdr is not installed or is not on PATH. Install Herdr 0.7.5+ or set HERDR_BIN."
+            ? missingMessage
             : `Failed to start Herdr: ${cause instanceof Error ? cause.message : String(cause)}`));
           return;
         }
@@ -109,14 +125,16 @@ export function createHerdrClient(options: { bin?: string; spawn?: SpawnHerdr } 
         child.on("error", (cause) => {
           const code = (cause as NodeJS.ErrnoException).code;
           finish(error("HERDR_UNAVAILABLE", code === "ENOENT"
-            ? "Herdr is not installed or is not on PATH. Install Herdr 0.7.5+ or set HERDR_BIN."
+            ? missingMessage
             : `Failed to run Herdr: ${cause.message}`));
         });
         child.on("close", (exitCode) => {
           const parsed = parseLastJson(stdout) ?? (exitCode === 0 ? undefined : parseLastJson(stderr));
           if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && "error" in parsed) {
-            const raw = (parsed as { error?: { code?: unknown; message?: unknown } }).error;
-            finish(error(normalizeCode(raw?.code), String(raw?.message ?? "Herdr command failed."), raw));
+            // TUI and hc errors are {code|kind, message}; herdr-app's are a bare string.
+            const raw = (parsed as { error?: unknown }).error;
+            const fields = typeof raw === "string" ? { message: raw } : raw as { code?: unknown; kind?: unknown; message?: unknown } | undefined;
+            finish(error(normalizeCode(fields?.code ?? fields?.kind), String(fields?.message ?? "Herdr command failed."), raw));
             return;
           }
           if (exitCode === 0) {
@@ -219,7 +237,19 @@ export function resolveTargetInCwd(input: {
   return { kind: "missing", targetCwd: input.targetCwd, reason: `No intercom session matching "${target}" is connected in ${input.targetCwd}.` };
 }
 
-export async function openProjectPane(input: {
+function projectCommand(): string {
+  return process.env.PI_INTERCOM_PI_BIN?.trim() || process.env.PI_BIN?.trim() || "pi";
+}
+
+/** Open a Pi pane beside this session in whichever Herdr hosts it. */
+export function openProjectPane(input: { cwd: string; focus?: boolean; signal?: AbortSignal }): Promise<ProjectPaneLaunch> {
+  const host = currentHerdrHost();
+  return host?.kind === "app"
+    ? openHerdrAppPane({ ...input, terminalId: host.terminalId })
+    : openHerdrTuiPane(input);
+}
+
+export async function openHerdrTuiPane(input: {
   cwd: string;
   focus?: boolean;
   client?: HerdrClient;
@@ -237,14 +267,61 @@ export async function openProjectPane(input: {
   const paneId = extractPaneId(split.data);
   if (!paneId) throw new Error("Herdr project pane error (PANE_GONE): pane split returned no pane id.");
 
-  const command = process.env.PI_INTERCOM_PI_BIN?.trim() || process.env.PI_BIN?.trim() || "pi";
+  const command = projectCommand();
   const started = await client.run(["pane", "run", paneId, command], { timeoutMs: 15_000, signal: input.signal });
   if (started.ok === false) {
     await client.run(["pane", "close", paneId], { timeoutMs: 5_000 });
     throw new Error(formatHerdrError(started.error));
   }
 
-  return { paneId, projectRoot, command, herdrVersion: detected.data.versionText };
+  return { paneId, projectRoot, command };
+}
+
+/**
+ * Herdr app: start Pi in a herdr-core terminal labeled with the caller's space
+ * and tab, which the window shows as a split beside the caller (the TUI's
+ * `pane split --current --direction right`).
+ */
+export async function openHerdrAppPane(input: {
+  cwd: string;
+  focus?: boolean;
+  terminalId: string;
+  hc?: HerdrClient;
+  app?: HerdrClient;
+  signal?: AbortSignal;
+}): Promise<ProjectPaneLaunch> {
+  const projectRoot = resolveProjectRoot(input.cwd);
+  const hc = input.hc ?? createHerdrClient({ bin: "hc", missingMessage: HC_MISSING });
+  const caller = await hc.run<{ labels?: Record<string, unknown> }>(["get", input.terminalId, "--json"], { timeoutMs: 5_000, signal: input.signal });
+  if (caller.ok === false) throw new Error(formatHerdrError(caller.error));
+  const space = caller.data.labels?.["herdr.space"];
+  const tab = caller.data.labels?.["herdr.tab"];
+  if (typeof space !== "string" || typeof tab !== "string") {
+    throw new Error(`Herdr project pane error (NOT_FOUND): terminal ${input.terminalId} is not shown in the Herdr window (no herdr.space/herdr.tab labels).`);
+  }
+
+  const command = projectCommand();
+  // --no-parent: the peer must outlive the caller. --keep: a shell stays in the pane when Pi exits, as in the TUI.
+  const started = await hc.run<{ address?: unknown }>([
+    "run", "--bg", "--json", "--no-parent", "--keep", "--cwd", projectRoot,
+    "--label", `herdr.space=${space}`, "--label", `herdr.tab=${tab}`, "--", command,
+  ], { timeoutMs: 15_000, signal: input.signal });
+  if (started.ok === false) throw new Error(formatHerdrError(started.error));
+  const terminal = started.data.address;
+  if (typeof terminal !== "string") throw new Error("Herdr project pane error (PANE_GONE): hc run returned no terminal address.");
+
+  if (input.focus !== false) {
+    // Focus is cosmetic: the terminal already runs, so a missing or closed window must not fail the launch.
+    // The window picks up a new labeled terminal shortly after hc run returns: retry for up to ~2s.
+    const app = input.app ?? createHerdrClient({ bin: "herdr-app", missingMessage: APP_MISSING });
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const focused = await app.run(["do", "pane.focus", "--terminal", terminal], { timeoutMs: 5_000, signal: input.signal });
+      if (focused.ok || focused.error.code === "HERDR_UNAVAILABLE" || input.signal?.aborted) break;
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+    }
+  }
+
+  return { paneId: terminal, projectRoot, command };
 }
 
 export async function waitForProjectSession(client: ListSessionsClient, input: {

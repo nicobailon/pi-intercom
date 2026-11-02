@@ -4,10 +4,13 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
-  openProjectPane,
+  currentHerdrHost,
+  openHerdrAppPane,
+  openHerdrTuiPane,
   resolveTargetInCwd,
   waitForProjectSession,
   type HerdrClient,
+  type HerdrResult,
 } from "./project-agent.ts";
 import type { SessionInfo } from "./types.ts";
 
@@ -69,7 +72,7 @@ test("resolveTargetInCwd scopes names to the requested cwd", () => {
   assert.equal(resolved.session?.id, "worker-a");
 });
 
-test("openProjectPane opens a Herdr pane and runs pi in the project", async () => {
+test("openHerdrTuiPane opens a Herdr pane and runs pi in the project", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-intercom-project-pane-"));
   const project = join(root, "project");
   mkdirSync(project);
@@ -85,12 +88,61 @@ test("openProjectPane opens a Herdr pane and runs pi in the project", async () =
   };
 
   try {
-    const launched = await openProjectPane({ cwd: project, focus: false, client });
+    const launched = await openHerdrTuiPane({ cwd: project, focus: false, client });
 
     assert.equal(launched.paneId, "pane-1");
-    assert.equal(launched.herdrVersion, "herdr 0.7.5");
     assert.deepEqual(calls[1], ["pane", "split", "--current", "--direction", "right", "--cwd", launched.projectRoot]);
     assert.deepEqual(calls[2], ["pane", "run", "pane-1", "pi"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("currentHerdrHost tells the Herdr TUI from the Herdr app, TUI first", () => {
+  assert.deepEqual(currentHerdrHost({ HERDR_PANE_ID: "p1", HC_TERMINAL_ID: "t3" }), { kind: "tui", paneId: "p1" });
+  assert.deepEqual(currentHerdrHost({ HC_TERMINAL_ID: "t3" }), { kind: "app", terminalId: "t3" });
+  assert.equal(currentHerdrHost({}), undefined);
+});
+
+function recordingClient(reply: (args: string[]) => HerdrResult<unknown>): HerdrClient & { calls: string[][] } {
+  const calls: string[][] = [];
+  return { calls, async run<T>(args: string[]) { calls.push(args); return reply(args) as HerdrResult<T>; } };
+}
+
+test("openHerdrAppPane starts pi beside the caller's terminal and focuses it", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-intercom-app-pane-"));
+  const hc = recordingClient((args) => args[0] === "get"
+    ? { ok: true, data: { labels: { "herdr.space": "sp1", "herdr.tab": "tb1", where: "api / 1" } } }
+    : { ok: true, data: { address: "t9" } });
+  // The window shows a new terminal shortly after hc run returns, so the first focus misses.
+  const app = recordingClient(() => app.calls.length === 1
+    ? { ok: false, error: { code: "VALIDATION_ERROR", message: "no such pane" } }
+    : { ok: true, data: {} });
+
+  try {
+    const launched = await openHerdrAppPane({ cwd: root, terminalId: "t3", hc, app });
+
+    assert.equal(launched.paneId, "t9");
+    assert.deepEqual(hc.calls, [
+      ["get", "t3", "--json"],
+      ["run", "--bg", "--json", "--no-parent", "--keep", "--cwd", launched.projectRoot, "--label", "herdr.space=sp1", "--label", "herdr.tab=tb1", "--", "pi"],
+    ]);
+    assert.deepEqual(app.calls, [["do", "pane.focus", "--terminal", "t9"], ["do", "pane.focus", "--terminal", "t9"]]);
+
+    app.calls.length = 0;
+    await openHerdrAppPane({ cwd: root, terminalId: "t3", focus: false, hc, app });
+    assert.deepEqual(app.calls, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("openHerdrAppPane refuses a caller terminal the window does not show", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-intercom-app-pane-"));
+  const hc = recordingClient(() => ({ ok: true, data: { labels: {} } }));
+  try {
+    await assert.rejects(openHerdrAppPane({ cwd: root, terminalId: "t3", hc }), /not shown in the Herdr window/);
+    assert.equal(hc.calls.length, 1);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

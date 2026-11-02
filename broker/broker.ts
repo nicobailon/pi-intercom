@@ -568,6 +568,7 @@ class IntercomBroker {
           ...(session.status !== undefined ? { status: session.status } : {}),
           ...(session.tmuxPane !== undefined ? { tmuxPane: session.tmuxPane } : {}),
           ...(session.herdrPaneId !== undefined ? { herdrPaneId: session.herdrPaneId } : {}),
+          ...(session.herdrTerminalId !== undefined ? { herdrTerminalId: session.herdrTerminalId } : {}),
           trustedLocal: typeof LISTEN_TARGET === "string" && process.platform !== "win32",
         };
 
@@ -707,12 +708,15 @@ class IntercomBroker {
           .then((resolvedSessions) => writeMessage(socket, { type: "sessions", requestId, sessions: resolvedSessions }))
           .catch((cause) => {
             const detail = cause instanceof Error ? cause.message : String(cause);
-            const fallback = sessions.map((session) => ({
-              ...session,
-              herdrLocation: session.herdrPaneId
-                ? { status: "unavailable" as const, paneId: session.herdrPaneId, reason: "command_failed" as const, detail }
-                : { status: "not_hosted" as const },
-            }));
+            const fallback = sessions.map((session) => {
+              const paneId = session.herdrPaneId ?? session.herdrTerminalId;
+              return {
+                ...session,
+                herdrLocation: paneId
+                  ? { status: "unavailable" as const, paneId, reason: "command_failed" as const, detail }
+                  : { status: "not_hosted" as const },
+              };
+            });
             writeMessage(socket, { type: "sessions", requestId, sessions: fallback });
           });
         break;

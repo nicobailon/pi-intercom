@@ -150,6 +150,18 @@ test("matches the live Herdr snapshot contract when running under Herdr", {
   }
 });
 
+test("matches the live herdr-app ls contract when running in a Herdr app terminal", {
+  skip: !process.env.HC_TERMINAL_ID,
+}, async () => {
+  const [resolved] = await resolveHerdrLocations([{ ...session("live"), herdrTerminalId: process.env.HC_TERMINAL_ID! }]);
+  assert.equal(resolved!.herdrLocation?.status, "current", JSON.stringify(resolved!.herdrLocation));
+  if (resolved!.herdrLocation?.status === "current") {
+    assert.ok(resolved.herdrLocation.workspace.label);
+    assert.ok(resolved.herdrLocation.tab.label);
+    assert.ok(resolved.herdrLocation.paneId);
+  }
+});
+
 test("preserves list data and marks location unavailable when the Herdr command fails", async () => {
   const herdr = client([{ ok: false, error: { code: "HERDR_UNAVAILABLE", message: "missing binary" } }]);
   const inputs = [session("hosted", "pane-1"), session("shell")];
@@ -163,4 +175,61 @@ test("preserves list data and marks location unavailable when the Herdr command 
     detail: "missing binary",
   });
   assert.deepEqual(resolved[1]!.herdrLocation, { status: "not_hosted" });
+});
+
+function appSession(id: string, herdrTerminalId: string): SessionInfo {
+  return { ...session(id), herdrTerminalId };
+}
+
+const appLs = {
+  spaces: [{
+    id: "sp1",
+    name: "api",
+    tabs: [{ id: "tb1", name: "1", terminals: [{ terminal: "t3", pane: "p-a" }, { terminal: "t4", pane: "p-b" }] }],
+  }],
+};
+
+test("resolves Herdr app terminals from one herdr-app ls", async () => {
+  const tui = client([]);
+  const app = client([{ ok: true, data: appLs }]);
+  const resolved = await resolveHerdrLocations(
+    [appSession("hosted", "t3"), appSession("gone", "t9"), session("shell")],
+    { client: tui, appClient: app, now: () => 7 },
+  );
+
+  assert.deepEqual(tui.calls, []);
+  assert.deepEqual(app.calls, [["ls"]]);
+  assert.deepEqual(resolved[0]!.herdrLocation, {
+    status: "current",
+    workspace: { id: "sp1", label: "api" },
+    tab: { id: "tb1", label: "1" },
+    paneId: "p-a",
+    refreshedAt: 7,
+  });
+  assert.deepEqual(resolved[1]!.herdrLocation, {
+    status: "unavailable",
+    paneId: "t9",
+    reason: "pane_missing",
+    detail: "The hosted Pi terminal is not shown in the Herdr window.",
+  });
+  assert.deepEqual(resolved[2]!.herdrLocation, { status: "not_hosted" });
+});
+
+test("resolves TUI panes and Herdr app terminals side by side", async () => {
+  const tui = client([{ ok: true, data: snapshot("workspace-1", "Platform", "tab-1", "API") }]);
+  const app = client([{ ok: true, data: appLs }]);
+  const resolved = await resolveHerdrLocations(
+    [session("tui", "pane-1"), appSession("app", "t4")],
+    { client: tui, appClient: app },
+  );
+
+  assert.equal(resolved[0]!.herdrLocation?.status === "current" && resolved[0]!.herdrLocation.workspace.id, "workspace-1");
+  assert.equal(resolved[1]!.herdrLocation?.status === "current" && resolved[1]!.herdrLocation.paneId, "p-b");
+});
+
+test("marks Herdr app terminals unavailable when the window cannot be read", async () => {
+  const app = client([{ ok: false, error: { code: "VALIDATION_ERROR", message: "no window" } }]);
+  const [resolved] = await resolveHerdrLocations([appSession("hosted", "t3")], { appClient: app });
+
+  assert.deepEqual(resolved!.herdrLocation, { status: "unavailable", paneId: "t3", reason: "command_failed", detail: "no window" });
 });
