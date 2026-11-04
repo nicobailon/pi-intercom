@@ -224,6 +224,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
       const envelope = relayEnvelope!;
       const result = await deps.client.send(envelope.target, {
         text: relayMessage(envelope),
+        noWake: false,
         crossMachine: {
           type: "ssh-relay",
           version: 1,
@@ -250,7 +251,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
           return reportFailure(`explicit cross-machine delivery failed: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
-      const result = await deps.client.send(opts.to as string, { text: opts.text as string, ...(opts.noWake ? { noWake: true } : {}) });
+      const result = await deps.client.send(opts.to as string, { text: opts.text as string, noWake: opts.noWake });
       if (!result.delivered) {
         return reportFailure(`delivery failed: ${result.reason ?? "unknown reason"}`);
       }

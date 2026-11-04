@@ -31,7 +31,7 @@ export function setIntercomScopeId(scopeId: string | undefined): void {
   else delete process.env[INTERCOM_SCOPE_ID_ENV];
 }
 
-export type InboundTriggerPolicy = "always" | "replies" | "never";
+export type InboundTriggerPolicy = "always" | "requests" | "replies" | "never";
 export type BusyDeliveryPolicy = "steer" | "human-first";
 
 export interface CrossMachineConfig {
@@ -53,6 +53,9 @@ export interface IntercomConfig {
 
   /** Controls whether inbound broker messages may automatically trigger a model turn */
   inboundTrigger: InboundTriggerPolicy;
+
+  /** Default model-tool sends to passive delivery; explicit noWake:false and handovers still wake. */
+  defaultNoWake: boolean;
 
   /** Delivery priority for peers arriving during interactive agent runs */
   busyDelivery: BusyDeliveryPolicy;
@@ -82,6 +85,7 @@ const defaults: IntercomConfig = {
   brokerArgs: ["--no-install", "tsx"],
   confirmSend: false,
   inboundTrigger: "always",
+  defaultNoWake: false,
   busyDelivery: "steer",
   enabled: true,
   replyHint: true,
@@ -142,6 +146,11 @@ export function loadConfig(): IntercomConfig {
       config.confirmSend = parsedConfig.confirmSend;
     }
 
+    if (Object.hasOwn(parsedConfig, "defaultNoWake")) {
+      if (typeof parsedConfig.defaultNoWake !== "boolean") throw new Error(`"defaultNoWake" must be a boolean`);
+      config.defaultNoWake = parsedConfig.defaultNoWake;
+    }
+
     if (Object.hasOwn(parsedConfig, "enabled")) {
       if (typeof parsedConfig.enabled !== "boolean") {
         throw new Error(`"enabled" must be a boolean`);
@@ -152,10 +161,11 @@ export function loadConfig(): IntercomConfig {
     if (Object.hasOwn(parsedConfig, "inboundTrigger")) {
       if (
         parsedConfig.inboundTrigger !== "always"
+        && parsedConfig.inboundTrigger !== "requests"
         && parsedConfig.inboundTrigger !== "replies"
         && parsedConfig.inboundTrigger !== "never"
       ) {
-        throw new Error(`"inboundTrigger" must be "always", "replies", or "never"`);
+        throw new Error(`"inboundTrigger" must be "always", "requests", "replies", or "never"`);
       }
       config.inboundTrigger = parsedConfig.inboundTrigger;
     }

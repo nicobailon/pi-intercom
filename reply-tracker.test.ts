@@ -38,6 +38,14 @@ test("reply resolves from current triggered message context", () => {
   assert.equal(tracker.resolveReplyTarget({}, 1002).from.id, "planner-id");
 });
 
+test("an informational message is not a reply target or permission to introduce another peer", () => {
+  const tracker = new ReplyTracker(); const from = createSession("peer-id", "peer"); const context = tracker.recordIncomingMessage(from, createMessage("info", "Done; no response needed", false), 1000);
+  tracker.queueTurnContext(context); tracker.beginTurn(1001);
+  assert.throws(() => tracker.resolveReplyTarget({}, 1002), /No active intercom context/);
+  assert.equal(tracker.findActiveReplyTargetMismatch("third-peer", 1002)?.message.id, "info");
+  assert.equal(tracker.findActiveReplyTargetMismatch("peer-id", 1002), null);
+});
+
 test("reply resolves from single pending ask without current turn context", () => {
   const tracker = new ReplyTracker();
   tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "Need a decision"), 1000);

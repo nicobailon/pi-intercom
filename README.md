@@ -145,7 +145,7 @@ See auth.ts:142-156.
 
 The reply hint (enabled by default) points to `intercom({ action: "reply", ... })`, so recipients do not need raw sender or `replyTo` IDs. Idle recipients get a new turn immediately; by default busy interactive recipients enter Pi's steering queue at the next safe model boundary without aborting the run. With `busyDelivery: "human-first"`, busy interactive peers wait outside Pi's queues: one FIFO peer is steered per turn when no human message is pending. If the run ends first, the idle flush releases one via the normal `inboundTrigger` policy; remaining peers wait for later turns. Sustained human input can delay peers. Busy non-UI sessions retain their auto-reply behavior. Attachment content is included in the agent-visible body, and messages are rendered inline and stored in Pi session history.
 
-A sender can mark a `send` as information only with `noWake: true` (`--no-wake` in the CLI). An idle recipient then gets the message in its transcript without starting a turn, and the model reads it with the recipient's next turn. Busy recipients get it the same way as any other message. Asks and replies, including a `send` that answers a pending ask, always wake the recipient, and `inboundTrigger: "replies"` or `"never"` still applies as configured.
+A sender can mark a `send` as information only with `noWake: true` (`--no-wake` in the CLI). An idle recipient then gets the message in its transcript without starting a turn, and the model reads it with the recipient's next turn. On Pi 1.4 and newer, busy recipients append it without steering or scheduling another turn. Older Pi versions hold it until idle. Answers to a waiting ask are consumed by that waiter. Other messages follow the receiver's `inboundTrigger` policy. A reply is not a new task or a request for an acknowledgment.
 
 In fullscreen mode, a plain left-click anywhere on an intercom message expands or collapses just that message; click again to undo. Only the display changes, not the message content, what the model sees, or session history. Dragging to select text, clicking links, wheel scrolling, and double- or triple-click word and line selection keep working and do not toggle the message, though the first click of a rapid double-click can. Regular mode leaves mouse input to the terminal.
 
@@ -205,15 +205,17 @@ intercom({
 // → Reply from planner: Yes, surface the error types. The current behavior is a bug.
 ```
 
-**Worker reports completion:**
+**Worker reports a needed result without requesting another assignment:**
 ```typescript
 intercom({
-  action: "ask",
+  action: "send",
   to: "planner",
+  noWake: true,
   message: "Task-3 done. Added RetryPolicy type, applied to GET/PUT/DELETE, surfaced NetworkError, 4 tests passing."
 })
-// → Reply from planner: Looks good. Move on to task-4.
 ```
+
+Delegated pi-subagents children return their normal result instead of sending a duplicate completion message.
 
 ### Communication Patterns
 
@@ -222,7 +224,7 @@ intercom({
 | **Task Delegation** | Planner uses `send` | Fire-and-forget. Planner doesn't need to wait for an ack. |
 | **Clarification Request** | Worker uses `ask` | Worker needs the answer to proceed. Blocks until reply. |
 | **Discovery Escalation** | Worker uses `ask` | Worker needs approval before changing course. |
-| **Completion Report** | Worker uses `ask` | Planner might have follow-up instructions or the next task. |
+| **Completion Report** | Worker uses passive `send` only when needed | Report the result once; do not ask for more work or an acknowledgment. |
 
 ### Reply Hints
 
@@ -265,7 +267,7 @@ Pi sessions promise these receipts when they register (`acknowledgesReceipts: tr
 
 Cancellation is explicit: call `intercom({ action: "cancel", messageId })` to request cancellation of a message you originally sent. A held message is dropped with `cancelled`; an already-injected message reports `cancellation_requested` rather than pretending it removed work from Pi's queues. Supersede is also explicit: pass `supersedes: "old-message-id"` on a new `send` or `ask`. The broker only allows same sender → same receiver supersedes, marks the old message `superseded`, and sends the replacement with a new ID; a held old message is dropped, while an already-steered one may still be processed. Retries are never automatic; a retry should be a new authored message, optionally linked with `retryOf`.
 
-The planner typically uses `send`. If you prefer manual approval for outgoing non-reply messages, turn on `confirmSend: true`. The worker uses `ask` for everything (no confirmation needed, gets answers inline), so it can operate autonomously either way.
+The planner typically uses `send`. If you prefer manual approval for outgoing non-reply messages, turn on `confirmSend: true`. Use `ask` only for a concrete answer needed to continue the authorized task, never for routine progress, completion reports, or permission from a peer the user did not appoint.
 
 ### Ask timeouts and liveness
 
@@ -449,7 +451,7 @@ Only registered in sessions where `pi-subagents` supplied the required child bri
 
 **`handover`** — Summarizes the current session with the current model and sends the summary to the target, which acts on it. `message` is the optional next task. Targeting, confirmation, and delivery work exactly like `send`, including `name@machine` targets. `replyTo`, `supersedes`, `retryOf`, and `attachments` are rejected. See [Workflow: Handing Over a Session](#workflow-handing-over-a-session).
 
-**`reply`** — Replies to the current intercom-triggered message if there is one. Otherwise it falls back to the single unresolved inbound ask. If multiple asks are pending, pass `to` or inspect them with `pending` first. Under the hood this is still a normal `send` with the exact `replyTo` value. If the ask is no longer open at the broker (it expired, was cancelled, or was already answered), the reply is still delivered as an ordinary message marked as a late reply, as long as neither session has reconnected since the ask, the broker has not restarted, and the ask was sent within the last hour. It does not complete the asker's waiting `ask`. Otherwise `reply` fails with `E_REPLY_TARGET` and says to deliver the content with `send`.
+**`reply`** — Answers an unresolved inbound ask. An informational message or completed reply is not a reply target. Otherwise it falls back to the single unresolved inbound ask. If multiple asks are pending, pass `to` or inspect them with `pending` first. Under the hood this is still a normal `send` with the exact `replyTo` value. If the ask is no longer open at the broker (it expired, was cancelled, or was already answered), the reply is still delivered as an ordinary message marked as a late reply, as long as neither session has reconnected since the ask, the broker has not restarted, and the ask was sent within the last hour. It does not complete the asker's waiting `ask`. Otherwise `reply` fails with `E_REPLY_TARGET` and says to deliver the content with `send`.
 
 **`pending`** — Lists unresolved inbound asks with sender, message ID, elapsed time, and a short preview. Useful when replying after the original triggered turn.
 
@@ -493,7 +495,8 @@ Create `~/.pi/agent/intercom/config.json`:
 | `brokerCommand` | `"npx"` | Advanced trusted override for the broker executable. The default value is hardened internally to run the broker in the current Node executable with the resolved bundled `tsx` loader instead of resolving `npx` through `PATH`. A custom command is spawned directly without a shell, so on Windows it must name an executable such as `bun`, not a `.cmd` shim such as `npx`. |
 | `brokerArgs` | `["--no-install", "tsx"]` | Advanced trusted arguments passed to custom `brokerCommand` before the broker script path |
 | `confirmSend` | false | Show a confirmation dialog before ordinary or inferred sends from an interactive session with UI; caller-supplied `replyTo` skips it |
-| `inboundTrigger` | `"always"` | Auto-trigger policy for inbound broker messages: `"always"`, `"replies"`, or `"never"`. Local in-process subagent relay events still trigger the addressed session. |
+| `inboundTrigger` | `"always"` | Auto-trigger policy: `"always"`, `"requests"` (asks and explicit `noWake:false` tasks), `"replies"`, or `"never"`. Passive messages do not steer busy runs. Local in-process subagent relay events still trigger the addressed session. |
+| `defaultNoWake` | false | Make ordinary model-tool `send` calls passive by default. Explicit `noWake:false`, handovers, human-composed messages and CLI sends can still wake; answers to waiting asks remain deliverable. |
 | `busyDelivery` | `"steer"` | `"steer"` promptly steers peers into active interactive runs. Opt into `"human-first"` to hold peers until a turn boundary with no pending human input; one held peer is released per turn. Non-interactive busy behavior is unchanged. |
 | `enabled` | true | Enable/disable intercom entirely |
 | `replyHint` | true | Include reply instruction in incoming messages |
@@ -502,6 +505,20 @@ Create `~/.pi/agent/intercom/config.json`:
 | `crossMachine.remoteCommand` | `"pi-intercom"` | Command invoked through non-interactive SSH on remote machines |
 
 If `config.json` cannot be parsed or contains an invalid value, pi-intercom logs the error and fails closed for inbound broker auto-triggering by using `inboundTrigger: "never"` until the config is fixed.
+For quiet coordination, use:
+
+```json
+{ "inboundTrigger": "requests", "defaultNoWake": true, "busyDelivery": "human-first" }
+```
+
+Informational sends then enter the transcript without starting work. Use `noWake:false`
+only for an explicitly requested task or actionable handoff, and `ask` only when
+blocked on a real answer. A connected peer or shared directory does not establish
+a task dependency or an approval authority. Batch findings rather than sending
+separate progress reports. New peer messages are context, not operator instructions.
+Defaults remain compatible with existing installations; restart or reload sessions
+to pick up a configuration change.
+
 Obsolete `toolVisibility` values are ignored; the generic `intercom` tool remains stable in the active tool set for prompt-cache friendliness.
 
 Custom broker commands are trusted local configuration: anyone who can edit this config can choose the executable used for future broker auto-spawns. For example, if you have Bun installed and want it to start the broker directly, use:
@@ -688,7 +705,7 @@ Runtime files live at `~/.pi/agent/intercom/` by default, or `$PI_CODING_AGENT_D
 - `broker.port.json` — Dynamic localhost TCP endpoint, only when Windows TCP transport is explicitly enabled
 - `config.json` — User configuration
 
-Supported `config.json` keys include `stableId` for restart-stable addressing, `status` for a custom status suffix, `inboundTrigger` (`always`, `replies`, or `never`), `busyDelivery` (`steer` or `human-first`), `replyHint`, `confirmSend`, and advanced broker launch overrides.
+Supported `config.json` keys include `stableId` for restart-stable addressing, `status` for a custom status suffix, `inboundTrigger` (`always`, `requests`, `replies`, or `never`), `defaultNoWake`, `busyDelivery` (`steer` or `human-first`), `replyHint`, `confirmSend`, and advanced broker launch overrides.
 
 ## Design Decisions
 
