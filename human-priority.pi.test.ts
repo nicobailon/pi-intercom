@@ -487,3 +487,18 @@ test("held peers expire on session shutdown instead of being injected later", { 
     await fixture.cleanup();
   }
 });
+
+test("passive information never creates another model call in busy or idle Pi", { concurrency: false }, async () => {
+  const fixture = await setupFixture(); const worker = await fixture.createWorker("passive-pi-worker");
+  try {
+    const target = await fixture.waitForSession("passive-pi-worker");
+    const run = worker.session.prompt("Finish this bounded task"); await worker.waitForModelCall(1);
+    await fixture.planner.send(target.id, { messageId: "busy-info", text: "PASSIVE_BUSY_INFORMATION", noWake: true });
+    await fixture.waitForReceipt("busy-info", "acknowledged"); worker.releaseModel(); await run; await worker.waitForSettled(1); await fixture.waitForReceipt("busy-info", "injected");
+    assert.equal(worker.modelCalls(), 1);
+    await fixture.planner.send(target.id, { messageId: "idle-info", text: "PASSIVE_IDLE_INFORMATION", noWake: true }); await fixture.waitForReceipt("idle-info", "injected"); await new Promise(resolve => setTimeout(resolve, 100)); assert.equal(worker.modelCalls(), 1);
+    const next = worker.session.prompt("Read the accumulated information now"); await worker.waitForModelCall(2);
+    assert.ok(worker.modelInputs.some(input => input.text.includes("PASSIVE_BUSY_INFORMATION"))); assert.ok(worker.modelInputs.some(input => input.text.includes("PASSIVE_IDLE_INFORMATION")));
+    worker.releaseModel(); await next;
+  } finally { await worker.shutdown(); await fixture.cleanup(); }
+});

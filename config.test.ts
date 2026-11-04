@@ -41,6 +41,7 @@ test("loadConfig defaults inboundTrigger to current auto-trigger behavior", asyn
   try {
     await withAgentDir(root, () => {
       assert.equal(loadConfig().inboundTrigger, "always");
+      assert.equal(loadConfig().defaultNoWake, false);
       assert.equal(loadConfig().busyDelivery, "steer");
     });
   } finally {
@@ -94,6 +95,18 @@ test("loadConfig accepts inboundTrigger replies policy", async () => {
   }
 });
 
+test("loadConfig accepts quiet request delivery and validates passive send defaults", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-intercom-config-"));
+  try {
+    mkdirSync(join(root, "intercom"), { recursive: true });
+    const file = join(root, "intercom", "config.json");
+    writeFileSync(file, JSON.stringify({ inboundTrigger: "requests", defaultNoWake: true }));
+    await withAgentDir(root, () => { assert.equal(loadConfig().inboundTrigger, "requests"); assert.equal(loadConfig().defaultNoWake, true); });
+    writeFileSync(file, JSON.stringify({ defaultNoWake: "true" }));
+    await withAgentDir(root, () => assert.throws(() => loadConfig(), /defaultNoWake.*boolean/));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("loadConfig ignores obsolete toolVisibility values", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-intercom-config-"));
   try {
@@ -129,7 +142,7 @@ test("loadConfig rejects invalid inboundTrigger values", async () => {
     await withAgentDir(root, () => {
       assert.throws(
         () => loadConfig(),
-        /Failed to load intercom config.*"inboundTrigger" must be "always", "replies", or "never"/,
+        /Failed to load intercom config.*"inboundTrigger" must be "always", "requests", "replies", or "never"/,
       );
     });
   } finally {

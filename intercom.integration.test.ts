@@ -2973,6 +2973,41 @@ test("on Pi 1.2.0 and newer, idle sessions wake through triggerTurn without a wa
   }
 });
 
+test("quiet policy makes information passive, preserves asks and explicit task wakes", { concurrency: false }, async () => {
+  const { default: extension } = await import("./index.ts");
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const harness = createExtensionHarness("quiet-worker", { hasUI: true, isIdle: () => true });
+  try {
+    await withIntercomConfig({ inboundTrigger: "requests", defaultNoWake: true, busyDelivery: "human-first" }, async () => {
+      extension(harness.pi as never, "1.4.0"); await harness.emitLifecycle("session_start");
+      const worker = await waitForSessionByName(planner, "quiet-worker");
+      await planner.send(worker.id, { text: "FYI: saved the report" }); await waitForCondition(() => harness.sentMessages.length === 1, "passive information");
+      assert.deepEqual(harness.sentMessages[0]?.options, { triggerTurn: false }); assert.match(harness.sentMessages[0]?.message.content ?? "", /not an operator instruction or approval/);
+      await harness.emitLifecycle("turn_start");
+      const tool = harness.tools.find(t => t.name === "intercom")!;
+      const reply = await tool.execute("unsolicited-reply", { action: "reply", message: "Thanks" }, new AbortController().signal, undefined, harness.ctx); assert.equal(reply.details?.error, true);
+      for (const override of [undefined, false]) {
+        const received = once(orchestrator, "message") as Promise<[SessionInfo, Message]>;
+        const sent = await tool.execute("quiet-send", { action: "send", to: "orchestrator", message: "Information", ...(override === undefined ? {} : { noWake: override }) }, new AbortController().signal, undefined, harness.ctx);
+        assert.notEqual(sent.details?.error, true); assert.equal((await received)[1].noWake, override === undefined ? true : false);
+      }
+      await planner.send(worker.id, { text: "The user requested this handoff", noWake: false }); await waitForCondition(() => harness.sentMessages.length === 2, "explicit wake"); assert.deepEqual(harness.sentMessages[1]?.options, { triggerTurn: true });
+      await planner.send(worker.id, { text: "Which test failed?", expectsReply: true }); await waitForCondition(() => harness.sentMessages.length === 3, "blocking question"); assert.deepEqual(harness.sentMessages[2]?.options, { triggerTurn: true });
+    });
+  } finally { await harness.emitLifecycle("session_shutdown"); await cleanup(); }
+});
+
+test("passive busy messages never steer or generate automatic busy replies", { concurrency: false }, async () => {
+  const { default: extension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients(); const harness = createExtensionHarness("quiet-busy", { hasUI: false, isIdle: () => false }); const replies: Message[] = []; planner.on("message", (_from, message) => replies.push(message));
+  try {
+    await withIntercomConfig({ inboundTrigger: "requests", busyDelivery: "human-first" }, async () => {
+      extension(harness.pi as never, "1.4.0"); await harness.emitLifecycle("session_start"); await harness.emitLifecycle("agent_start"); const worker = await waitForSessionByName(planner, "quiet-busy");
+      await planner.send(worker.id, { text: "FYI", noWake: true }); await waitForCondition(() => harness.sentMessages.length === 1, "passive busy delivery"); assert.deepEqual(harness.sentMessages[0]?.options, { triggerTurn: false }); await new Promise(resolve => setTimeout(resolve, 50)); assert.equal(replies.length, 0);
+    });
+  } finally { await harness.emitLifecycle("session_shutdown"); await cleanup(); }
+});
+
 test("a noWake send reaches an idle session without starting a turn", { concurrency: false }, async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const { planner, orchestrator, cleanup } = await setupClients();
@@ -2986,7 +3021,7 @@ test("a noWake send reaches an idle session without starting a turn", { concurre
 
     assert.equal((await planner.send(worker.id, { text: "Paused the job, no reply needed", noWake: true })).delivered, true);
     await waitForCondition(() => harness.sentMessages.length === 1, "no-wake message");
-    assert.deepEqual(harness.sentMessages[0]?.options, { deliverAs: "steer" });
+    assert.deepEqual(harness.sentMessages[0]?.options, { triggerTurn: false });
     assert.match(harness.sentMessages[0]?.message.content ?? "", /sent without waking you/);
     assert.deepEqual(harness.userMessages, []);
 
@@ -2998,7 +3033,7 @@ test("a noWake send reaches an idle session without starting a turn", { concurre
       const received = once(orchestrator, "message") as Promise<[SessionInfo, Message]>;
       const result = await intercomTool.execute(`no-wake-${noWake}`, { action: "send", to: "orchestrator", message: "fyi", noWake }, new AbortController().signal, undefined, harness.ctx);
       assert.notEqual(result.details?.error, true);
-      assert.equal((await received)[1].noWake, noWake ? true : undefined);
+      assert.equal((await received)[1].noWake, noWake);
     }
   } finally {
     await harness.emitLifecycle("session_shutdown");

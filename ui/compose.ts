@@ -82,6 +82,7 @@ export class ComposeOverlay implements Component {
     try {
       const result = await this.client.send(this.target.id, {
         text: this.inputBuffer.trim(),
+        noWake: false,
       });
       
       if (!result.delivered) {

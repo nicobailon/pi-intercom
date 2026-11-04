@@ -106,7 +106,7 @@ export class ReplyTracker {
       return resolvePendingSender(pending, options.to);
     }
 
-    if (this.currentTurnContext) {
+    if (this.currentTurnContext?.message.expectsReply) {
       return this.currentTurnContext;
     }
 
@@ -132,7 +132,7 @@ export class ReplyTracker {
 
   findActiveReplyTargetMismatch(to: string, now = Date.now()): IntercomContext | null {
     this.pruneExpired(now);
-    if (!this.currentTurnContext?.message.expectsReply) {
+    if (!this.currentTurnContext) {
       return null;
     }
     return this.currentTurnContext.from.id === to ? null : this.currentTurnContext;
