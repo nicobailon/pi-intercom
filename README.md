@@ -86,7 +86,7 @@ Press **h** on a highlighted session to hand this session over to it instead (se
 
 ### From the Agent
 
-The agent can list sessions and send messages using the `intercom` tool. Tool calls and results render as compact transcript rows so send/ask/reply flows are easy to scan. Use `/intercom-id` to insert a handoff snippet for the current session's stable intercom target into the editor. For common patterns like planner-worker delegation, the bundled `pi-intercom` skill provides copy-paste ready examples:
+The agent can list sessions and send messages using the `intercom` tool. Tool calls and results render as compact transcript rows so send/ask/reply flows are easy to scan. Once a local recipient is resolved, its session name appears in confirmations, call headings, and results even when addressed by ID. Duplicate names include a distinguishing ID prefix; unnamed recipients fall back to their ID and unresolved targets remain as supplied. Saved results retain the resolved label for later transcript rendering without a live lookup. Use `/intercom-id` to insert a handoff snippet for the current session's stable intercom target into the editor. For common patterns like planner-worker delegation, the bundled `pi-intercom` skill provides copy-paste ready examples:
 
 ```typescript
 // List active sessions

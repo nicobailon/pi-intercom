@@ -625,13 +625,19 @@ function currentHerdrPane(): string | undefined {
 function formatIntercomContactSnippet(sessionId: string): string {
   return `Use pi-intercom: intercom({ action: "send", to: "${sessionId}", message: "..." })`;
 }
-function formatSessionLabel(session: SessionInfo, duplicates: Set<string>): string {
+function formatSessionLabel(session: SessionInfo, duplicates: Set<string>, idPrefix = session.id.slice(0, 8)): string {
   if (!session.name) {
     return session.id;
   }
   return duplicates.has(session.name.toLowerCase())
-    ? `${session.name} (${session.id.slice(0, 8)})`
+    ? `${session.name} (${idPrefix})`
     : session.name;
+}
+function sessionDeliveryTarget(session: SessionInfo, sessions: SessionInfo[]): DeliveryTarget {
+  return {
+    id: session.id,
+    label: formatSessionLabel(session, duplicateSessionNames(sessions), sessionIdPrefixes(sessions).get(session.id)),
+  };
 }
 function formatHerdrLocation(session: SessionInfo): string {
   const location = session.herdrLocation;
@@ -1682,11 +1688,11 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     reconnectPromiseGeneration = generationAtStart;
     return nextReconnectPromise;
   }
-  async function resolveSessionTarget(activeClient: IntercomClient, nameOrId: string): Promise<string | null> {
+  async function resolveSessionTarget(activeClient: IntercomClient, nameOrId: string): Promise<DeliveryTarget | null> {
     const sessions = await activeClient.listSessions();
     const byId = sessions.find(s => s.id === nameOrId);
     if (byId) {
-      return byId.id;
+      return sessionDeliveryTarget(byId, sessions);
     }
     const lowerName = nameOrId.toLowerCase();
     const byName = sessions.filter(s => s.name?.toLowerCase() === lowerName);
@@ -1696,12 +1702,12 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
       throw new Error(`Multiple sessions named "${nameOrId}" are connected. Address one by the id shown in parentheses by "list" (${ids}).`);
     }
     if (byName.length === 1) {
-      return byName[0]!.id;
+      return sessionDeliveryTarget(byName[0]!, sessions);
     }
 
     const byIdPrefix = sessions.filter(s => s.id.startsWith(nameOrId));
     if (byIdPrefix.length === 1) {
-      return byIdPrefix[0]!.id;
+      return sessionDeliveryTarget(byIdPrefix[0]!, sessions);
     }
     if (byIdPrefix.length > 1) {
       throw new Error(`Multiple sessions match ID prefix "${nameOrId}". Use a longer session ID prefix.`);
@@ -1802,10 +1808,10 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     if (metadata.orchestratorSessionId) {
       const bySessionId = await resolveSessionTarget(activeClient, metadata.orchestratorSessionId);
       if (bySessionId) {
-        return bySessionId;
+        return bySessionId.id;
       }
     }
-    return resolveSessionTarget(activeClient, metadata.orchestratorTarget);
+    return (await resolveSessionTarget(activeClient, metadata.orchestratorTarget))?.id ?? null;
   }
   async function resolveCwdDeliveryTarget(activeClient: IntercomClient, options: {
     to?: string;
@@ -1834,7 +1840,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
       ...(options.to ? { to: options.to } : {}),
     });
     if (existing.kind === "found" && existing.session) {
-      return { id: existing.session.id, label: options.to || existing.session.name || existing.session.id };
+      return sessionDeliveryTarget(existing.session, sessions);
     }
     if (!options.openProjectPaneIfMissing) {
       throw new Error(`${existing.reason ?? `No intercom session is connected in ${targetCwd}.`} If the user wants a long-lived peer there in its own Herdr pane, pass openProjectPaneIfMissing: true; otherwise tell the user no session is running there.`);
@@ -1849,7 +1855,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
       ...(options.to ? { to: options.to } : {}),
       signal: options.signal,
     });
-    return { id: session.id, label: session.name || session.id, projectPane };
+    return { ...sessionDeliveryTarget(session, [...sessions, session]), projectPane };
   }
   /** Shared by send, handover, and /handover. Never throws; failures are returned as error results. */
   async function deliverMessage(
@@ -1857,6 +1863,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     ctx: ExtensionContext,
     signal: AbortSignal | undefined,
     request: DeliveryRequest,
+    onUpdate?: (result: IntercomToolResult) => void,
   ): Promise<IntercomToolResult> {
     const { to, cwd, openProjectPaneIfMissing, focus, message, attachments, replyTo, supersedes, retryOf, noWake } = request;
     try {
@@ -1942,9 +1949,10 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
       }
       const target: DeliveryTarget = cwd
         ? await resolveCwdDeliveryTarget(connectedClient, { to, cwd, openProjectPaneIfMissing, focus, signal })
-        : { id: (await resolveSessionTarget(connectedClient, to!)) ?? to!, label: to! };
+        : (await resolveSessionTarget(connectedClient, to!)) ?? { id: to!, label: to! };
       const sendTo = target.id;
-      const targetDisplay = target.projectPane ? target.label : to ?? target.label;
+      const targetDisplay = target.label;
+      onUpdate?.({ content: [{ type: "text", text: `Recipient: ${targetDisplay}` }], details: { recipientLabel: targetDisplay } });
       if (sendTo === connectedClient.sessionId) {
         return {
           content: [{ type: "text", text: "Cannot message the current session" }],
@@ -1969,7 +1977,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
         if (!confirmed) {
           return {
             content: [{ type: "text", text: "Message cancelled by user" }],
-            details: {},
+            details: { recipientLabel: targetDisplay },
           };
         }
       }
@@ -1995,7 +2003,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
         }
         return {
           content: [{ type: "text", text: noMatchText ?? `${undeliveredText(display, result)}${resolution}` }],
-          details: { ...deliveryDetails(result), ...(noMatchText ? { error: true } : {}) },
+          details: { ...deliveryDetails(result), recipientLabel: display, ...(noMatchText ? { error: true } : {}) },
         };
       }
       pi.appendEntry("intercom_sent", {
@@ -2018,6 +2026,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
         }],
         details: {
           ...deliveryDetails(result),
+          recipientLabel: display,
           ...(effectiveReplyTo ? { replyTo: effectiveReplyTo } : {}),
           ...(target.projectPane ? { openedProjectPane: true, paneId: target.projectPane.paneId, projectRoot: target.projectPane.projectRoot } : {}),
         },
@@ -2168,7 +2177,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
       let target: string;
       try {
         activeClient = await ensureConnected("background");
-        target = await resolveSessionTarget(activeClient, parsed.to) ?? parsed.to;
+        target = (await resolveSessionTarget(activeClient, parsed.to))?.id ?? parsed.to;
       } catch (error) {
         if (!relayStillLive()) return;
         recordSubagentDeliveryError(options.errorEntryType, parsed.to, parsed.message, error);
@@ -2843,7 +2852,7 @@ Usage:
           }
           return deliverMessage(connectedClient, ctx, _signal, {
             to, cwd, openProjectPaneIfMissing, focus, message, attachments, replyTo, supersedes, retryOf, noWake,
-          });
+          }, _onUpdate);
         }
 
         case "handover": {
@@ -2868,7 +2877,7 @@ Usage:
               details: { error: true },
             };
           }
-          return deliverMessage(connectedClient, ctx, _signal, { to, cwd, openProjectPaneIfMissing, focus, message: handoverText, handover: true });
+          return deliverMessage(connectedClient, ctx, _signal, { to, cwd, openProjectPaneIfMissing, focus, message: handoverText, handover: true }, _onUpdate);
         }
 
         case "ask": {
@@ -2913,10 +2922,11 @@ Usage:
             if (cwd) {
               target = await resolveCwdDeliveryTarget(connectedClient, { to, cwd, openProjectPaneIfMissing, focus, signal: _signal });
             } else {
-              target = { id: (await resolveSessionTarget(connectedClient, to!)) ?? to!, label: to! };
+              target = (await resolveSessionTarget(connectedClient, to!)) ?? { id: to!, label: to! };
             }
             const sendTo = target.id;
-            const targetDisplay = target.projectPane ? target.label : to ?? target.label;
+            const targetDisplay = target.label;
+            _onUpdate?.({ content: [{ type: "text", text: `Recipient: ${targetDisplay}` }], details: { recipientLabel: targetDisplay } });
             if (_signal?.aborted) {
               return {
                 content: [{ type: "text", text: "Cancelled" }],
@@ -2973,7 +2983,7 @@ Usage:
             });
             return {
               content: [{ type: "text", text: `**Reply from ${askTarget}${resolution}:**\n${replyText}${replyAttachments}` }],
-              details: target.projectPane ? { openedProjectPane: true, paneId: target.projectPane.paneId, projectRoot: target.projectPane.projectRoot } : {},
+              details: { recipientLabel: askTarget, ...(target.projectPane ? { openedProjectPane: true, paneId: target.projectPane.paneId, projectRoot: target.projectPane.projectRoot } : {}) },
             };
           } catch (error) {
             rejectReplyWaiter(toError(error));
@@ -3024,7 +3034,7 @@ Usage:
             });
             return {
               content: [{ type: "text", text: result.delivery === "queued" ? queuedText(target.from.name || target.from.id, "reply") : `Reply sent to ${target.from.name || target.from.id}${result.demoted ? `. ${LATE_REPLY_NOTE}` : ""}` }],
-              details: { ...deliveryDetails(result), replyTo: target.message.id },
+              details: { ...deliveryDetails(result), replyTo: target.message.id, recipientLabel: target.from.name || target.from.id },
             };
           } catch (error) {
             return {
@@ -3086,7 +3096,9 @@ Usage:
     },
     renderCall(args, theme, context) {
       const action = typeof args.action === "string" ? args.action : "intercom";
-      const target = typeof args.to === "string" && args.to.trim() ? args.to.trim() : undefined;
+      const target = typeof context.state?.recipientLabel === "string"
+        ? context.state.recipientLabel
+        : typeof args.to === "string" && args.to.trim() ? args.to.trim() : undefined;
       const messageText = context.expanded && typeof args.message === "string"
         ? args.message
         : previewText(args.message, 96);
@@ -3105,10 +3117,15 @@ Usage:
       return new Text(text, 0, 0);
     },
     renderResult(result, { isPartial }, theme, context) {
+      const details = result.details as { recipientLabel?: string; delivered?: boolean; error?: boolean; messageId?: string; reason?: string; roster?: { peers: number; total: number; cwd?: string } } | undefined;
+      // Row-local state also restores the original recipient name from saved results without a broker lookup.
+      if (details?.recipientLabel && context.state && context.state.recipientLabel !== details.recipientLabel) {
+        context.state.recipientLabel = details.recipientLabel;
+        context.invalidate?.();
+      }
       if (isPartial) {
         return new Text(theme.fg("warning", "Intercom working..."), 0, 0);
       }
-      const details = result.details as { delivered?: boolean; error?: boolean; messageId?: string; reason?: string; roster?: { peers: number; total: number; cwd?: string } } | undefined;
       const failed = Boolean(context.isError || details?.error === true || details?.delivered === false);
       let text = failed ? theme.fg("error", "✗ ") : theme.fg("success", "✓ ");
       if (details?.roster && !failed && !context.expanded) {
