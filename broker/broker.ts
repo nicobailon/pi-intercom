@@ -310,10 +310,12 @@ class IntercomBroker {
     setInterval(() => this.evictSilentSessions(), LIVENESS_SWEEP_MS).unref();
   }
 
-  // A process that died without closing its socket can leave it open, and writes to it
-  // still succeed. Dropping a session whose client stopped heartbeating hands its mail
-  // to the mailbox through the normal close path.
+  // Local pipes/Unix sockets close when their owning process exits. Silence on an
+  // open socket only means the client's event loop may be busy (e.g. synchronous
+  // tools), not that it died. Keep heartbeat eviction only for TCP, where a dead
+  // peer can leave a half-open connection; socket close/error handles local cleanup.
   private evictSilentSessions(): void {
+    if (typeof LISTEN_TARGET === "string") return;
     const now = Date.now();
     const sinceLastSweepMs = now - this.lastLivenessSweepAt;
     this.lastLivenessSweepAt = now;
