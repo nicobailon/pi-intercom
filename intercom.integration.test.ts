@@ -5685,6 +5685,25 @@ test("send to a disconnected named session says the message is waiting in the ma
   }
 });
 
+test("late lifecycle events ignore a disposed session context", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("stale-lifecycle");
+  piIntercomExtension(harness.pi as never);
+  const staleContext = {
+    get sessionManager() { throw new Error("ctx is stale"); },
+    get hasUI() { throw new Error("ctx is stale"); },
+  };
+
+  try {
+    await harness.emitLifecycle("session_start");
+    for (const event of ["turn_start", "agent_start", "turn_end"]) {
+      await harness.emitLifecycle(event, {}, staleContext);
+    }
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+  }
+});
+
 test("a message reaching a session whose context went stale reports an expired receipt", { concurrency: false }, async () => {
   const { planner, cleanup } = await setupClients();
   const { default: piIntercomExtension } = await import("./index.ts");
