@@ -157,6 +157,19 @@ interface SupervisorInterviewReply {
   responses: Array<{ id: string; value: unknown }>;
 }
 
+// Name the missing field and list what arrived. An agent that believes it passed
+// `to` retries the same call when the error reads "to or cwd, or message".
+function missingSendFieldsText(action: "send" | "ask", params: Record<string, unknown>): string {
+  const missing: string[] = [];
+  if (!params.to && !params.cwd) missing.push("a target: pass to (a session name or ID) or cwd");
+  if (!params.message) missing.push("message");
+  const received = Object.keys(params).filter((key) => params[key] !== undefined && params[key] !== "").join(", ");
+  const next = action === "send" && !params.to && !params.cwd
+    ? " To answer a message that was not an ask, send it back to its sender with to; reply only answers a pending ask."
+    : "";
+  return `${action} is missing ${missing.join(" and ")}. Received: ${received || "nothing"}.${next}`;
+}
+
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -2837,7 +2850,7 @@ Usage:
         case "send": {
           if ((!to && !cwd) || !message) {
             return {
-              content: [{ type: "text", text: "Missing 'to' or 'cwd', or missing 'message' parameter" }],
+              content: [{ type: "text", text: missingSendFieldsText("send", params as Record<string, unknown>) }],
               details: { error: true },
             };
           }
@@ -2874,7 +2887,7 @@ Usage:
         case "ask": {
           if ((!to && !cwd) || !message) {
             return {
-              content: [{ type: "text", text: "Missing 'to' or 'cwd', or missing 'message' parameter" }],
+              content: [{ type: "text", text: missingSendFieldsText("ask", params as Record<string, unknown>) }],
               details: { error: true },
             };
           }
