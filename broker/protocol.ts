@@ -88,6 +88,14 @@ function isAttachment(value: unknown): value is Attachment {
     return false;
   }
 
+  if (value.path !== undefined && typeof value.path !== "string") {
+    return false;
+  }
+
+  if (value.sha256 !== undefined && typeof value.sha256 !== "string") {
+    return false;
+  }
+
   return value.language === undefined || typeof value.language === "string";
 }
 

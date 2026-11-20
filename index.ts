@@ -40,6 +40,7 @@ import { runCommand, sendCrossMachine } from "./cross-machine-transport.ts";
 import { listMachineAgents, listSavedMachines, parseCrossMachineTarget } from "./cross-machine-discovery.ts";
 import { formatHandoverMessage, generateHandoverBody, readGitState } from "./handover.ts";
 import { isIdleWakePending, releaseIdleWake, reserveIdleWake } from "./idle-wake.ts";
+import { checkAttachmentFreshness, formatAttachmentFreshnessBanner, formatFreshnessStatusTag, pinFileAttachments } from "./attachment-freshness.ts";
 
 const INTERCOM_TOOL_NAME = "intercom";
 const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
@@ -226,13 +227,17 @@ function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
-function formatAttachments(attachments: Attachment[]): string {
-  let text = "";
-  for (const att of attachments) {
+function formatAttachments(attachments: Attachment[], options?: { checkFreshness?: boolean }): string {
+  const checkFreshness = options?.checkFreshness ?? true;
+  const statuses = checkFreshness ? attachments.map((att) => checkAttachmentFreshness(att)) : undefined;
+  let text = statuses ? formatAttachmentFreshnessBanner(attachments, statuses) : "";
+  for (let i = 0; i < attachments.length; i++) {
+    const att = attachments[i]!;
+    const freshness = statuses ? formatFreshnessStatusTag(statuses[i]) : "";
     if (att.language) {
-      text += `\n\n---\nAttachment: ${att.name}\n~~~${att.language}\n${att.content}\n~~~`;
+      text += `\n\n---\nAttachment: ${att.name}${freshness}\n~~~${att.language}\n${att.content}\n~~~`;
     } else {
-      text += `\n\n---\nAttachment: ${att.name}\n${att.content}`;
+      text += `\n\n---\nAttachment: ${att.name}${freshness}\n${att.content}`;
     }
   }
   return text;
@@ -1465,7 +1470,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
       }
     }
     const attachmentText = receivedMessage.content.attachments?.length
-      ? formatAttachments(receivedMessage.content.attachments)
+      ? formatAttachments(receivedMessage.content.attachments, { checkFreshness: !receivedMessage.crossMachine })
       : "";
     const bodyText = `${receivedMessage.content.text}${attachmentText}`;
     const replyCommand = config.replyHint && receivedMessage.crossMachine
@@ -1887,7 +1892,10 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
         };
       }
       const confirmSend = !replyTo && config.confirmSend && ctx.hasUI;
-      const attachmentText = attachments?.length ? formatAttachments(attachments) : "";
+      const pinnedAttachments = pinFileAttachments(attachments);
+      const attachmentText = confirmSend && pinnedAttachments?.length
+        ? formatAttachments(pinnedAttachments, { checkFreshness: false })
+        : "";
       if (confirmSend && cwd && openProjectPaneIfMissing) {
         const confirmed = await ctx.ui.confirm(
           "Send message",
@@ -1978,7 +1986,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
       }
       const { result, display, resolution, noMatchText } = await sendWithNamePrefixFallback(connectedClient, { rawTo: cwd ? "" : to!, firstTarget: sendTo, display: targetDisplay }, (attemptTo) => connectedClient.send(attemptTo, {
         text: message,
-        attachments,
+        attachments: pinnedAttachments,
         replyTo: effectiveReplyTo,
         supersedes,
         retryOf,
@@ -2000,7 +2008,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
       }
       pi.appendEntry("intercom_sent", {
         to: display,
-        message: { text: message, attachments, replyTo: effectiveReplyTo, supersedes, retryOf },
+        message: { text: message, attachments: pinnedAttachments, replyTo: effectiveReplyTo, supersedes, retryOf },
         messageId: result.id,
         timestamp: Date.now(),
       });
@@ -2677,6 +2685,12 @@ Usage:
         name: Type.String(),
         content: Type.String(),
         language: Type.Optional(Type.String()),
+        path: Type.Optional(Type.String({
+          description: "Optional absolute path on disk for 'file' attachments; when provided, pi-intercom pins its sha256 on send so the receiver can detect on-disk changes.",
+        })),
+        sha256: Type.Optional(Type.String({
+          description: "Optional 64-hex SHA-256 digest of the file at 'path' when sent; auto-computed on send if omitted.",
+        })),
       }))),
       replyTo: Type.Optional(Type.String({
         description: "Message ID to reply to (for threading or responding to an 'ask')",
@@ -2935,7 +2949,8 @@ Usage:
                 details: { error: true },
               };
             }
-            const sent = await askWithNamePrefixFallback(connectedClient, { rawTo: cwd ? "" : to!, firstTarget: sendTo, display: targetDisplay }, { text: message, attachments, replyTo, supersedes, retryOf }, {
+            const pinnedAskAttachments = pinFileAttachments(attachments);
+            const sent = await askWithNamePrefixFallback(connectedClient, { rawTo: cwd ? "" : to!, firstTarget: sendTo, display: targetDisplay }, { text: message, attachments: pinnedAskAttachments, replyTo, supersedes, retryOf }, {
               signal: _signal,
               onAttempt: (askId) => { questionId = askId; },
               deliveryState: () => latestDeliveryState(questionId, deliveryState),
@@ -2956,7 +2971,7 @@ Usage:
             }
             pi.appendEntry("intercom_sent", {
               to: askTarget,
-              message: { text: message, attachments, replyTo, supersedes, retryOf },
+              message: { text: message, attachments: pinnedAskAttachments, replyTo, supersedes, retryOf },
               messageId: sendResult.id,
               timestamp: Date.now(),
             });
@@ -3000,9 +3015,10 @@ Usage:
                 details: { error: true },
               };
             }
+            const pinnedReplyAttachments = pinFileAttachments(attachments);
             const result = await connectedClient.send(target.from.id, {
               text: message,
-              attachments,
+              attachments: pinnedReplyAttachments,
               replyTo: target.message.id,
             });
             if (!result.delivered) {
@@ -3018,7 +3034,7 @@ Usage:
             dismissIncomingAsk(target.message.id);
             pi.appendEntry("intercom_sent", {
               to: target.from.name || target.from.id,
-              message: { text: message, attachments, replyTo: target.message.id },
+              message: { text: message, attachments: pinnedReplyAttachments, replyTo: target.message.id },
               messageId: result.id,
               timestamp: Date.now(),
             });

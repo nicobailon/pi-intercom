@@ -117,6 +117,8 @@ intercom({ action: "status" })
 // → Connected: Yes, Session ID: abc123, Active sessions: 3
 
 // Send with attachments (code snippets, files, or context)
+// For type: "file", pass an explicit absolute `path` to auto-pin its sha256 on send
+// so the receiver sees whether the file changed or went missing on disk since sent.
 intercom({
   action: "send",
   to: "worker",
