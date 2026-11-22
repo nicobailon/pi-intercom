@@ -63,7 +63,7 @@ test("broker startup refuses to replace a broker that answers on the endpoint wh
     writeFileSync(pidPath, "2147483647\n");
     await assert.rejects(
       assertNoLiveBroker(pidPath, () => endpoint),
-      /Refusing to replace an intercom broker that still holds its endpoint/,
+      /Refusing to replace live intercom broker process 2147483647/,
     );
   } finally {
     await closeServer(server);
