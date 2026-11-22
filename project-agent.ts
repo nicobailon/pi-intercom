@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "child_process";
 import { realpathSync, statSync } from "fs";
-import { resolve } from "path";
+import { basename, resolve } from "path";
+import type { ProjectPlacement } from "./config.ts";
 import { sameCwd } from "./cwd.ts";
 import type { SessionInfo } from "./types.ts";
 
@@ -241,8 +242,8 @@ function projectCommand(): string {
   return process.env.PI_INTERCOM_PI_BIN?.trim() || process.env.PI_BIN?.trim() || "pi";
 }
 
-/** Open a Pi pane beside this session in whichever Herdr hosts it. */
-export function openProjectPane(input: { cwd: string; focus?: boolean; signal?: AbortSignal }): Promise<ProjectPaneLaunch> {
+/** Open a Pi pane for a project in whichever Herdr hosts this session. `placement` applies to the Herdr app only. */
+export function openProjectPane(input: { cwd: string; focus?: boolean; placement?: ProjectPlacement; signal?: AbortSignal }): Promise<ProjectPaneLaunch> {
   const host = currentHerdrHost();
   return host?.kind === "app"
     ? openHerdrAppPane({ ...input, terminalId: host.terminalId })
@@ -285,6 +286,7 @@ export async function openHerdrTuiPane(input: {
 export async function openHerdrAppPane(input: {
   cwd: string;
   focus?: boolean;
+  placement?: ProjectPlacement;
   terminalId: string;
   hc?: HerdrClient;
   app?: HerdrClient;
@@ -300,13 +302,29 @@ export async function openHerdrAppPane(input: {
     throw new Error(`Herdr project pane error (NOT_FOUND): terminal ${input.terminalId} is not shown in the Herdr window (no herdr.space/herdr.tab labels).`);
   }
 
+  const app = input.app ?? createHerdrClient({ bin: "herdr-app", missingMessage: APP_MISSING });
   const command = projectCommand();
   // herdr-core's daemon resolves the command on its own PATH, which may lack pi (mise, nvm): run it with the caller's PATH.
   const argv = process.env.PATH ? ["/usr/bin/env", `PATH=${process.env.PATH}`, command] : [command];
+  let labels = ["--label", `herdr.space=${space}`, "--label", `herdr.tab=${tab}`];
+  if (input.placement === "space") {
+    const target = await spaceForFolder(app, hc, space, projectRoot, input.signal);
+    if (target === "new") {
+      // space.new shows and focuses the new space itself, whatever `focus` says.
+      // Unlike hc run, space.new has no known --keep, so a shell may not stay open when Pi exits.
+      const args = { name: basename(projectRoot) || undefined, folder: projectRoot, argv };
+      const created = await app.run<{ terminal?: unknown }>(["do", "space.new", JSON.stringify(args)], { timeoutMs: 15_000, signal: input.signal });
+      if (created.ok === false) throw new Error(formatHerdrError(created.error));
+      if (typeof created.data.terminal !== "string") throw new Error("Herdr project pane error (PANE_GONE): space.new returned no terminal.");
+      return { paneId: created.data.terminal, projectRoot, command };
+    }
+    // Without a tab label, the window opens the terminal in a new tab of that space.
+    if (target) labels = ["--label", `herdr.space=${target}`];
+  }
+
   // --no-parent: the peer must outlive the caller. --keep: a shell stays in the pane when Pi exits, as in the TUI.
   const started = await hc.run<{ address?: unknown }>([
-    "run", "--bg", "--json", "--no-parent", "--keep", "--cwd", projectRoot,
-    "--label", `herdr.space=${space}`, "--label", `herdr.tab=${tab}`, "--", ...argv,
+    "run", "--bg", "--json", "--no-parent", "--keep", "--cwd", projectRoot, ...labels, "--", ...argv,
   ], { timeoutMs: 15_000, signal: input.signal });
   if (started.ok === false) throw new Error(formatHerdrError(started.error));
   const terminal = started.data.address;
@@ -315,7 +333,6 @@ export async function openHerdrAppPane(input: {
   if (input.focus !== false) {
     // Focus is cosmetic: the terminal already runs, so a missing or closed window must not fail the launch.
     // The window picks up a new labeled terminal shortly after hc run returns: retry for up to ~2s.
-    const app = input.app ?? createHerdrClient({ bin: "herdr-app", missingMessage: APP_MISSING });
     for (let attempt = 0; attempt < 20; attempt++) {
       const focused = await app.run(["do", "pane.focus", "--terminal", terminal], { timeoutMs: 5_000, signal: input.signal });
       if (focused.ok || focused.error.code === "HERDR_UNAVAILABLE" || input.signal?.aborted) break;
@@ -324,6 +341,33 @@ export async function openHerdrAppPane(input: {
   }
 
   return { paneId: terminal, projectRoot, command };
+}
+
+type ListedSpace = { id?: unknown; machine?: unknown; tabs?: Array<{ terminals?: Array<{ terminal?: unknown }> }> };
+
+/**
+ * For placement "space": undefined keeps the pane beside the caller (the
+ * caller's space is in this folder), a space id reuses the first local space
+ * in it, and "new" asks for a new space. A space is where its first terminal's
+ * program runs now, as Herdr names it; `ls`'s `folder` is only where the space
+ * was made and goes stale.
+ */
+async function spaceForFolder(app: HerdrClient, hc: HerdrClient, callerSpace: string, folder: string, signal?: AbortSignal): Promise<string | undefined> {
+  const listed = await app.run<{ spaces?: ListedSpace[] }>(["ls"], { timeoutMs: 5_000, signal });
+  if (listed.ok === false) throw new Error(formatHerdrError(listed.error));
+  const spaces = (Array.isArray(listed.data.spaces) ? listed.data.spaces : [])
+    .filter((space): space is ListedSpace & { id: string } => space.machine == null && typeof space.id === "string");
+  const inFolder = await Promise.all(spaces.map(async (space) => {
+    const first = space.tabs?.[0]?.terminals?.[0]?.terminal;
+    if (typeof first !== "string") return false;
+    const got = await hc.run<{ cwd?: unknown; foreground?: { cwd?: unknown } }>(["get", first, "--json"], { timeoutMs: 5_000, signal });
+    // hc's own cwd lags behind a program that changed directory; the foreground process's is current.
+    const cwd = got.ok ? got.data.foreground?.cwd ?? got.data.cwd : undefined;
+    return typeof cwd === "string" && sameCwd(cwd, folder);
+  }));
+  if (spaces.some((space, index) => space.id === callerSpace && inFolder[index])) return undefined;
+  const existing = spaces.find((_, index) => inFolder[index]);
+  return existing ? existing.id : "new";
 }
 
 export async function waitForProjectSession(client: ListSessionsClient, input: {
