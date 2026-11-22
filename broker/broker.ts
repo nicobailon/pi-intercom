@@ -773,7 +773,10 @@ class IntercomBroker {
           clientMessage.to = targetId;
         }
 
-        const targets = this.findSessions(clientMessage.to, fromSession.scopeId);
+        // An exact ID of a disconnected session wins over a live name or ID prefix.
+        const disconnectedTargets = this.findDisconnectedSessions(clientMessage.to, fromSession.scopeId);
+        const disconnectedExact = disconnectedTargets.some((session) => session.info.id === clientMessage.to);
+        const targets = disconnectedExact ? [] : this.findSessions(clientMessage.to, fromSession.scopeId);
         if (targets.length === 1) {
           const target = targets[0];
           const fingerprint = messageDeliveryFingerprint(message, target.info.id);
@@ -843,7 +846,6 @@ class IntercomBroker {
           break;
         }
 
-        const disconnectedTargets = this.findDisconnectedSessions(clientMessage.to, fromSession.scopeId);
         if (disconnectedTargets.length === 1) {
           const disconnectedTarget = disconnectedTargets[0]!;
           const target = disconnectedTarget.info;
