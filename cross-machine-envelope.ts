@@ -46,7 +46,6 @@ export function resolveOrigin(
   const named = envSessionId
     ? []
     : sessions.filter((session) => session.id !== excludeSessionId && !session.runtimeFallbackAlias && session.name?.toLowerCase() === fallbackName.toLowerCase());
-  // Several same-named sessions: the source is unknown, so do not guess one.
   const source = envSessionId
     ? sessions.find((session) => session.id === envSessionId)
     : named.length === 1 ? named[0] : undefined;
