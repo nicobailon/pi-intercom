@@ -33,15 +33,63 @@ function unavailable(paneId: string, reason: Extract<HerdrLocation, { status: "u
   return { status: "unavailable", paneId, reason, ...(detail ? { detail } : {}) };
 }
 
+type LocationOptions = { client?: HerdrClient; appClient?: HerdrClient; now?: () => number; sessionPaths?: ReadonlyMap<string, string> };
+
 /**
- * Resolve every Herdr-hosted session against one live Herdr snapshot. The
- * registration-time pane id is only a stable join key; workspace and tab are
- * always taken from this snapshot and are never cached.
+ * Resolve every Herdr-hosted session against live Herdr state: one TUI
+ * snapshot for TUI panes, one `herdr-app ls` for Herdr app terminals.
+ * Workspace and tab are always read live and never cached.
  */
-export async function resolveHerdrLocations(
-  sessions: SessionInfo[],
-  options: { client?: HerdrClient; now?: () => number; sessionPaths?: ReadonlyMap<string, string> } = {},
-): Promise<SessionInfo[]> {
+export async function resolveHerdrLocations(sessions: SessionInfo[], options: LocationOptions = {}): Promise<SessionInfo[]> {
+  const appHosted = sessions.filter((session) => session.herdrTerminalId && !session.herdrPaneId);
+  if (appHosted.length === 0) return resolveTuiLocations(sessions, options);
+  const [tuiResolved, appLocations] = await Promise.all([
+    resolveTuiLocations(sessions, options),
+    resolveAppLocations(appHosted, options),
+  ]);
+  return tuiResolved.map((session) => {
+    const herdrLocation = appLocations.get(session.id) ?? session.herdrLocation ?? { status: "not_hosted" };
+    return { ...session, herdrLocation };
+  });
+}
+
+async function resolveAppLocations(sessions: SessionInfo[], options: LocationOptions): Promise<Map<string, HerdrLocation>> {
+  const client = options.appClient ?? createHerdrClient({ bin: "herdr-app", missingMessage: "'herdr-app' is not on PATH." });
+  const result = await client.run(["ls"], { timeoutMs: 3_000 });
+  const locate = (fn: (terminalId: string) => HerdrLocation) => new Map(sessions.map((session) => [session.id, fn(session.herdrTerminalId!)]));
+  if (result.ok === false) {
+    const reason = result.error.code === "HERDR_UNAVAILABLE" ? "herdr_unavailable" : "command_failed";
+    return locate((terminalId) => unavailable(terminalId, reason, result.error.message));
+  }
+  const spaces = recordsField(result.data, "spaces");
+  if (!spaces) return locate((terminalId) => unavailable(terminalId, "invalid_response", "herdr-app ls omitted spaces."));
+
+  const refreshedAt = (options.now ?? Date.now)();
+  const byTerminal = new Map<string, HerdrLocation>();
+  for (const space of spaces) {
+    const spaceId = stringField(space, "id");
+    for (const tab of recordsField(space, "tabs") ?? []) {
+      const tabId = stringField(tab, "id");
+      for (const terminal of recordsField(tab, "terminals") ?? []) {
+        const terminalId = stringField(terminal, "terminal");
+        const paneId = stringField(terminal, "pane");
+        if (!spaceId || !tabId || !terminalId || !paneId) continue;
+        byTerminal.set(terminalId, {
+          status: "current",
+          // Unnamed spaces and tabs have no name in ls; their id is the only label there is.
+          workspace: { id: spaceId, label: stringField(space, "name") ?? spaceId },
+          tab: { id: tabId, label: stringField(tab, "name") ?? tabId },
+          paneId,
+          refreshedAt,
+        });
+      }
+    }
+  }
+  return locate((terminalId) => byTerminal.get(terminalId)
+    ?? unavailable(terminalId, "pane_missing", "The hosted Pi terminal is not shown in the Herdr window."));
+}
+
+async function resolveTuiLocations(sessions: SessionInfo[], options: LocationOptions): Promise<SessionInfo[]> {
   const hosted = sessions.filter((session) => session.herdrPaneId);
   if (hosted.length === 0) {
     // Preserve the upstream roster byte-for-byte in installations where Herdr

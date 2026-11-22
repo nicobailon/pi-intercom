@@ -209,7 +209,7 @@ test("semantic styling remains ANSI- and Unicode-width safe", () => {
   }
 });
 
-test("inline messages pick up mutable theme proxy changes on rerender", () => {
+test("inline messages pick up theme changes after invalidate()", () => {
   const palette: Record<string, number> = { ...roleCodes };
   const mutableTheme = new Proxy(
     {},
@@ -226,6 +226,7 @@ test("inline messages pick up mutable theme proxy changes on rerender", () => {
   palette.toolTitle = 96;
   palette.text = 97;
   palette.muted = 90;
+  component.invalidate();
   const after = component.render(72).join("\n");
 
   assert.match(before, /\u001b\[32m From:/);
@@ -330,4 +331,21 @@ test("collapsed inline hint retains Ctrl+O and advertises fullscreen message cli
   const output = component.render(160).join("\n");
   assert.match(output, /Ctrl\+O/);
   assert.match(output, /click.*message.*fullscreen/i);
+});
+
+test("cached rows follow resize and shared expansion", () => {
+  const state = { expanded: false };
+  const palette = styledTheme();
+  const component = new InlineMessageComponent(from, clickMessage, palette as any, "intercom reply", undefined, true, state);
+
+  for (const expanded of [false, true, false]) {
+    state.expanded = expanded;
+    for (const width of [0, 1, 2, 3, 18, 100, 31, 100]) {
+      const fresh = new InlineMessageComponent(from, clickMessage, palette as any, "intercom reply", undefined, !expanded).render(width);
+      const actual = component.render(width);
+      assert.deepEqual(actual, fresh, `${width} columns, expanded=${expanded}`);
+      assert.deepEqual(component.render(width), fresh, "the next unchanged frame stays equal");
+      for (const line of actual) assert.ok(visibleWidth(line) <= width);
+    }
+  }
 });
