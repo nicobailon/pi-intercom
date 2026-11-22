@@ -125,7 +125,7 @@ test("openHerdrAppPane starts pi beside the caller's terminal and focuses it", a
     assert.equal(launched.paneId, "t9");
     assert.deepEqual(hc.calls, [
       ["get", "t3", "--json"],
-      ["run", "--bg", "--json", "--no-parent", "--keep", "--cwd", launched.projectRoot, "--label", "herdr.space=sp1", "--label", "herdr.tab=tb1", "--", "pi"],
+      ["run", "--bg", "--json", "--no-parent", "--keep", "--cwd", launched.projectRoot, "--label", "herdr.space=sp1", "--label", "herdr.tab=tb1", "--", "/usr/bin/env", `PATH=${process.env.PATH}`, "pi"],
     ]);
     assert.deepEqual(app.calls, [["do", "pane.focus", "--terminal", "t9"], ["do", "pane.focus", "--terminal", "t9"]]);
 
