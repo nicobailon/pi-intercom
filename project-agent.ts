@@ -301,10 +301,12 @@ export async function openHerdrAppPane(input: {
   }
 
   const command = projectCommand();
+  // herdr-core's daemon resolves the command on its own PATH, which may lack pi (mise, nvm): run it with the caller's PATH.
+  const argv = process.env.PATH ? ["/usr/bin/env", `PATH=${process.env.PATH}`, command] : [command];
   // --no-parent: the peer must outlive the caller. --keep: a shell stays in the pane when Pi exits, as in the TUI.
   const started = await hc.run<{ address?: unknown }>([
     "run", "--bg", "--json", "--no-parent", "--keep", "--cwd", projectRoot,
-    "--label", `herdr.space=${space}`, "--label", `herdr.tab=${tab}`, "--", command,
+    "--label", `herdr.space=${space}`, "--label", `herdr.tab=${tab}`, "--", ...argv,
   ], { timeoutMs: 15_000, signal: input.signal });
   if (started.ok === false) throw new Error(formatHerdrError(started.error));
   const terminal = started.data.address;
