@@ -11,6 +11,7 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 - `list` can show only the sessions in one Herdr workspace or tab. Pass `workspaceId` or `tabId` with an ID from the list output; sessions outside that location, or not in Herdr, are left out. Thanks to [@odfalik](https://github.com/odfalik) for #212.
 
 ### Changed
+- Intercom messages in the chat no longer redo their layout on every screen redraw, so long sessions with many messages redraw with less work. Thanks to [@chpock](https://github.com/chpock) for #203.
 - Intercom tool rows, confirmations and results show the recipient's session name when you address it by ID or ID prefix. Thanks to [@igt-sferk](https://github.com/igt-sferk) for #210.
 - The bundled `pi-intercom` skill is a quarter of its old size and no longer says intercom is same-machine only, which made agents refuse to message sessions on other machines. It now covers sending and handing over to `name@machine`, asking a waiting subagent a follow-up question inside your reply, and steering a subagent after a progress update.
 - Intercom errors now say what to do next: a failed `reply` points to `pending` or `send`, an `ask` to another machine says to use `send`, an `ask` to a subagent that is waiting on you says to answer it with `reply`, and a message to a directory with no session asks the agent to open a new Pi pane only when the user wants one.
