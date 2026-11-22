@@ -53,6 +53,24 @@ test("broker startup refuses to replace a live broker that owns the endpoint", a
   }
 });
 
+test("broker startup refuses to replace a broker that answers on the endpoint when its PID is not visible", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "pi-intercom-runtime-"));
+  const pidPath = path.join(directory, "broker.pid");
+  const endpoint = endpointIn(directory);
+  const server = await listenAsBroker(endpoint);
+  try {
+    // A pid from another pid namespace names no process here, so signal 0 fails with ESRCH.
+    writeFileSync(pidPath, "2147483647\n");
+    await assert.rejects(
+      assertNoLiveBroker(pidPath, () => endpoint),
+      /Refusing to replace live intercom broker process 2147483647/,
+    );
+  } finally {
+    await closeServer(server);
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("broker startup ignores a PID that now belongs to a process without the broker endpoint", async () => {
   const directory = mkdtempSync(path.join(tmpdir(), "pi-intercom-runtime-"));
   const pidPath = path.join(directory, "broker.pid");
