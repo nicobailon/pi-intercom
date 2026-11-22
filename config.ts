@@ -79,7 +79,6 @@ export interface IntercomConfig {
   /** Cross-machine discovery and SSH relay settings. */
   crossMachine: CrossMachineConfig;
 
-  /** Herdr integration settings. */
   herdr: HerdrConfig;
 }
 

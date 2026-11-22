@@ -204,6 +204,7 @@ test("placement space creates a space named after the folder when no space is in
     rmSync(root, { recursive: true, force: true });
   }
 });
+
 test("openHerdrAppPane refuses a caller terminal the window does not show", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-intercom-app-pane-"));
   const hc = recordingClient(() => ({ ok: true, data: { labels: {} } }));
