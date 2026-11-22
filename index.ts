@@ -207,6 +207,12 @@ function undeliveredText(target: string, result: SendResult): string {
     : `Delivery to "${target}" could not be confirmed: ${reason}. The message may still arrive, so sending it again could duplicate it.`;
 }
 
+// A busy non-interactive session answers a top-level ask with a canned reply and refuses anything else.
+function isBusyAutoReplyAsk(message: Message): boolean {
+  return message.expectsReply === true && !message.replyTo;
+}
+const BUSY_NON_INTERACTIVE_DETAIL = "receiver is a busy non-interactive session and cannot take messages until it finishes";
+
 function queuedText(target: string, what = "message"): string {
   return `Session "${target}" is not connected. The ${what} is waiting in the broker mailbox until that session reconnects.`;
 }
@@ -1411,8 +1417,12 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     if (!activeContext) return;
     if (!activeContext.isIdle()) {
       if (!activeContext.hasUI) {
+        if (!isBusyAutoReplyAsk(entry.message)) {
+          emitMessageReceipt(entry.message.id, "expired", BUSY_NON_INTERACTIVE_DETAIL);
+          return;
+        }
         const activeClient = client;
-        if (!entry.message.replyTo && activeClient?.isConnected()) {
+        if (activeClient?.isConnected()) {
           void (async () => {
             try {
               const result = await activeClient.send(entry.from.id, {
@@ -1465,6 +1475,17 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
       emitMessageReceipt(message.id, "expired", "session context no longer active on receipt");
       return;
     }
+    const matchesReplyWaiter = replyWaiter !== null
+      && ((from.name || from.id).toLowerCase() === replyWaiter.from.toLowerCase() || from.id === replyWaiter.from)
+      && message.replyTo === replyWaiter.replyTo;
+    const seenAt = seenInboundMessages.get(`${from.id}\0${message.id}`);
+    const alreadyAccepted = seenAt !== undefined && Date.now() - seenAt <= INBOUND_MESSAGE_DEDUPE_RETENTION_MS;
+    // Refuse before any proof receipt, so the sender hears "not delivered" instead of "delivered".
+    // A duplicate of an accepted message stays a duplicate.
+    if (!matchesReplyWaiter && !alreadyAccepted && !isBusyAutoReplyAsk(message) && !liveContext.hasUI && !liveContext.isIdle() && agentRunning) {
+      emitMessageReceipt(message.id, "expired", BUSY_NON_INTERACTIVE_DETAIL);
+      return;
+    }
     const receiverReceivedAt = Date.now();
     if (hasSeenInboundMessage(from, message, receiverReceivedAt)) {
       emitMessageReceipt(message.id, "acknowledged", "duplicate message id suppressed");
@@ -1472,16 +1493,10 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     }
     const receivedMessage = { ...message, receiverReceivedAt };
     emitMessageReceipt(receivedMessage.id, "receiver_received");
-    if (replyWaiter) {
-      const senderTarget = from.name || from.id;
-      const fromMatches = senderTarget.toLowerCase() === replyWaiter.from.toLowerCase()
-        || from.id === replyWaiter.from;
-      const replyMatches = receivedMessage.replyTo === replyWaiter.replyTo;
-      if (fromMatches && replyMatches) {
-        emitMessageReceipt(receivedMessage.id, "acknowledged", "matched reply waiter");
-        replyWaiter.resolve(receivedMessage);
-        return;
-      }
+    if (matchesReplyWaiter) {
+      emitMessageReceipt(receivedMessage.id, "acknowledged", "matched reply waiter");
+      replyWaiter!.resolve(receivedMessage);
+      return;
     }
     const attachmentText = receivedMessage.content.attachments?.length
       ? formatAttachments(receivedMessage.content.attachments)
