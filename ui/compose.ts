@@ -1,5 +1,5 @@
 import type { Component, TUI } from "@earendil-works/pi-tui";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Input, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import type { IntercomClient } from "../broker/client.ts";
 import type { SessionInfo } from "../types.ts";
@@ -19,7 +19,7 @@ export class ComposeOverlay implements Component {
   private targetLabel: string;
   private client: IntercomClient;
   private done: (result: ComposeResult) => void;
-  private inputBuffer: string = "";
+  private readonly input = new Input();
   private sending: boolean = false;
   private error: string | null = null;
 
@@ -50,28 +50,16 @@ export class ComposeOverlay implements Component {
       return;
     }
 
-    if (data.startsWith("\x1b")) {
-      return;
-    }
-
     if (this.keybindings.matches(data, "tui.select.confirm")) {
-      if (this.inputBuffer.trim()) {
+      if (this.input.getValue().trim()) {
         this.sendMessage();
       }
       return;
     }
 
-    if (this.keybindings.matches(data, "tui.editor.deleteCharBackward")) {
-      this.inputBuffer = [...this.inputBuffer].slice(0, -1).join("");
-      this.tui.requestRender();
-      return;
-    }
-
-    const printable = [...data].filter(c => c >= " ").join("");
-    if (printable) {
-      this.inputBuffer += printable;
-      this.tui.requestRender();
-    }
+    // Input handles cursor movement, horizontal scrolling, editing keys, and paste.
+    this.input.handleInput(data);
+    this.tui.requestRender();
   }
 
   private async sendMessage(): Promise<void> {
@@ -81,7 +69,7 @@ export class ComposeOverlay implements Component {
 
     try {
       const result = await this.client.send(this.target.id, {
-        text: this.inputBuffer.trim(),
+        text: this.input.getValue().trim(),
       });
       
       if (!result.delivered) {
@@ -94,7 +82,7 @@ export class ComposeOverlay implements Component {
       this.done({
         sent: true,
         messageId: result.id,
-        text: this.inputBuffer.trim(),
+        text: this.input.getValue().trim(),
         queued: result.delivery === "queued",
       });
     } catch (error) {
@@ -118,6 +106,8 @@ export class ComposeOverlay implements Component {
       return `${border("│")}${clipped}${" ".repeat(Math.max(0, contentWidth - visibleWidth(clipped)))}${border("│")}`;
     };
 
+    const inputLine = ` ${this.input.render(Math.max(1, contentWidth - 1))[0] ?? ""}`;
+
     const lines: string[] = [];
     lines.push(border(`╭${"─".repeat(contentWidth)}╮`));
     lines.push(row(this.theme.bold(` Send to: ${this.targetLabel}`)));
@@ -130,9 +120,9 @@ export class ComposeOverlay implements Component {
     } else if (this.error) {
       lines.push(row(this.theme.fg("error", ` Error: ${this.error}`)));
       lines.push(row());
-      lines.push(row(` > ${this.inputBuffer}█`));
+      lines.push(row(inputLine));
     } else {
-      lines.push(row(` > ${this.inputBuffer}█`));
+      lines.push(row(inputLine));
     }
 
     lines.push(row());

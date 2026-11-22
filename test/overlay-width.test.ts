@@ -64,3 +64,30 @@ test("session list overlay renders lines at the declared overlay width", () => {
     assertLineWidths("session list overlay", overlay.render(width), width);
   }
 });
+
+test("compose overlay moves the cursor with arrow keys and scrolls long messages", () => {
+  const sent: string[] = [];
+  const overlay = new ComposeOverlay(
+    { requestRender() {} } as any,
+    theme as any,
+    { ...keybindings, matches: (data: string, id: string) => data === "\r" && id === "tui.select.confirm" } as any,
+    session,
+    "subagent-chat-019ecaf6",
+    {
+      send: async (_to: string, message: { text: string }) => {
+        sent.push(message.text);
+        return { delivered: true, id: "message-1" };
+      },
+    } as any,
+    () => {},
+  );
+  const long = `${"a".repeat(100)}END`;
+  overlay.handleInput(long);
+  assert.match(overlay.render(40).join("\n"), /END/, "the end of a long message stays visible");
+
+  for (let i = 0; i < 3; i++) overlay.handleInput("\x1b[D");
+  overlay.handleInput("X");
+  assertLineWidths("compose overlay with a long message", overlay.render(40), 40);
+  overlay.handleInput("\r");
+  assert.deepEqual(sent, [`${"a".repeat(100)}XEND`]);
+});
