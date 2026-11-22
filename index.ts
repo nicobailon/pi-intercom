@@ -161,11 +161,11 @@ interface SupervisorInterviewReply {
 // `to` retries the same call when the error reads "to or cwd, or message".
 function missingSendFieldsText(action: "send" | "ask", params: Record<string, unknown>): string {
   const missing: string[] = [];
-  if (!params.to && !params.cwd) missing.push("a target: pass to (a session name or ID) or cwd");
   if (!params.message) missing.push("message");
+  if (!params.to && !params.cwd) missing.push("a target: pass to (a session name or ID) or cwd");
   const received = Object.keys(params).filter((key) => params[key] !== undefined && params[key] !== "").join(", ");
   const next = action === "send" && !params.to && !params.cwd
-    ? " To answer a message that was not an ask, send it back to its sender with to; reply only answers a pending ask."
+    ? " To answer a message, pass its sender as to."
     : "";
   return `${action} is missing ${missing.join(" and ")}. Received: ${received || "nothing"}.${next}`;
 }

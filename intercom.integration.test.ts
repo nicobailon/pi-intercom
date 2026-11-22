@@ -1206,13 +1206,13 @@ test("send and ask name the missing field and list what arrived", { concurrency:
     const noTarget = await run("send-no-target", { action: "send", message: "status?", focus: false });
     assert.match(noTarget, /^send is missing a target: pass to \(a session name or ID\) or cwd\./);
     assert.match(noTarget, /Received: action, message, focus\./);
-    assert.match(noTarget, /send it back to its sender with to; reply only answers a pending ask/);
+    assert.match(noTarget, /Received: action, message, focus\. To answer a message, pass its sender as to\.$/);
 
     const noMessage = await run("send-no-message", { action: "send", to: "planner" });
     assert.match(noMessage, /^send is missing message\. Received: action, to\.$/);
 
     const askNothing = await run("ask-nothing", { action: "ask" });
-    assert.match(askNothing, /^ask is missing a target: pass to \(a session name or ID\) or cwd and message\. Received: action\.$/);
+    assert.match(askNothing, /^ask is missing message and a target: pass to \(a session name or ID\) or cwd\. Received: action\.$/);
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await setup.cleanup();
