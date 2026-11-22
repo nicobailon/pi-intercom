@@ -203,8 +203,8 @@ function isClosedAskReply(result: SendResult): boolean {
   return result.code === "E_REPLY_TARGET" && result.reason === "Reply target does not match a pending ask";
 }
 
-function closedAskText(target: string): string {
-  return `Reply to "${target}" was not delivered: the broker can no longer match it to an open ask, for example because the asker disconnected or the broker restarted. To deliver the content, send it as a new message without replyTo: intercom({ action: "send", to: "${target}", message: "..." }).`;
+function closedAskText(target: string, address = target): string {
+  return `Reply to "${target}" was not delivered: the broker can no longer match it to an open ask, for example because the asker disconnected or the broker restarted. To deliver the content, send it as a new message without replyTo: intercom({ action: "send", to: "${address}", message: "..." }).`;
 }
 
 const LATE_REPLY_NOTE = "The ask was no longer open, so the reply was delivered as a regular message.";
@@ -1997,7 +1997,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
         if (effectiveReplyTo && isClosedAskReply(result)) {
           dismissIncomingAsk(effectiveReplyTo);
           return {
-            content: [{ type: "text", text: closedAskText(display) }],
+            content: [{ type: "text", text: closedAskText(display, to ?? target.id) }],
             details: { ...deliveryDetails(result), error: true },
           };
         }
@@ -3096,7 +3096,7 @@ Usage:
     },
     renderCall(args, theme, context) {
       const action = typeof args.action === "string" ? args.action : "intercom";
-      const target = typeof context.state?.recipientLabel === "string"
+      const target = typeof context.state.recipientLabel === "string"
         ? context.state.recipientLabel
         : typeof args.to === "string" && args.to.trim() ? args.to.trim() : undefined;
       const messageText = context.expanded && typeof args.message === "string"
@@ -3119,9 +3119,10 @@ Usage:
     renderResult(result, { isPartial }, theme, context) {
       const details = result.details as { recipientLabel?: string; delivered?: boolean; error?: boolean; messageId?: string; reason?: string; roster?: { peers: number; total: number; cwd?: string } } | undefined;
       // Row-local state also restores the original recipient name from saved results without a broker lookup.
-      if (details?.recipientLabel && context.state && context.state.recipientLabel !== details.recipientLabel) {
+      if (details?.recipientLabel && context.state.recipientLabel !== details.recipientLabel) {
         context.state.recipientLabel = details.recipientLabel;
-        context.invalidate?.();
+        // Pi's invalidate re-runs this renderer; calling it mid-render would add the result row twice.
+        queueMicrotask(() => context.invalidate());
       }
       if (isPartial) {
         return new Text(theme.fg("warning", "Intercom working..."), 0, 0);

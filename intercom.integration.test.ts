@@ -188,6 +188,11 @@ function renderToText(component: RenderedComponent): string {
   return component.render(120).map((line) => line.trimEnd()).join("\n");
 }
 
+/** Pi always passes state and invalidate to tool renderers. */
+function renderContext(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return { state: {}, invalidate: () => undefined, isError: false, expanded: false, ...overrides };
+}
+
 function createExtensionHarness(sessionName: string | (() => string) = "child-worker", options: {
   abort?: () => void;
   hasUI?: boolean;
@@ -2633,11 +2638,14 @@ test("recipient labels replace ID targets in confirmations, progress, results, a
       assert.ok(progress.some(update => update.details?.recipientLabel === "orchestrator"));
       const state: Record<string, unknown> = {};
       let invalidations = 0;
-      const context = { state, invalidate: () => { invalidations += 1; } };
+      const context = renderContext({ state, invalidate: () => { invalidations += 1; } });
       tool.renderResult!(progress[0]!, { isPartial: true }, renderTheme, context);
       assert.match(renderToText(tool.renderCall!(args, renderTheme, context)), /intercom send → orchestrator/);
+      assert.equal(invalidations, 0, "invalidation must wait until the current render finishes");
+      await Promise.resolve();
       assert.equal(invalidations, 1);
       tool.renderResult!(result, { isPartial: false }, renderTheme, context);
+      await Promise.resolve();
       assert.equal(invalidations, 1, "unchanged labels must not cause render loops");
     });
   } finally {
@@ -2736,7 +2744,7 @@ test("reply headings show the sender name even when no to argument is supplied",
     const result = await tool.execute("reply-label", { action: "reply", message: "Confirmed" }, new AbortController().signal, undefined, harness.ctx);
     assert.equal((await received)[1].content.text, "Confirmed");
     assert.equal(result.details?.recipientLabel, "orchestrator");
-    const context = { state: {}, invalidate: () => undefined };
+    const context = renderContext();
     tool.renderResult!(result, { isPartial: false }, renderTheme, context);
     assert.match(renderToText(tool.renderCall!({ action: "reply", message: "Confirmed" }, renderTheme, context)), /intercom reply → orchestrator/);
   } finally {
@@ -2774,12 +2782,42 @@ test("recipient headings restore from persisted details without a live name look
   const harness = createExtensionHarness();
   piIntercomExtension(harness.pi as never);
   const tool = harness.tools.find(candidate => candidate.name === "intercom")!;
-  const context = { state: {}, invalidate: () => undefined };
+  const context = renderContext();
   const args = { action: "send", to: "old-session-id", message: "Historical checkpoint" };
   tool.renderResult!({ content: [{ type: "text", text: "Message sent to previous-reviewer" }], details: { recipientLabel: "previous-reviewer", delivered: true } }, { isPartial: false }, renderTheme, context);
   assert.match(renderToText(tool.renderCall!(args, renderTheme, context)), /intercom send → previous-reviewer/);
   assert.match(renderToText(tool.renderCall!({ ...args, action: "reply", to: undefined }, renderTheme, context)), /intercom reply → previous-reviewer/);
-  assert.match(renderToText(tool.renderCall!({ ...args, to: "unknown-session-id" }, renderTheme, { state: {} })), /unknown-session-id/);
+  assert.match(renderToText(tool.renderCall!({ ...args, to: "unknown-session-id" }, renderTheme, renderContext())), /unknown-session-id/);
+});
+
+test("Pi's tool row shows the recipient label without duplicating the result row", async () => {
+  const { ToolExecutionComponent, initTheme } = await import("@earendil-works/pi-coding-agent");
+  initTheme("dark", false);
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness();
+  piIntercomExtension(harness.pi as never);
+  const tool = harness.tools.find(candidate => candidate.name === "intercom")!;
+  const ui = { requestRender: () => undefined };
+  const rowText = (row: RenderedComponent) => row.render(120)
+    .map(line => line.replace(/\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07/g, "").trim())
+    .filter(Boolean)
+    .join("\n");
+
+  // Session resume: a fresh row receives the final result with an empty renderer state.
+  const restored = new ToolExecutionComponent("intercom", "restored-row", { action: "send", to: "old-session-id", message: "Checkpoint" }, {}, tool as never, ui as never, repoDir);
+  restored.updateResult({ content: [{ type: "text", text: "Message sent to previous-reviewer" }], details: { recipientLabel: "previous-reviewer", delivered: true }, isError: false });
+  await Promise.resolve();
+  const restoredText = rowText(restored);
+  assert.match(restoredText, /intercom send → previous-reviewer/);
+  assert.equal(restoredText.match(/Message sent to previous-reviewer/g)?.length, 1, restoredText);
+
+  // Live ask: the partial update that carries the label must not double the working line.
+  const live = new ToolExecutionComponent("intercom", "live-row", { action: "ask", to: "01a12345", message: "Which option?" }, {}, tool as never, ui as never, repoDir);
+  live.updateResult({ content: [{ type: "text", text: "Recipient: orchestrator" }], details: { recipientLabel: "orchestrator" }, isError: false }, true);
+  await Promise.resolve();
+  const liveText = rowText(live);
+  assert.match(liveText, /intercom ask → orchestrator/);
+  assert.equal(liveText.match(/Intercom working\.\.\./g)?.length, 1, liveText);
 });
 
 test("cancelled sends retain the resolved recipient label without delivering", { concurrency: false }, async () => {
@@ -2819,18 +2857,18 @@ test("intercom tool renders compact call and result rows", async () => {
     to: "planner",
     message: "Need a decision before I continue with this implementation.",
     attachments: [{ type: "snippet", name: "note.ts", content: "const ok = true;" }],
-  }, renderTheme, {})), /intercom ask → planner \(1 attachment\)\n {2}Need a decision/);
+  }, renderTheme, renderContext())), /intercom ask → planner \(1 attachment\)\n {2}Need a decision/);
 
   const resultText = renderToText(intercomTool.renderResult({
     content: [{ type: "text", text: "Message sent to planner" }],
     details: { delivered: true, messageId: "abcdef123456" },
-  }, { isPartial: false, expanded: false }, renderTheme, { isError: false, expanded: false }));
+  }, { isPartial: false, expanded: false }, renderTheme, renderContext()));
   assert.match(resultText, /✓ Message sent to planner \(abcdef12\)/);
 
   const errorText = renderToText(intercomTool.renderResult({
     content: [{ type: "text", text: "Missing 'to' or 'message' parameter" }],
     details: { error: true, reason: "Missing target" },
-  }, { isPartial: false, expanded: true }, renderTheme, { isError: false, expanded: true }));
+  }, { isPartial: false, expanded: true }, renderTheme, renderContext({ expanded: true })));
   assert.match(errorText, /✗ Missing 'to' or 'message' parameter/);
   assert.match(errorText, /Reason: Missing target/);
 
@@ -2838,9 +2876,9 @@ test("intercom tool renders compact call and result rows", async () => {
     content: [{ type: "text", text: "**Current session:**\n• me\n\n**Other sessions (cwd: /repo):**\n• peer-a\n• peer-b" }],
     details: { roster: { peers: 2, total: 3, cwd: "/repo" } },
   };
-  const collapsedRoster = renderToText(intercomTool.renderResult(roster, { isPartial: false, expanded: false }, renderTheme, { isError: false, expanded: false }));
+  const collapsedRoster = renderToText(intercomTool.renderResult(roster, { isPartial: false, expanded: false }, renderTheme, renderContext()));
   assert.equal(collapsedRoster, "✓ 2 other sessions in /repo (3 connected)");
-  const expandedRoster = renderToText(intercomTool.renderResult(roster, { isPartial: false, expanded: true }, renderTheme, { isError: false, expanded: true }));
+  const expandedRoster = renderToText(intercomTool.renderResult(roster, { isPartial: false, expanded: true }, renderTheme, renderContext({ expanded: true })));
   assert.match(expandedRoster, /peer-a\n• peer-b/);
 });
 
@@ -2858,8 +2896,8 @@ test("outgoing tool calls preserve full messages when expanded", async () => {
     ] as const) {
       const tool = harness.tools.find((candidate) => candidate.name === name)!;
       assert.ok(tool.renderCall);
-      assert.equal(renderToText(tool.renderCall(args, renderTheme, { expanded: true })), `${title}\n  ${message}`);
-      assert.equal(renderToText(tool.renderCall(args, renderTheme, { expanded: false })), `${title}\n  ${"a".repeat(95)}…`);
+      assert.equal(renderToText(tool.renderCall(args, renderTheme, renderContext({ expanded: true }))), `${title}\n  ${message}`);
+      assert.equal(renderToText(tool.renderCall(args, renderTheme, renderContext())), `${title}\n  ${"a".repeat(95)}…`);
       assert.equal(args.message, message);
     }
   });
