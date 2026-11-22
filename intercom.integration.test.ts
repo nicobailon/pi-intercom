@@ -3691,6 +3691,43 @@ test("busy non-interactive sessions auto-reply to top-level asks without abortin
   }
 });
 
+test("busy non-interactive sessions report a plain send as not delivered and send no canned reply", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+  let abortCount = 0;
+  const harness = createExtensionHarness("pipe-send-worker", {
+    abort: () => { abortCount += 1; },
+    hasUI: false,
+    isIdle: () => false,
+  });
+  const repliesToSend: Message[] = [];
+  const onMessage = (_from: SessionInfo, message: Message) => {
+    if (message.replyTo === "pipe-mode-send") repliesToSend.push(message);
+  };
+  planner.on("message", onMessage);
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const target = await waitForSessionByName(planner, "pipe-send-worker");
+    await harness.emitLifecycle("agent_start");
+
+    const result = await planner.send(target.id, { messageId: "pipe-mode-send", text: "FYI while you work." });
+    assert.deepEqual(
+      { delivered: result.delivered, delivery: result.delivery, outcomeKnown: result.outcomeKnown, code: result.code },
+      { delivered: false, delivery: "failed", outcomeKnown: true, code: "E_RECEIVER_REFUSED" },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(repliesToSend.length, 0);
+    assert.equal(harness.sentMessages.length, 0);
+    assert.equal(abortCount, 0);
+  } finally {
+    planner.off("message", onMessage);
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
 test("supervisor tool registers only when child metadata is present", async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
 
@@ -5700,7 +5737,7 @@ test("a message reaching a session whose context went stale reports an expired r
     await harness.emitLifecycle("session_start");
     const target = await waitForSessionByName(planner, "stale-receiver");
     sessionId = "stale-receiver-replaced";
-    // Not awaited: expired is not delivery proof, so the send itself waits out the broker's receipt timeout.
+    // Not awaited: the expired receipt is the outcome under test; the broker turns it into a refused delivery.
     void planner.send(target.id, { messageId: "stale-receiver-message", text: "Dropped" }).catch(() => undefined);
     await waitForCondition(() => receipts.includes("expired"), "stale-context expired receipt");
     assert.equal(harness.sentMessages.length, 0);
