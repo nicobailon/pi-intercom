@@ -310,10 +310,12 @@ class IntercomBroker {
     setInterval(() => this.evictSilentSessions(), LIVENESS_SWEEP_MS).unref();
   }
 
-  // A process that died without closing its socket can leave it open, and writes to it
-  // still succeed. Dropping a session whose client stopped heartbeating hands its mail
-  // to the mailbox through the normal close path.
+  // Local pipes/Unix sockets close when their owning process exits. Silence on an
+  // open socket only means the client's event loop may be busy (e.g. synchronous
+  // tools), not that it died. Keep heartbeat eviction only for TCP, where a dead
+  // peer can leave a half-open connection; socket close/error handles local cleanup.
   private evictSilentSessions(): void {
+    if (typeof LISTEN_TARGET === "string") return;
     const now = Date.now();
     const sinceLastSweepMs = now - this.lastLivenessSweepAt;
     this.lastLivenessSweepAt = now;
@@ -568,6 +570,7 @@ class IntercomBroker {
           ...(session.status !== undefined ? { status: session.status } : {}),
           ...(session.tmuxPane !== undefined ? { tmuxPane: session.tmuxPane } : {}),
           ...(session.herdrPaneId !== undefined ? { herdrPaneId: session.herdrPaneId } : {}),
+          ...(session.herdrTerminalId !== undefined ? { herdrTerminalId: session.herdrTerminalId } : {}),
           trustedLocal: typeof LISTEN_TARGET === "string" && process.platform !== "win32",
         };
 
@@ -707,12 +710,15 @@ class IntercomBroker {
           .then((resolvedSessions) => writeMessage(socket, { type: "sessions", requestId, sessions: resolvedSessions }))
           .catch((cause) => {
             const detail = cause instanceof Error ? cause.message : String(cause);
-            const fallback = sessions.map((session) => ({
-              ...session,
-              herdrLocation: session.herdrPaneId
-                ? { status: "unavailable" as const, paneId: session.herdrPaneId, reason: "command_failed" as const, detail }
-                : { status: "not_hosted" as const },
-            }));
+            const fallback = sessions.map((session) => {
+              const paneId = session.herdrPaneId ?? session.herdrTerminalId;
+              return {
+                ...session,
+                herdrLocation: paneId
+                  ? { status: "unavailable" as const, paneId, reason: "command_failed" as const, detail }
+                  : { status: "not_hosted" as const },
+              };
+            });
             writeMessage(socket, { type: "sessions", requestId, sessions: fallback });
           });
         break;
@@ -752,7 +758,12 @@ class IntercomBroker {
           this.writeDeliveryFailure(socket, message.id, "Exact target requires an id and endpoint epoch", "E_INVALID_TARGET");
           break;
         }
-        if (hasTargetId && hasTargetEpoch) {
+        // An exact ID of a disconnected session wins over a live name or ID
+        // prefix, including a live session the client pinned: the client cannot
+        // see disconnected sessions.
+        const disconnectedTargets = this.findDisconnectedSessions(clientMessage.to, fromSession.scopeId);
+        const disconnectedExact = disconnectedTargets.some((session) => session.info.id === clientMessage.to);
+        if (hasTargetId && hasTargetEpoch && !disconnectedExact) {
           const targetId = clientMessage.targetId as string;
           const targetEpoch = clientMessage.targetEpoch as string;
           const fingerprint = messageDeliveryFingerprint(message, targetId);
@@ -773,7 +784,7 @@ class IntercomBroker {
           clientMessage.to = targetId;
         }
 
-        const targets = this.findSessions(clientMessage.to, fromSession.scopeId);
+        const targets = disconnectedExact ? [] : this.findSessions(clientMessage.to, fromSession.scopeId);
         if (targets.length === 1) {
           const target = targets[0];
           const fingerprint = messageDeliveryFingerprint(message, target.info.id);
@@ -843,7 +854,6 @@ class IntercomBroker {
           break;
         }
 
-        const disconnectedTargets = this.findDisconnectedSessions(clientMessage.to, fromSession.scopeId);
         if (disconnectedTargets.length === 1) {
           const disconnectedTarget = disconnectedTargets[0]!;
           const target = disconnectedTarget.info;
@@ -913,6 +923,8 @@ class IntercomBroker {
         const sender = route ? this.sessions.get(route.from) : undefined;
         if (route?.to === currentKey && receiver?.socket === socket && RECEIPT_PROOF_STATUSES.has(clientMessage.receipt.status)) {
           this.confirmPendingReceipt(this.deliveryRecordKey(route.from, clientMessage.receipt.messageId), socket);
+        } else if (route?.to === currentKey && receiver?.socket === socket && clientMessage.receipt.status === "expired") {
+          this.rejectPendingReceipt(this.deliveryRecordKey(route.from, clientMessage.receipt.messageId), socket, clientMessage.receipt.detail ?? "Receiver refused the message");
         }
         if (route?.to === currentKey && receiver?.socket === socket && sender) {
           writeMessage(sender.socket, {
@@ -1216,6 +1228,19 @@ class IntercomBroker {
     // Release the answered ask only now, so a retry of an unconfirmed reply still matches it.
     this.releaseReplyEdge(pending.replyTo, pending.scopeId);
     if (pending.senderSocket.writable) this.writeDeliverySuccess(pending.senderSocket, pending.messageId, "socket_delivered", pending.demoted);
+  }
+
+  // An expired receipt before any proof means the receiver refused the message: a known, final failure.
+  private rejectPendingReceipt(key: string, receiverSocket: net.Socket, reason: string): void {
+    const pending = this.pendingReceipts.get(key);
+    if (!pending || pending.targetSocket !== receiverSocket) return;
+    clearTimeout(pending.timer);
+    this.pendingReceipts.delete(key);
+    if (this.deliveryRecords.get(key)?.state === "unknown") {
+      this.updateDeliveryRecord(pending.fromKey, pending.messageId, "failed", reason, "E_RECEIVER_REFUSED");
+    }
+    this.releaseReplyEdge(pending.messageId, pending.scopeId);
+    if (pending.senderSocket.writable) this.writeDeliveryFailure(pending.senderSocket, pending.messageId, reason, "E_RECEIVER_REFUSED");
   }
 
   private failPendingReceipt(key: string, reason: string, code: string): void {

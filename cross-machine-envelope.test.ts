@@ -37,6 +37,14 @@ test("operator origin lookup excludes its own transient CLI session", () => {
   });
 });
 
+test("operator origin lookup does not guess between same-named sessions", () => {
+  const first = { id: fakeSessionId, name: "pi-intercom-cli" };
+  const second = { id: "00000000-0000-4000-8000-000000000003", name: "pi-intercom-cli" };
+  assert.deepEqual(resolveOrigin([first, second], "pi-intercom-cli", "laptop", null, {}), {
+    name: "pi-intercom-cli", sessionId: "unknown", machine: "laptop",
+  });
+});
+
 test("relay envelope carries structured origin and a one-line fallback marker", () => {
   const parsed = parseRelayEnvelope(JSON.stringify(envelope()));
   assert.equal(relaySenderName(parsed.origin), "worker@laptop");
