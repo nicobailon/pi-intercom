@@ -422,6 +422,7 @@ The supervisor can reply with plain JSON or a fenced `json` block. If the reply 
 | `cwd` | string | Working directory filter for `list-cwd`. For send/ask, scopes target lookup to that directory; without `to`, selects the sole live peer there. |
 | `openProjectPaneIfMissing` | boolean | For `send`/`ask` with `cwd`, open a visible Herdr project pane and launch Pi when no matching live session exists |
 | `focus` | boolean | For `openProjectPaneIfMissing`, focus the new Herdr pane. Defaults to true |
+| `workspaceId`, `tabId` | string | For `list`, show only peers whose current Herdr workspace or tab has this exact ID (the bracketed IDs `list` shows). Sessions with no current Herdr location are left out. |
 
 ### contact_supervisor
 

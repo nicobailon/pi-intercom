@@ -1361,6 +1361,64 @@ console.log(JSON.stringify({ result: { snapshot: {
   }
 });
 
+test("list workspaceId and tabId filters show only peers in that Herdr location", { concurrency: false }, async () => {
+  const fixtureDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-herdr-filter-"));
+  const fixtureBin = path.join(fixtureDir, "herdr-fixture");
+  writeFileSync(fixtureBin, `#!/usr/bin/env node
+console.log(JSON.stringify({ result: { snapshot: {
+  panes: [
+    { pane_id: "pane-a", tab_id: "tab-a", workspace_id: "ws-a" },
+    { pane_id: "pane-b", tab_id: "tab-b", workspace_id: "ws-b" }
+  ],
+  tabs: [{ tab_id: "tab-a", workspace_id: "ws-a", label: "A" }, { tab_id: "tab-b", workspace_id: "ws-b", label: "B" }],
+  workspaces: [{ workspace_id: "ws-a", label: "Alpha" }, { workspace_id: "ws-b", label: "Beta" }]
+} } }));
+`);
+  chmodSync(fixtureBin, 0o755);
+  const previousHerdrBin = process.env.HERDR_BIN;
+  process.env.HERDR_BIN = fixtureBin;
+  let setup: Awaited<ReturnType<typeof setupClients>>;
+  try {
+    setup = await setupClients();
+  } finally {
+    if (previousHerdrBin === undefined) delete process.env.HERDR_BIN;
+    else process.env.HERDR_BIN = previousHerdrBin;
+  }
+  const workerA = new IntercomClient();
+  const workerB = new IntercomClient();
+  const harness = createExtensionHarness("filter-caller", { sessionId: "filter-caller-session" });
+
+  try {
+    for (const [client, name, herdrPaneId] of [[workerA, "worker-a", "pane-a"], [workerB, "worker-b", "pane-b"]] as const) {
+      await client.connect({ name, cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now(), herdrPaneId });
+    }
+    const { default: piIntercomExtension } = await import("./index.ts");
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    await waitForSessionByName(setup.planner, "filter-caller");
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const list = async (params: Record<string, string>) => {
+      const result = await intercomTool.execute("filter-list", { action: "list", ...params }, new AbortController().signal, undefined, harness.ctx);
+      return result.content.map((part) => part.text).join("\n").split("\n\n")[1];
+    };
+
+    const byWorkspace = await list({ workspaceId: "ws-a" });
+    assert.match(byWorkspace, /^\*\*Other sessions \(workspace: ws-a\):\*\*\n• worker-a /);
+    assert.doesNotMatch(byWorkspace, /worker-b|planner|orchestrator/);
+    const byTab = await list({ tabId: "tab-b" });
+    assert.match(byTab, /^\*\*Other sessions \(tab: tab-b\):\*\*\n• worker-b /);
+    assert.doesNotMatch(byTab, /worker-a|planner|orchestrator/);
+    assert.equal(await list({ workspaceId: "ws-a", tabId: "tab-b" }), "**Other sessions (workspace: ws-a, tab: tab-b):**\nNo other sessions in this Herdr location.");
+    assert.match(await list({}), /worker-a[\s\S]*worker-b|worker-b[\s\S]*worker-a/);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await workerA.disconnect().catch(() => undefined);
+    await workerB.disconnect().catch(() => undefined);
+    await setup.cleanup();
+    rmSync(fixtureDir, { recursive: true, force: true });
+  }
+});
+
 test("broker propagates a session's tmux pane id into the roster", { concurrency: false }, async () => {
   const { planner, cleanup } = await setupClients();
   const worker = new IntercomClient();
