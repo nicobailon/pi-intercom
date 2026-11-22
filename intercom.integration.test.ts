@@ -1277,6 +1277,38 @@ test("broker delivers a mailbox larger than its write cap without dropping the r
   }
 });
 
+test("send and ask name the missing field and list what arrived", { concurrency: false }, async () => {
+  const setup = await setupClients();
+  const harness = createExtensionHarness("missing-field-worker", { sessionId: "missing-field-worker-session" });
+
+  try {
+    const { default: piIntercomExtension } = await import("./index.ts");
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    await waitForSessionByName(setup.planner, "missing-field-worker");
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const run = async (id: string, params: Record<string, unknown>) => {
+      const result = await intercomTool.execute(id, params, new AbortController().signal, undefined, harness.ctx);
+      assert.equal(result.details?.error, true);
+      return result.content.map((part) => part.text).join("\n");
+    };
+
+    const noTarget = await run("send-no-target", { action: "send", message: "status?", focus: false });
+    assert.match(noTarget, /^send is missing a target: pass to \(a session name or ID\) or cwd\./);
+    assert.match(noTarget, /Received: action, message, focus\./);
+    assert.match(noTarget, /Received: action, message, focus\. To answer a message, pass its sender as to\.$/);
+
+    const noMessage = await run("send-no-message", { action: "send", to: "planner" });
+    assert.match(noMessage, /^send is missing message\. Received: action, to\.$/);
+
+    const askNothing = await run("ask-nothing", { action: "ask" });
+    assert.match(askNothing, /^ask is missing message and a target: pass to \(a session name or ID\) or cwd\. Received: action\.$/);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await setup.cleanup();
+  }
+});
+
 test("all-non-Herdr rosters preserve upstream structured and text output without invoking Herdr", { concurrency: false }, async () => {
   const fixtureDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-no-herdr-"));
   const marker = path.join(fixtureDir, "invoked");

@@ -20,6 +20,8 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 - The README now documents the mailbox for disconnected sessions: who gets queued mail, when it expires, and what a broker restart loses. Thanks to [@mimadiule](https://github.com/mimadiule) for issue #188.
 
 ### Fixed
+- A `send` or `ask` with a missing field used to answer "Missing 'to' or 'cwd', or missing 'message' parameter". The error now names the missing field and lists the fields that arrived. Thanks to [@drye](https://github.com/drye) for #215.
+- Long synchronous tools no longer make local sessions disappear after 90 seconds. The broker keeps open Unix sockets and named pipes registered regardless of heartbeat silence, and still removes them on socket close/error. TCP heartbeat eviction and client-side broker probes remain enabled.
 - Long synchronous tools no longer make local sessions disappear after 90 seconds. The broker keeps open Unix sockets and named pipes registered regardless of heartbeat silence, and still removes them on socket close/error. TCP heartbeat eviction and client-side broker probes remain enabled. Thanks to [@odfalik](https://github.com/odfalik) for #211 and #213.
 - A cross-machine send no longer crashes Pi when SSH or the remote relay closes its input before the message has finished writing. Failed commands retain their diagnostics, and incomplete writes cannot report success. Thanks to [@Oscar-Williams](https://github.com/Oscar-Williams) for #185.
 - After a reboot, the broker could refuse to start for hours when its old pid file pointed at a process the system had since given to another user. It now treats that pid as stale. Thanks to [@mimadiule](https://github.com/mimadiule) for issue #186.
