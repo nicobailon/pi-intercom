@@ -304,12 +304,15 @@ export async function openHerdrAppPane(input: {
 
   const app = input.app ?? createHerdrClient({ bin: "herdr-app", missingMessage: APP_MISSING });
   const command = projectCommand();
+  // herdr-core's daemon resolves the command on its own PATH, which may lack pi (mise, nvm): run it with the caller's PATH.
+  const argv = process.env.PATH ? ["/usr/bin/env", `PATH=${process.env.PATH}`, command] : [command];
   let labels = ["--label", `herdr.space=${space}`, "--label", `herdr.tab=${tab}`];
   if (input.placement === "space") {
     const target = await spaceForFolder(app, hc, space, projectRoot, input.signal);
     if (target === "new") {
       // space.new shows and focuses the new space itself, whatever `focus` says.
-      const args = { name: basename(projectRoot) || undefined, folder: projectRoot, argv: ["sh", "-c", command] };
+      // Unlike hc run, space.new has no known --keep, so a shell may not stay open when Pi exits.
+      const args = { name: basename(projectRoot) || undefined, folder: projectRoot, argv };
       const created = await app.run<{ terminal?: unknown }>(["do", "space.new", JSON.stringify(args)], { timeoutMs: 15_000, signal: input.signal });
       if (created.ok === false) throw new Error(formatHerdrError(created.error));
       if (typeof created.data.terminal !== "string") throw new Error("Herdr project pane error (PANE_GONE): space.new returned no terminal.");
@@ -319,8 +322,6 @@ export async function openHerdrAppPane(input: {
     if (target) labels = ["--label", `herdr.space=${target}`];
   }
 
-  // herdr-core's daemon resolves the command on its own PATH, which may lack pi (mise, nvm): run it with the caller's PATH.
-  const argv = process.env.PATH ? ["/usr/bin/env", `PATH=${process.env.PATH}`, command] : [command];
   // --no-parent: the peer must outlive the caller. --keep: a shell stays in the pane when Pi exits, as in the TUI.
   const started = await hc.run<{ address?: unknown }>([
     "run", "--bg", "--json", "--no-parent", "--keep", "--cwd", projectRoot, ...labels, "--", ...argv,

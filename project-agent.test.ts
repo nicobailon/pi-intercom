@@ -199,7 +199,7 @@ test("placement space creates a space named after the folder when no space is in
     assert.equal(run(), undefined);
     const spaceNew = app.calls[1]!;
     assert.deepEqual(spaceNew.slice(0, 2), ["do", "space.new"]);
-    assert.deepEqual(JSON.parse(spaceNew[2]!), { name: basename(launched.projectRoot), folder: launched.projectRoot, argv: ["sh", "-c", "pi"] });
+    assert.deepEqual(JSON.parse(spaceNew[2]!), { name: basename(launched.projectRoot), folder: launched.projectRoot, argv: ["/usr/bin/env", `PATH=${process.env.PATH}`, "pi"] });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
