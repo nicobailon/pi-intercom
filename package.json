@@ -8,6 +8,7 @@
     "pi-intercom": "cli.mjs"
   },
   "files": [
+    "attachment-freshness.ts",
     "cli.mjs",
     "cli.ts",
     "cross-machine-discovery.ts",

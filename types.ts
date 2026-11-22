@@ -121,6 +121,7 @@ export interface Attachment {
   name: string;
   content: string;
   language?: string;
+  sha256?: string;
 }
 
 export type MessageReceiptStatus = "receiver_received" | "queued" | "injected" | "acknowledged" | "expired" | "cancelled" | "superseded" | "cancellation_requested";

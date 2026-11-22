@@ -40,6 +40,7 @@ import { runCommand, sendCrossMachine } from "./cross-machine-transport.ts";
 import { listMachineAgents, listSavedMachines, parseCrossMachineTarget } from "./cross-machine-discovery.ts";
 import { formatHandoverMessage, generateHandoverBody, readGitState } from "./handover.ts";
 import { isIdleWakePending, releaseIdleWake, reserveIdleWake } from "./idle-wake.ts";
+import { attachmentFreshnessTag, pinFileAttachments } from "./attachment-freshness.ts";
 
 const INTERCOM_TOOL_NAME = "intercom";
 const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
@@ -249,9 +250,9 @@ function formatAttachments(attachments: Attachment[]): string {
   let text = "";
   for (const att of attachments) {
     if (att.language) {
-      text += `\n\n---\nAttachment: ${att.name}\n~~~${att.language}\n${att.content}\n~~~`;
+      text += `\n\n---\nAttachment: ${att.name}${attachmentFreshnessTag(att)}\n~~~${att.language}\n${att.content}\n~~~`;
     } else {
-      text += `\n\n---\nAttachment: ${att.name}\n${att.content}`;
+      text += `\n\n---\nAttachment: ${att.name}${attachmentFreshnessTag(att)}\n${att.content}`;
     }
   }
   return text;
@@ -1975,6 +1976,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
           };
         }
       }
+      const pinnedAttachments = pinFileAttachments(attachments);
       const target: DeliveryTarget = cwd
         ? await resolveCwdDeliveryTarget(connectedClient, { to, cwd, openProjectPaneIfMissing, focus, signal })
         : (await resolveSessionTarget(connectedClient, to!)) ?? { id: to!, label: to! };
@@ -2014,7 +2016,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
       }
       const { result, display, resolution, noMatchText } = await sendWithNamePrefixFallback(connectedClient, { rawTo: cwd ? "" : to!, firstTarget: sendTo, display: targetDisplay }, (attemptTo) => connectedClient.send(attemptTo, {
         text: message,
-        attachments,
+        attachments: pinnedAttachments,
         replyTo: effectiveReplyTo,
         supersedes,
         retryOf,
@@ -2990,7 +2992,7 @@ Usage:
                 details: { error: true },
               };
             }
-            const sent = await askWithNamePrefixFallback(connectedClient, { rawTo: cwd ? "" : to!, firstTarget: sendTo, display: targetDisplay }, { text: message, attachments, replyTo, supersedes, retryOf }, {
+            const sent = await askWithNamePrefixFallback(connectedClient, { rawTo: cwd ? "" : to!, firstTarget: sendTo, display: targetDisplay }, { text: message, attachments: pinFileAttachments(attachments), replyTo, supersedes, retryOf }, {
               signal: _signal,
               onAttempt: (askId) => { questionId = askId; },
               deliveryState: () => latestDeliveryState(questionId, deliveryState),
@@ -3057,7 +3059,7 @@ Usage:
             }
             const result = await connectedClient.send(target.from.id, {
               text: message,
-              attachments,
+              attachments: pinFileAttachments(attachments),
               replyTo: target.message.id,
             });
             if (!result.delivered) {

@@ -4971,6 +4971,54 @@ test("a late reply is labelled in the asker's inbound message metadata", { concu
   }
 });
 
+test("file attachments pinned on send are tagged when they changed on disk before receipt", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const sender = createExtensionHarness("pin-sender", { sessionId: "pin-sender-session" });
+  const receiver = createExtensionHarness("pin-receiver", { sessionId: "pin-receiver-session" });
+  const dir = mkdtempSync(path.join(tmpdir(), "pi-intercom-pin-"));
+  const files = { kept: path.join(dir, "kept.txt"), edited: path.join(dir, "edited.txt"), removed: path.join(dir, "removed.txt") };
+  for (const file of Object.values(files)) writeFileSync(file, "original");
+
+  try {
+    piIntercomExtension(sender.pi as never);
+    piIntercomExtension(receiver.pi as never);
+    await sender.emitLifecycle("session_start");
+    await receiver.emitLifecycle("session_start");
+    const receiverSession = await waitForSessionByName(planner, "pin-receiver");
+
+    const received = new Promise<Message>((resolve) => planner.on("message", (_from: SessionInfo, message: Message) => resolve(message)));
+    const intercomTool = sender.tools.find((tool) => tool.name === "intercom")!;
+    const result = await intercomTool.execute("pin-send", {
+      action: "send",
+      to: "planner",
+      message: "Files attached.",
+      attachments: [
+        ...Object.values(files).map((file) => ({ type: "file" as const, name: file, content: "original" })),
+        { type: "file" as const, name: "relative.txt", content: "original" },
+      ],
+    }, new AbortController().signal, undefined, sender.ctx);
+    assert.equal(result.details?.delivered, true);
+    const attachments = (await received).content.attachments!;
+    assert.deepEqual(attachments.map((attachment) => attachment.sha256 !== undefined), [true, true, true, false]);
+
+    writeFileSync(files.edited, "edited");
+    rmSync(files.removed);
+    assert.equal((await planner.send(receiverSession.id, { text: "Forwarded.", attachments })).delivered, true);
+    await waitForCondition(() => receiver.sentMessages.length > 0, "receiver injection");
+    const content = receiver.sentMessages[0]!.message.content!;
+    assert.match(content, new RegExp(`Attachment: ${files.kept}\n`));
+    assert.match(content, new RegExp(`Attachment: ${files.edited} \\(changed on disk since it was sent\\)\n`));
+    assert.match(content, new RegExp(`Attachment: ${files.removed} \\(no longer on disk\\)\n`));
+    assert.match(content, /Attachment: relative\.txt\n/);
+  } finally {
+    await sender.emitLifecycle("session_shutdown");
+    await receiver.emitLifecycle("session_shutdown");
+    await cleanup();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("intercom reply sends attachments", { concurrency: false }, async () => {
   const { planner, cleanup } = await setupClients();
   const { default: piIntercomExtension } = await import("./index.ts");
