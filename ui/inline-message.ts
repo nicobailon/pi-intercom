@@ -10,17 +10,9 @@ export class InlineMessageComponent implements Component {
   private theme: Theme;
   private replyCommand?: string;
   private bodyText?: string;
-  // Message/bodyText are immutable; rendered rows also track layout, sender and theme changes.
   private collapsedPreview?: string;
   private wrappedBody?: { width: number; lines: string[] };
-  private rendered?: {
-    width: number;
-    collapsed: boolean;
-    senderName: string;
-    cwd: string;
-    palette: string;
-    lines: string[];
-  };
+  private rendered?: { width: number; collapsed: boolean; lines: string[] };
 
   constructor(
     from: SessionInfo,
@@ -53,6 +45,14 @@ export class InlineMessageComponent implements Component {
 
   render(width: number): string[] {
     const collapsed = !this.expansionState.expanded;
+    const cached = this.rendered;
+    if (cached && cached.width === width && cached.collapsed === collapsed) return cached.lines;
+    const lines = this.renderLines(width, collapsed);
+    this.rendered = { width, collapsed, lines };
+    return lines;
+  }
+
+  private renderLines(width: number, collapsed: boolean): string[] {
     const remoteSender = this.message.crossMachine && relaySenderName(this.message.crossMachine.origin);
     const senderName = remoteSender
       ? `${remoteSender} · unverified cross-machine`
@@ -60,20 +60,6 @@ export class InlineMessageComponent implements Component {
     const replyLabel = remoteSender
       ? `To send a new message to ${remoteSender}:`
       : "To reply:";
-    // Pi keeps the same theme proxy when colors change. Probe only empty strings, not message text.
-    const palette = width < 3 ? "" : this.theme.fg("muted", "") + this.theme.fg("toolTitle", "")
-      + this.theme.fg("text", "") + this.theme.fg("dim", "");
-    const cached = this.rendered;
-    if (cached && cached.width === width && cached.collapsed === collapsed
-      && cached.senderName === senderName && cached.cwd === this.from.cwd && cached.palette === palette) {
-      return cached.lines;
-    }
-    const lines = this.renderLines(width, collapsed, senderName, replyLabel);
-    this.rendered = { width, collapsed, senderName, cwd: this.from.cwd, palette, lines };
-    return lines;
-  }
-
-  private renderLines(width: number, collapsed: boolean, senderName: string, replyLabel: string): string[] {
     const lines: string[] = [];
     const borderChar = "─";
     if (width < 3) {
