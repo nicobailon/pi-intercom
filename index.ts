@@ -891,11 +891,11 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
   }
   function notifyIfLive(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error", generation = runtimeGeneration): void {
     const liveContext = getLiveContext(ctx, generation);
-    if (!liveContext) {
+    if (!liveContext?.hasUI) {
       return;
     }
     try {
-      if (liveContext.hasUI) liveContext.ui.notify(message, level);
+      liveContext.ui.notify(message, level);
     } catch {
       // The UI can disappear during session shutdown/reload while async overlay work is settling.
     }
