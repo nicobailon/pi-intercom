@@ -119,7 +119,6 @@ export interface Attachment {
   name: string;
   content: string;
   language?: string;
-  path?: string;
   sha256?: string;
 }
 
