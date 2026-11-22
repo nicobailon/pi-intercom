@@ -2699,6 +2699,12 @@ Usage:
       focus: Type.Optional(Type.Boolean({
         description: "For openProjectPaneIfMissing, focus the new Herdr pane. Defaults to true.",
       })),
+      workspaceId: Type.Optional(Type.String({
+        description: "For 'list': only show peers in this Herdr workspace ID.",
+      })),
+      tabId: Type.Optional(Type.String({
+        description: "For 'list': only show peers in this Herdr tab ID.",
+      })),
       noWake: Type.Optional(Type.Boolean({
         description: "For 'send' only: true delivers the message without starting a turn in an idle receiver; it reads the message on its next turn. Use for information that needs no action or reply. Ignored when the send is a reply to an ask.",
       })),
@@ -2717,7 +2723,7 @@ Usage:
 
       syncPresenceIdentity(ctx.sessionManager.getSessionId());
 
-      const { action, to, message, attachments, replyTo, messageId, supersedes, retryOf, cwd, openProjectPaneIfMissing, focus, noWake } = params;
+      const { action, to, message, attachments, replyTo, messageId, supersedes, retryOf, cwd, openProjectPaneIfMissing, focus, noWake, workspaceId, tabId } = params;
 
       switch (action) {
         case "list": {
@@ -2725,7 +2731,12 @@ Usage:
             const mySessionId = connectedClient.sessionId;
             const sessions = await connectedClient.listSessions();
             const currentSession = sessions.find(s => s.id === mySessionId);
-            const otherSessions = sessions.filter(s => s.id !== mySessionId);
+            const location = [workspaceId && `workspace: ${workspaceId}`, tabId && `tab: ${tabId}`].filter(Boolean).join(", ");
+            const otherSessions = sessions.filter((s) => s.id !== mySessionId && (!location || (
+              s.herdrLocation?.status === "current"
+              && (!workspaceId || s.herdrLocation.workspace.id === workspaceId)
+              && (!tabId || s.herdrLocation.tab.id === tabId)
+            )));
 
             if (!currentSession) {
               return {
@@ -2736,9 +2747,10 @@ Usage:
 
             const prefixes = sessionIdPrefixes(sessions);
             const currentSection = `**Current session:**\n${formatSessionListRow(currentSession, currentSession.cwd, true, prefixes.get(currentSession.id)!)}`;
+            const otherHeading = location ? `**Other sessions (${location}):**` : "**Other sessions:**";
             const otherSection = otherSessions.length === 0
-              ? "**Other sessions:**\nNo other sessions connected."
-              : `**Other sessions:**\n${otherSessions.map((session) => formatSessionListRow(session, currentSession.cwd, false, prefixes.get(session.id)!)).join("\n")}`;
+              ? `${otherHeading}\n${location ? "No other sessions in this Herdr location." : "No other sessions connected."}`
+              : `${otherHeading}\n${otherSessions.map((session) => formatSessionListRow(session, currentSession.cwd, false, prefixes.get(session.id)!)).join("\n")}`;
 
             return {
               content: [{ type: "text", text: `${currentSection}\n\n${otherSection}` }],
