@@ -2276,7 +2276,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     sessionStartedAt = null;
   });
   pi.on("turn_end", (event, ctx) => {
-    if (!getLiveContext()) {
+    if (!getLiveContext(ctx)) {
       return;
     }
     replyTracker.endTurn();
@@ -2290,10 +2290,10 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     }
   });
   pi.on("agent_start", (_event, ctx) => {
-    releaseIdleWake(ctx.sessionManager);
-    if (!getLiveContext()) {
+    if (!getLiveContext(ctx)) {
       return;
     }
+    releaseIdleWake(ctx.sessionManager);
     agentRunning = true;
     if (runtimeContext) flushHeldInboundMessages(runtimeContext, runtimeGeneration);
     activeTools.clear();
@@ -2322,7 +2322,12 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     syncPresenceStatus();
   });
   pi.on("turn_start", (_event, ctx) => {
-    const sessionId = ctx.sessionManager.getSessionId();
+    let sessionId: string;
+    try {
+      sessionId = ctx.sessionManager.getSessionId();
+    } catch {
+      return;
+    }
     if (!currentSessionId || sessionId !== currentSessionId) {
       if (!config.enabled) {
         return;
