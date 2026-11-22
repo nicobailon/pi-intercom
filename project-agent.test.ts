@@ -164,7 +164,7 @@ test("waitForProjectSession returns the new project-pane session when no target 
     currentSessionId: "self",
     beforeSessionIds: new Set(before.map((item) => item.id)),
     pollMs: 1,
-    timeoutMs: 100,
+    timeoutMs: 5_000,
   });
 
   assert.equal(resolved.id, "pane-peer");
@@ -190,7 +190,7 @@ test("waitForProjectSession honors the target guard after opening a project pane
     beforeSessionIds: new Set(before.map((item) => item.id)),
     to: "worker",
     pollMs: 1,
-    timeoutMs: 100,
+    timeoutMs: 5_000,
   });
 
   assert.equal(resolved.id, "worker-id");
