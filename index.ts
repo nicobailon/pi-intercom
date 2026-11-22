@@ -1459,8 +1459,11 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     const matchesReplyWaiter = replyWaiter !== null
       && ((from.name || from.id).toLowerCase() === replyWaiter.from.toLowerCase() || from.id === replyWaiter.from)
       && message.replyTo === replyWaiter.replyTo;
+    const seenAt = seenInboundMessages.get(`${from.id}\0${message.id}`);
+    const alreadyAccepted = seenAt !== undefined && Date.now() - seenAt <= INBOUND_MESSAGE_DEDUPE_RETENTION_MS;
     // Refuse before any proof receipt, so the sender hears "not delivered" instead of "delivered".
-    if (!matchesReplyWaiter && !isBusyAutoReplyAsk(message) && !liveContext.hasUI && !liveContext.isIdle() && agentRunning) {
+    // A duplicate of an accepted message stays a duplicate.
+    if (!matchesReplyWaiter && !alreadyAccepted && !isBusyAutoReplyAsk(message) && !liveContext.hasUI && !liveContext.isIdle() && agentRunning) {
       emitMessageReceipt(message.id, "expired", BUSY_NON_INTERACTIVE_DETAIL);
       return;
     }
