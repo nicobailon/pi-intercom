@@ -5035,6 +5035,36 @@ test("broker queues replies to recently disconnected named senders", { concurren
   }
 });
 
+test("broker queues a send to a disconnected exact ID instead of a live same name or ID prefix", { concurrency: false }, async () => {
+  const { orchestrator, cleanup } = await setupClients();
+  const offline = new IntercomClient();
+  const live = new IntercomClient();
+  const reconnected = new IntercomClient();
+
+  try {
+    await offline.connect({ name: "offline-agent", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, "worker");
+    const left = once(orchestrator, "session_left");
+    await offline.disconnect();
+    await left;
+    const liveMessages: Message[] = [];
+    live.on("message", (_from: SessionInfo, message: Message) => liveMessages.push(message));
+    await live.connect({ name: "worker", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, "worker-2");
+
+    const result = await orchestrator.send("worker", { messageId: "exact-offline-id", text: "for the offline worker" });
+    assert.equal(result.delivery, "queued");
+
+    const queued = once(reconnected, "message") as Promise<[SessionInfo, Message]>;
+    await reconnected.connect({ name: "offline-agent", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, "worker");
+    const [, message] = await queued;
+    assert.equal(message.id, "exact-offline-id");
+    assert.deepEqual(liveMessages, []);
+  } finally {
+    await reconnected.disconnect().catch(() => undefined);
+    await live.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
 test("broker rejects blocking asks to disconnected targets", { concurrency: false }, async () => {
   const { planner, orchestrator, cleanup } = await setupClients();
 

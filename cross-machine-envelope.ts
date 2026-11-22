@@ -43,9 +43,12 @@ export function resolveOrigin(
   env: NodeJS.ProcessEnv = process.env,
 ): CrossMachineOrigin {
   const envSessionId = env.PI_INTERCOM_SESSION_ID?.trim() || env.PI_SESSION_ID?.trim();
+  const named = envSessionId
+    ? []
+    : sessions.filter((session) => session.id !== excludeSessionId && !session.runtimeFallbackAlias && session.name?.toLowerCase() === fallbackName.toLowerCase());
   const source = envSessionId
     ? sessions.find((session) => session.id === envSessionId)
-    : sessions.find((session) => session.id !== excludeSessionId && !session.runtimeFallbackAlias && session.name?.toLowerCase() === fallbackName.toLowerCase());
+    : named.length === 1 ? named[0] : undefined;
   return {
     name: source?.name?.trim() || fallbackName,
     sessionId: source?.id || envSessionId || "unknown",
