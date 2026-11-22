@@ -752,7 +752,12 @@ class IntercomBroker {
           this.writeDeliveryFailure(socket, message.id, "Exact target requires an id and endpoint epoch", "E_INVALID_TARGET");
           break;
         }
-        if (hasTargetId && hasTargetEpoch) {
+        // An exact ID of a disconnected session wins over a live name or ID
+        // prefix, including a live session the client pinned: the client cannot
+        // see disconnected sessions.
+        const disconnectedTargets = this.findDisconnectedSessions(clientMessage.to, fromSession.scopeId);
+        const disconnectedExact = disconnectedTargets.some((session) => session.info.id === clientMessage.to);
+        if (hasTargetId && hasTargetEpoch && !disconnectedExact) {
           const targetId = clientMessage.targetId as string;
           const targetEpoch = clientMessage.targetEpoch as string;
           const fingerprint = messageDeliveryFingerprint(message, targetId);
@@ -773,9 +778,6 @@ class IntercomBroker {
           clientMessage.to = targetId;
         }
 
-        // An exact ID of a disconnected session wins over a live name or ID prefix.
-        const disconnectedTargets = this.findDisconnectedSessions(clientMessage.to, fromSession.scopeId);
-        const disconnectedExact = disconnectedTargets.some((session) => session.info.id === clientMessage.to);
         const targets = disconnectedExact ? [] : this.findSessions(clientMessage.to, fromSession.scopeId);
         if (targets.length === 1) {
           const target = targets[0];
