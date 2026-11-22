@@ -4526,8 +4526,8 @@ test("a late reply is labelled in the asker's inbound message metadata", { concu
 test("file attachments pinned on send are tagged when they changed on disk before receipt", { concurrency: false }, async () => {
   const { planner, cleanup } = await setupClients();
   const { default: piIntercomExtension } = await import("./index.ts");
-  const sender = createExtensionHarness("pin-sender");
-  const receiver = createExtensionHarness("pin-receiver");
+  const sender = createExtensionHarness("pin-sender", { sessionId: "pin-sender-session" });
+  const receiver = createExtensionHarness("pin-receiver", { sessionId: "pin-receiver-session" });
   const dir = mkdtempSync(path.join(tmpdir(), "pi-intercom-pin-"));
   const files = { kept: path.join(dir, "kept.txt"), edited: path.join(dir, "edited.txt"), removed: path.join(dir, "removed.txt") };
   for (const file of Object.values(files)) writeFileSync(file, "original");
