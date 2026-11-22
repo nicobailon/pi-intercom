@@ -63,6 +63,8 @@ export interface SessionInfo {
   tmuxPane?: string;
   /** Launch-time Herdr pane alias. It may differ from the current pane id after a move. */
   herdrPaneId?: string;
+  /** herdr-core terminal address (HC_TERMINAL_ID) of a session hosted by the Herdr app. */
+  herdrTerminalId?: string;
   /** Present on list responses. `current` is freshly resolved for that request;
    *  other states explicitly distinguish non-Herdr sessions from failures. */
   herdrLocation?: HerdrLocation;

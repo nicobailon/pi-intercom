@@ -232,6 +232,9 @@ export function isSessionInfo(value: unknown): value is SessionInfo {
   if (value.herdrPaneId !== undefined && typeof value.herdrPaneId !== "string") {
     return false;
   }
+  if (value.herdrTerminalId !== undefined && typeof value.herdrTerminalId !== "string") {
+    return false;
+  }
   if (value.herdrLocation !== undefined && !isHerdrLocation(value.herdrLocation)) {
     return false;
   }
@@ -271,6 +274,9 @@ export function isSessionRegistration(value: unknown): value is SessionRegistrat
     return false;
   }
   if (value.herdrPaneId !== undefined && typeof value.herdrPaneId !== "string") {
+    return false;
+  }
+  if (value.herdrTerminalId !== undefined && typeof value.herdrTerminalId !== "string") {
     return false;
   }
   if (value.herdrSessionPath !== undefined && typeof value.herdrSessionPath !== "string") {
