@@ -310,10 +310,12 @@ class IntercomBroker {
     setInterval(() => this.evictSilentSessions(), LIVENESS_SWEEP_MS).unref();
   }
 
-  // A process that died without closing its socket can leave it open, and writes to it
-  // still succeed. Dropping a session whose client stopped heartbeating hands its mail
-  // to the mailbox through the normal close path.
+  // Local pipes/Unix sockets close when their owning process exits. Silence on an
+  // open socket only means the client's event loop may be busy (e.g. synchronous
+  // tools), not that it died. Keep heartbeat eviction only for TCP, where a dead
+  // peer can leave a half-open connection; socket close/error handles local cleanup.
   private evictSilentSessions(): void {
+    if (typeof LISTEN_TARGET === "string") return;
     const now = Date.now();
     const sinceLastSweepMs = now - this.lastLivenessSweepAt;
     this.lastLivenessSweepAt = now;
@@ -752,7 +754,12 @@ class IntercomBroker {
           this.writeDeliveryFailure(socket, message.id, "Exact target requires an id and endpoint epoch", "E_INVALID_TARGET");
           break;
         }
-        if (hasTargetId && hasTargetEpoch) {
+        // An exact ID of a disconnected session wins over a live name or ID
+        // prefix, including a live session the client pinned: the client cannot
+        // see disconnected sessions.
+        const disconnectedTargets = this.findDisconnectedSessions(clientMessage.to, fromSession.scopeId);
+        const disconnectedExact = disconnectedTargets.some((session) => session.info.id === clientMessage.to);
+        if (hasTargetId && hasTargetEpoch && !disconnectedExact) {
           const targetId = clientMessage.targetId as string;
           const targetEpoch = clientMessage.targetEpoch as string;
           const fingerprint = messageDeliveryFingerprint(message, targetId);
@@ -773,7 +780,7 @@ class IntercomBroker {
           clientMessage.to = targetId;
         }
 
-        const targets = this.findSessions(clientMessage.to, fromSession.scopeId);
+        const targets = disconnectedExact ? [] : this.findSessions(clientMessage.to, fromSession.scopeId);
         if (targets.length === 1) {
           const target = targets[0];
           const fingerprint = messageDeliveryFingerprint(message, target.info.id);
@@ -843,7 +850,6 @@ class IntercomBroker {
           break;
         }
 
-        const disconnectedTargets = this.findDisconnectedSessions(clientMessage.to, fromSession.scopeId);
         if (disconnectedTargets.length === 1) {
           const disconnectedTarget = disconnectedTargets[0]!;
           const target = disconnectedTarget.info;
