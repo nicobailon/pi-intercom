@@ -483,6 +483,7 @@ Create `~/.pi/agent/intercom/config.json`:
   "busyDelivery": "steer",
   "enabled": true,
   "replyHint": true,
+  "toolExposure": "direct",
   "status": "researching",
   "crossMachine": {
     "machineName": "laptop",
@@ -500,13 +501,14 @@ Create `~/.pi/agent/intercom/config.json`:
 | `busyDelivery` | `"steer"` | `"steer"` promptly steers peers into active interactive runs. Opt into `"human-first"` to hold peers until a turn boundary with no pending human input; one held peer is released per turn. Busy non-UI sessions ignore it. |
 | `enabled` | true | Enable/disable intercom entirely |
 | `replyHint` | true | Include reply instruction in incoming messages |
+| `toolExposure` | `"direct"` | `"direct"` declares the `intercom` tool to the model, as it always has. `"deferred"` registers it without declaring it, which saves the tool description (about 4.2 KB) and its skill line on every request; reach it from codemode scripts as `tools.intercom({...})` instead. Incoming messages and commands are unaffected |
 | `status` | — | Optional custom status suffix shown after the automatic lifecycle status, for example `thinking · researching` |
 | `crossMachine.machineName` | lowercased short hostname | Name peers use for this host in their Herdr saved-machine lists |
 | `crossMachine.remoteCommand` | `"pi-intercom"` | Command invoked through non-interactive SSH on remote machines |
 | `herdr.projectPlacement` | `"pane"` | Herdr app only. `"pane"` opens project panes beside the caller. `"space"` opens a new tab in a local space already in the target folder (beside the caller if that is the caller's space), or creates a space named after the folder; a new space always takes focus |
 
 If `config.json` cannot be parsed or contains an invalid value, pi-intercom logs the error and fails closed for inbound broker auto-triggering by using `inboundTrigger: "never"` until the config is fixed.
-Obsolete `toolVisibility` values are ignored; the generic `intercom` tool remains stable in the active tool set for prompt-cache friendliness.
+Obsolete `toolVisibility` values are ignored; the generic `intercom` tool remains stable in the active tool set for prompt-cache friendliness by default. `toolExposure: "deferred"` opts into the opposite trade: the tool is registered but never declared, so it costs no prompt space and is called from codemode scripts instead. That choice is made once at registration, so the tool set still never changes during a session.
 
 Custom broker commands are trusted local configuration: anyone who can edit this config can choose the executable used for future broker auto-spawns. For example, if you have Bun installed and want it to start the broker directly, use:
 

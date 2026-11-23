@@ -2682,6 +2682,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
   pi.registerTool(defineTool({
     name: "intercom",
     label: "Intercom",
+    exposure: config.toolExposure,
     description: `Send a message to another pi session running on this machine.
 Use this to communicate findings, request help, or coordinate work with other sessions.
 

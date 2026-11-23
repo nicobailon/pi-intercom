@@ -178,3 +178,19 @@ test("loadConfig reads herdr.projectPlacement, defaulting to pane", async () => 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("loadConfig defaults toolExposure to direct and accepts deferred", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-intercom-config-"));
+  try {
+    mkdirSync(join(root, "intercom"), { recursive: true });
+    await withAgentDir(root, () => {
+      assert.equal(loadConfig().toolExposure, "direct");
+      writeFileSync(join(root, "intercom", "config.json"), JSON.stringify({ toolExposure: "deferred" }));
+      assert.equal(loadConfig().toolExposure, "deferred");
+      writeFileSync(join(root, "intercom", "config.json"), JSON.stringify({ toolExposure: "lazy" }));
+      assert.throws(() => loadConfig(), /"toolExposure" must be "direct" or "deferred"/);
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
