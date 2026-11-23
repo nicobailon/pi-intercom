@@ -1,5 +1,4 @@
 import type { SessionInfo } from "./types.ts";
-import type { ToolExposure } from "./config.ts";
 
 // Compact token count for display: 1432 -> "1.4k", 144000 -> "144k". Keeps list
 // rows short while staying legible.
@@ -30,12 +29,4 @@ export function formatContextUsage(session: SessionInfo): string {
     out += ` (${formatTokenCount(session.contextTokens)}/${formatTokenCount(session.contextWindow)})`;
   }
   return out;
-}
-
-/**
- * Call hint for the model. A deferred tool is only reachable from a codemode script, so the
- * hint must name the script call instead of a direct one.
- */
-export function intercomCallHint(exposure: ToolExposure, call: string): string {
-  return exposure === "deferred" ? `tools.${call}` : call;
 }

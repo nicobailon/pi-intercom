@@ -33,7 +33,7 @@ import { ReplyTracker } from "./reply-tracker.ts";
 import { homedir } from "node:os";
 import { join as joinPath, resolve as resolvePath } from "node:path";
 import { sameCwd } from "./cwd.ts";
-import { formatContextUsage, intercomCallHint } from "./format-context.ts";
+import { formatContextUsage } from "./format-context.ts";
 import { currentHerdrHost, openProjectPane, resolveTargetInCwd, waitForProjectSession, type ProjectPaneLaunch } from "./project-agent.ts";
 import { relaySenderName } from "./cross-machine-envelope.ts";
 import { runCommand, sendCrossMachine } from "./cross-machine-transport.ts";
@@ -221,6 +221,11 @@ function queuedText(target: string, what = "message"): string {
 // The broker words "no open ask" ("a pending ask") differently from "an open ask between other sessions" ("the pending ask").
 function isClosedAskReply(result: SendResult): boolean {
   return result.code === "E_REPLY_TARGET" && result.reason === "Reply target does not match a pending ask";
+}
+
+// A deferred tool is reachable only from a codemode script, so hints must name the script call.
+function intercomCallHint(exposure: ToolExposure, call: string): string {
+  return exposure === "deferred" ? `tools.${call}` : call;
 }
 
 function closedAskText(target: string, address = target, exposure: ToolExposure = "direct"): string {
