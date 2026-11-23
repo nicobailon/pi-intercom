@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { formatTokenCount, formatContextUsage } from "./format-context.ts";
+import { formatTokenCount, formatContextUsage, intercomCallHint } from "./format-context.ts";
 import type { SessionInfo } from "./types.ts";
 
 const base: SessionInfo = { id: "s1", cwd: "/w", model: "m", pid: 1, startedAt: 0, lastActivity: 0 };
@@ -28,4 +28,9 @@ test("formatContextUsage renders nothing when percent is unknown (never a stale 
   assert.equal(formatContextUsage(base), "");
   // Tokens present but no percent (e.g. right after a compaction) still renders nothing.
   assert.equal(formatContextUsage({ ...base, contextTokens: 100, contextWindow: 200 }), "");
+});
+
+test("intercomCallHint names the script call only for a deferred tool", () => {
+  assert.equal(intercomCallHint("direct", 'intercom({ action: "reply" })'), 'intercom({ action: "reply" })');
+  assert.equal(intercomCallHint("deferred", 'intercom({ action: "reply" })'), 'tools.intercom({ action: "reply" })');
 });
