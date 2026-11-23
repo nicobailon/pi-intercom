@@ -43,6 +43,9 @@ export interface CrossMachineConfig {
 
 export type ProjectPlacement = "pane" | "space";
 
+/** How the intercom tool reaches the model: declared, or deferred for codemode scripts. */
+export type ToolExposure = "direct" | "deferred";
+
 export interface HerdrConfig {
   /** Herdr app: where a project pane opens for a folder outside the caller's space. */
   projectPlacement: ProjectPlacement;
@@ -76,6 +79,12 @@ export interface IntercomConfig {
   /** Show reply hint in incoming messages (default: true) */
   replyHint: boolean;
 
+  /**
+   * Register the intercom tool without declaring it, so it costs no prompt space and is
+   * called from codemode scripts instead (default: direct).
+   */
+  toolExposure: ToolExposure;
+
   /** Cross-machine discovery and SSH relay settings. */
   crossMachine: CrossMachineConfig;
 
@@ -94,6 +103,7 @@ const defaults: IntercomConfig = {
   busyDelivery: "steer",
   enabled: true,
   replyHint: true,
+  toolExposure: "direct",
   crossMachine: {
     machineName: defaultMachineName(hostname()),
     remoteCommand: "pi-intercom",
@@ -183,6 +193,13 @@ export function loadConfig(): IntercomConfig {
         throw new Error(`"replyHint" must be a boolean`);
       }
       config.replyHint = parsedConfig.replyHint;
+    }
+
+    if (Object.hasOwn(parsedConfig, "toolExposure")) {
+      if (parsedConfig.toolExposure !== "direct" && parsedConfig.toolExposure !== "deferred") {
+        throw new Error(`"toolExposure" must be "direct" or "deferred"`);
+      }
+      config.toolExposure = parsedConfig.toolExposure;
     }
 
     if (Object.hasOwn(parsedConfig, "status")) {

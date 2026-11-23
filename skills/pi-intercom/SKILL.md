@@ -11,6 +11,17 @@ description: |
 
 The `intercom` tool description lists each action's call shape. This skill adds the rules agents get wrong.
 
+## When the tool is not in your tool list
+
+With `toolExposure: "deferred"` in the intercom config, the tool is registered but not declared, so it takes no prompt space. Reach it from a codemode script instead, with the same arguments as the cheat sheet below:
+
+```js
+const calls = await tools.intercom({ action: "list" });
+text(calls);
+```
+
+`await searchTools("intercom")` confirms it is callable and `await describeTool("intercom")` returns the full signature. Incoming messages still arrive as chat messages, so answer a waiting ask with `await tools.intercom({ action: "reply", message: "..." })`.
+
 ## Cheat sheet
 
 ```text

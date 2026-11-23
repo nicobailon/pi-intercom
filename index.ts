@@ -9,7 +9,7 @@ import { SessionListOverlay, type SessionListSelection } from "./ui/session-list
 import { HandoverPicker, type HandoverPickerResult, type RemoteSessionLister } from "./ui/handover-picker.ts";
 import { ComposeOverlay, type ComposeResult } from "./ui/compose.ts";
 import { InlineMessageComponent } from "./ui/inline-message.ts";
-import { getAskTimeoutMs, getIntercomScopeId, loadConfig, setIntercomScopeId, type IntercomConfig } from "./config.ts";
+import { getAskTimeoutMs, getIntercomScopeId, loadConfig, setIntercomScopeId, type IntercomConfig, type ToolExposure } from "./config.ts";
 import { EXTENSION_BUS_FEATURE } from "./types.ts";
 import type { Attachment, BrokerMessage, Message, MessageControl, MessageReceiptStatus, SessionInfo, SessionRegistration } from "./types.ts";
 import {
@@ -223,8 +223,13 @@ function isClosedAskReply(result: SendResult): boolean {
   return result.code === "E_REPLY_TARGET" && result.reason === "Reply target does not match a pending ask";
 }
 
-function closedAskText(target: string, address = target): string {
-  return `Reply to "${target}" was not delivered: the broker can no longer match it to an open ask, for example because the asker disconnected or the broker restarted. To deliver the content, send it as a new message without replyTo: intercom({ action: "send", to: "${address}", message: "..." }).`;
+// A deferred tool is reachable only from a codemode script, so hints must name the script call.
+function intercomCallHint(exposure: ToolExposure, call: string): string {
+  return exposure === "deferred" ? `tools.${call}` : call;
+}
+
+function closedAskText(target: string, address = target, exposure: ToolExposure = "direct"): string {
+  return `Reply to "${target}" was not delivered: the broker can no longer match it to an open ask, for example because the asker disconnected or the broker restarted. To deliver the content, send it as a new message without replyTo: ${intercomCallHint(exposure, `intercom({ action: "send", to: "${address}", message: "..." })`)}.`;
 }
 
 const LATE_REPLY_NOTE = "The ask was no longer open, so the reply was delivered as a regular message.";
@@ -634,9 +639,10 @@ function currentTmuxPane(): string | undefined {
   const pane = process.env.TMUX_PANE?.trim();
   return pane ? pane : undefined;
 }
-function formatIntercomContactSnippet(sessionId: string): string {
-  return `Use pi-intercom: intercom({ action: "send", to: "${sessionId}", message: "..." })`;
+function formatIntercomContactSnippet(sessionId: string, exposure: ToolExposure = "direct"): string {
+  return `Use pi-intercom: ${intercomCallHint(exposure, `intercom({ action: "send", to: "${sessionId}", message: "..." })`)}`;
 }
+
 function formatSessionLabel(session: SessionInfo, duplicates: Set<string>, idPrefix = session.id.slice(0, 8)): string {
   if (!session.name) {
     return session.id;
@@ -1381,14 +1387,16 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     }
     const injectedMessage = { ...entry.message, injectedAt: Date.now() };
     const replyCommand = delivery === "steer" && entry.replyCommand && entry.message.expectsReply
-      ? `intercom({ action: "reply", replyTo: ${JSON.stringify(entry.message.id)}, message: "..." })`
+      ? intercomCallHint(config.toolExposure, `intercom({ action: "reply", replyTo: ${JSON.stringify(entry.message.id)}, message: "..." })`)
       : entry.replyCommand;
     const deliveredEntry = { ...entry, message: injectedMessage, replyCommand };
     replyTracker.queueTurnContext({ from: entry.from, message: injectedMessage, receivedAt: Date.now() });
     const senderDisplay = injectedMessage.crossMachine
       ? `${relaySenderName(injectedMessage.crossMachine.origin)} · unverified cross-machine`
       : entry.from.name || entry.from.id.slice(0, 8);
-    const replyInstruction = replyCommand ? `\n\nTo reply, use the intercom tool: ${replyCommand}` : "";
+    const replyInstruction = replyCommand
+      ? `\n\nTo reply, use the intercom tool${config.toolExposure === "deferred" ? " from a codemode script" : ""}: ${replyCommand}`
+      : "";
     const deliveryMetadata = formatInboundDeliveryMetadata(injectedMessage);
     const trigger = delivery === "trigger" && shouldTriggerInboundMessage(entry, forceTrigger);
     const triggerContext = trigger ? getLiveContext(runtimeContext, generation) : undefined;
@@ -1504,9 +1512,9 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
       : "";
     const bodyText = `${receivedMessage.content.text}${attachmentText}`;
     const replyCommand = config.replyHint && receivedMessage.crossMachine
-      ? `intercom({ action: "send", to: ${JSON.stringify(relaySenderName(receivedMessage.crossMachine.origin))}, message: "..." })`
+      ? intercomCallHint(config.toolExposure, `intercom({ action: "send", to: ${JSON.stringify(relaySenderName(receivedMessage.crossMachine.origin))}, message: "..." })`)
       : config.replyHint && receivedMessage.expectsReply
-        ? `intercom({ action: "reply", message: "..." })`
+        ? intercomCallHint(config.toolExposure, `intercom({ action: "reply", message: "..." })`)
         : undefined;
     replyTracker.recordIncomingMessage(from, receivedMessage, receiverReceivedAt);
     emitMessageReceipt(receivedMessage.id, "acknowledged", "accepted by receiver");
@@ -1993,7 +2001,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
       if (activeReplyMismatch) {
         const senderLabel = activeReplyMismatch.from.name || activeReplyMismatch.from.id;
         return {
-          content: [{ type: "text", text: `This turn is responding to an intercom ask from "${senderLabel}". Use intercom({ action: "reply", message: "..." }) or set replyTo: "${activeReplyMismatch.message.id}". Refusing non-reply send to "${targetDisplay}" to avoid a misdirected reply.` }],
+          content: [{ type: "text", text: `This turn is responding to an intercom ask from "${senderLabel}". Use ${intercomCallHint(config.toolExposure, `intercom({ action: "reply", message: "..." })`)} or set replyTo: "${activeReplyMismatch.message.id}". Refusing non-reply send to "${targetDisplay}" to avoid a misdirected reply.` }],
           details: { error: true, replyTo: activeReplyMismatch.message.id },
         };
       }
@@ -2027,7 +2035,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
         if (effectiveReplyTo && isClosedAskReply(result)) {
           dismissIncomingAsk(effectiveReplyTo);
           return {
-            content: [{ type: "text", text: closedAskText(display, to ?? target.id) }],
+            content: [{ type: "text", text: closedAskText(display, to ?? target.id, config.toolExposure) }],
             details: { ...deliveryDetails(result), error: true },
           };
         }
@@ -2682,6 +2690,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
   pi.registerTool(defineTool({
     name: "intercom",
     label: "Intercom",
+    exposure: config.toolExposure,
     description: `Send a message to another pi session running on this machine.
 Use this to communicate findings, request help, or coordinate work with other sessions.
 
@@ -3068,7 +3077,7 @@ Usage:
                 dismissIncomingAsk(target.message.id);
               }
               return {
-                content: [{ type: "text", text: closedAsk ? closedAskText(target.from.name || target.from.id) : undeliveredText(target.from.name || target.from.id, result) }],
+                content: [{ type: "text", text: closedAsk ? closedAskText(target.from.name || target.from.id, undefined, config.toolExposure) : undeliveredText(target.from.name || target.from.id, result) }],
                 details: { ...deliveryDetails(result), ...(closedAsk ? { error: true } : {}) },
               };
             }
@@ -3217,7 +3226,7 @@ Usage:
     }
     const sessionId = contactClient.sessionId;
     if (!sessionId || !getLiveContext(liveContext, commandGeneration)) return;
-    const snippet = formatIntercomContactSnippet(sessionId);
+    const snippet = formatIntercomContactSnippet(sessionId, config.toolExposure);
     if (insertIntoEditor(liveContext, snippet)) {
       notifyIfLive(liveContext, `Inserted intercom contact target: ${sessionId}`, "info", commandGeneration);
       return;
