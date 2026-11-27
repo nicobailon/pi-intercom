@@ -6,6 +6,7 @@ import { createRequire } from "module";
 import net from "net";
 import { randomUUID } from "crypto";
 import { createMessageReader, writeMessage } from "./framing.ts";
+import { processIdentity } from "./process-identity.ts";
 import {
   ensureIntercomRuntimeDir,
   getAgentDirPath,
@@ -270,7 +271,7 @@ function acquireSpawnLock(): boolean {
   const maxRetries = 5;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
-      writeFileSync(BROKER_SPAWN_LOCK, `${process.pid}\n${Date.now()}\n`, {
+      writeFileSync(BROKER_SPAWN_LOCK, `${process.pid}\n${Date.now()}\n${processIdentity(process.pid)?.start ?? ""}\n`, {
         flag: "wx",
         mode: INTERCOM_RUNTIME_FILE_MODE,
       });
@@ -300,16 +301,28 @@ function isSpawnLockStale(): boolean {
   }
 
   try {
-    const [pidLine = "", createdAtLine = "0"] = readFileSync(BROKER_SPAWN_LOCK, "utf-8").trim().split("\n");
+    const [pidLine = "", createdAtLine = "0", startLine = ""] = readFileSync(BROKER_SPAWN_LOCK, "utf-8").trim().split("\n");
     const pid = Number.parseInt(pidLine, 10);
     const createdAt = Number.parseInt(createdAtLine, 10);
+    const recordedStart = startLine.trim();
     const ageMs = Date.now() - createdAt;
 
     if (Number.isFinite(pid)) {
-      try {
-        process.kill(pid, 0);
-      } catch {
-        // The process that created the lock is gone.
+      // Identity, not existence. `process.kill(pid, 0)` only proves that SOME
+      // process has this number; the kernel reassigns PIDs, so a stale lock can
+      // look alive and block the broker from ever starting. Locks written by an
+      // older version carry no start time; for those we fall back to the age
+      // check below rather than trusting existence.
+      const identity = processIdentity(pid);
+      if (!identity) {
+        // No such process: the lock is stale.
+        return true;
+      }
+      if (recordedStart === "" || identity.start === recordedStart) {
+        // Same process (or a pre-upgrade lock we cannot compare): fall through
+        // to the age check, which is what decides today.
+      } else {
+        // Same number, different process: the lock is stale.
         return true;
       }
     }

@@ -5,6 +5,7 @@ import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 import { IntercomClient, IntercomSessionHeldError, type SendResult } from "./broker/client.ts";
 import { spawnBrokerIfNeeded } from "./broker/spawn.ts";
+import { shouldReclaimWhileBlocked } from "./broker/session-reclaim.ts";
 import { SessionListOverlay, type SessionListSelection } from "./ui/session-list.ts";
 import { HandoverPicker, type HandoverPickerResult, type RemoteSessionLister } from "./ui/handover-picker.ts";
 import { ComposeOverlay, type ComposeResult } from "./ui/compose.ts";
@@ -748,6 +749,8 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
   // Retrying a held session id cannot succeed until its holder exits, so background reconnects stop
   // until the next session start (/reload) or a successful manual connect.
   let sessionHeldBlocked = false;
+  /** When the block started, in wall-clock ms, or null when not blocked. */
+  let sessionHeldSinceMs: number | null = null;
   let shuttingDown = false;
   let disposed = true;
   let runtimeStarted = false;
@@ -1639,8 +1642,22 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     }
   }
   function scheduleReconnect(): void {
-    if (disposed || shuttingDown || sessionHeldBlocked || reconnectTimer || reconnectPromise || !getLiveContext()) {
+    if (disposed || shuttingDown || reconnectTimer || reconnectPromise || !getLiveContext()) {
       return;
+    }
+    // A block set by a held-session error used to stop reconnection entirely:
+    // clearing it required a SUCCESSFUL connect, which cannot happen while
+    // reconnection is disabled. A transient identity conflict therefore became
+    // a permanent absence (field report 2026-11-27). Give it a deadline instead.
+    if (sessionHeldBlocked) {
+      if (!shouldReclaimWhileBlocked({
+        blockedSinceMs: sessionHeldSinceMs,
+        nowMs: Date.now(),
+      })) {
+        return;
+      }
+      sessionHeldBlocked = false;
+      sessionHeldSinceMs = null;
     }
     const scheduledGeneration = runtimeGeneration;
     reconnectTimer = setTimeout(() => {
@@ -1657,6 +1674,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
   function reportSessionHeld(ctx: ExtensionContext, generation: number, error: IntercomSessionHeldError): void {
     if (sessionHeldBlocked || !getLiveContext(ctx, generation)) return;
     sessionHeldBlocked = true;
+    sessionHeldSinceMs = Date.now();
     const message = `Intercom is offline: session id ${currentIntercomSessionId} is held by process ${error.holder.pid} in ${error.holder.cwd}. Close that session and run /reload, or give this session its own PI_INTERCOM_STABLE_ID.`;
     notifyIfLive(ctx, message, "warning", generation);
     pi.appendEntry("intercom_session_held", {
@@ -1700,6 +1718,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
         client = nextClient;
         reconnectAttempt = 0;
         sessionHeldBlocked = false;
+        sessionHeldSinceMs = null;
         return nextClient;
       } catch (error) {
         if (client === nextClient) {
@@ -2138,6 +2157,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     outboxRequestIds.clear();
     reconnectAttempt = 0;
     sessionHeldBlocked = false;
+    sessionHeldSinceMs = null;
     clearReconnectTimer();
     clearStartupConnectTimer();
     clearNamePollTimer();
